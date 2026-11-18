@@ -89,7 +89,10 @@ def build_command(spec: RenderSpec, ass_path: Path | None) -> tuple[list[str], s
         add(f"drawtext={fontarg}text='{_dt(spec.credit)}':fontsize=40:fontcolor=white@0.85:borderw=3"
             f":bordercolor=black@0.7:x=(w-text_w)/2:y=h*0.05")
     if spec.progress_bar:
-        add(f"drawbox=x=0:y=ih-14:w='max(2,iw*t/{dur:.2f})':h=14:color=0xFFE500@0.9:t=fill")
+        # A 14 px strip that slides in from the left as the clip plays. (An animated drawbox
+        # is rejected by newer FFmpeg builds, which evaluate it before the first frame.)
+        chain.append(f"color=c=0xFFE500:s=1080x14:r={spec.fps}:d={dur:.3f}[pbar]")
+        add(f"[pbar]overlay=x='-w+w*t/{dur:.3f}':y=H-h:eof_action=pass")
 
     cmd = [ffmpeg_bin(), "-y", "-v", "error", "-ss", f"{spec.start:.3f}", "-t", f"{dur:.3f}", "-i", str(spec.source)]
     audio_map: list[str] = []
