@@ -1,15 +1,19 @@
 """Platform providers. `available_providers()` returns only the ones the user has connected."""
 from .base import GameHit, ProviderError, SourceHit, StreamerHit
+from .kick import KickProvider
+from .twitch import TwitchProvider
+from .youtube import YouTubeProvider
+
+_FACTORIES = (("twitch", TwitchProvider), ("youtube", YouTubeProvider), ("kick", KickProvider))
 
 
 def available_providers() -> dict:
     out = {}
-    for name, factory in (("twitch", "TwitchProvider"), ("youtube", "YouTubeProvider"), ("kick", "KickProvider")):
+    for name, factory in _FACTORIES:
         try:
-            mod = __import__(f"clipfarm.providers.{name}", fromlist=[factory])
-            out[name] = getattr(mod, factory)()
+            out[name] = factory()
         except ProviderError:
-            continue
+            continue  # not connected yet
     return out
 
 

@@ -34,7 +34,7 @@ $triple = (rustc -vV | Select-String "host:").ToString().Split(" ")[1]
 .\.venv\Scripts\pyinstaller --noconfirm --onefile --name "clipfarm-engine-$triple" `
   --add-data "clipfarm/schema.sql;clipfarm" `
   --collect-submodules uvicorn --collect-data cv2 --collect-all faster_whisper --collect-all ctranslate2 `
-  --collect-submodules yt_dlp --collect-all keyring --hidden-import win32ctypes.core `
+  --collect-submodules yt_dlp --collect-all keyring --hidden-import win32ctypes.core --collect-submodules clipfarm `
   --noconsole run_engine.py
 New-Item -ItemType Directory -Force ..\app\src-tauri\binaries | Out-Null
 Copy-Item "dist\clipfarm-engine-$triple.exe" ..\app\src-tauri\binaries\ -Force

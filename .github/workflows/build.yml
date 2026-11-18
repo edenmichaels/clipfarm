@@ -64,7 +64,7 @@ jobs:
             --add-data "clipfarm/schema.sql;clipfarm" `
             --collect-submodules uvicorn --collect-data cv2 `
             --collect-all faster_whisper --collect-all ctranslate2 `
-            --collect-submodules yt_dlp --collect-all keyring --hidden-import win32ctypes.core `
+            --collect-submodules yt_dlp --collect-all keyring --hidden-import win32ctypes.core --collect-submodules clipfarm `
             run_engine.py
           New-Item -ItemType Directory -Force ..\app\src-tauri\binaries | Out-Null
           Copy-Item dist\clipfarm-engine-x86_64-pc-windows-msvc.exe ..\app\src-tauri\binaries\
