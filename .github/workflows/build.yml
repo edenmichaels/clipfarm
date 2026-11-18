@@ -64,7 +64,7 @@ jobs:
             --add-data "clipfarm/schema.sql;clipfarm" `
             --collect-submodules uvicorn --collect-data cv2 `
             --collect-all faster_whisper --collect-all ctranslate2 `
-            --collect-submodules yt_dlp --hidden-import keyring.backends.Windows `
+            --collect-submodules yt_dlp --collect-all keyring --hidden-import win32ctypes.core `
             run_engine.py
           New-Item -ItemType Directory -Force ..\app\src-tauri\binaries | Out-Null
           Copy-Item dist\clipfarm-engine-x86_64-pc-windows-msvc.exe ..\app\src-tauri\binaries\
@@ -76,15 +76,27 @@ jobs:
           $env:CLIPFARM_PORT = "47999"
           $env:CLIPFARM_DATA_DIR = "$env:RUNNER_TEMP\cf-smoke"
           $p = Start-Process -FilePath dist\clipfarm-engine-x86_64-pc-windows-msvc.exe -PassThru
-          $ok = $false
-          for ($i = 0; $i -lt 60; $i++) {
-            Start-Sleep -Seconds 2
-            try { $r = Invoke-RestMethod http://127.0.0.1:47999/health; if ($r.ok) { $ok = $true; break } } catch {}
+          $failed = $false
+          try {
+            $up = $false
+            for ($i = 0; $i -lt 60; $i++) {
+              Start-Sleep -Seconds 2
+              try { if ((Invoke-RestMethod http://127.0.0.1:47999/health).ok) { $up = $true; break } } catch {}
+            }
+            if (-not $up) { throw "Engine did not start" }
+            foreach ($path in "/settings", "/system", "/dashboard", "/projects", "/clips", "/programs", "/games/trending", "/logs") {
+              $r = Invoke-WebRequest "http://127.0.0.1:47999$path" -SkipHttpErrorCheck
+              Write-Host "$path -> $($r.StatusCode)"
+              if ($r.StatusCode -ne 200) { Write-Host $r.Content; $failed = $true }
+            }
+            (Invoke-RestMethod http://127.0.0.1:47999/system).encoders | Format-Table
+          } catch { Write-Host $_; $failed = $true }
+          finally { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+          if ($failed) {
+            Write-Host "---- engine.log ----"
+            Get-Content "$env:CLIPFARM_DATA_DIR\engine.log" -ErrorAction SilentlyContinue
+            exit 1
           }
-          $sys = Invoke-RestMethod http://127.0.0.1:47999/system
-          $sys.encoders | Format-Table
-          Stop-Process -Id $p.Id -Force
-          if (-not $ok) { Get-Content "$env:CLIPFARM_DATA_DIR\engine.log" -ErrorAction SilentlyContinue; throw "Engine did not start" }
 
       - name: Install UI dependencies and generate icons
         working-directory: app

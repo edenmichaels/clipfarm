@@ -10,6 +10,15 @@ SERVICE = "ClipFarm"
 
 try:
     import keyring  # type: ignore
+    # A packaged (PyInstaller) build loses keyring's backend discovery, so pick the OS backend
+    # explicitly. Windows: Credential Manager. macOS: Keychain.
+    import sys as _sys
+    if _sys.platform == "win32":
+        from keyring.backends.Windows import WinVaultKeyring  # type: ignore
+        keyring.set_keyring(WinVaultKeyring())
+    elif _sys.platform == "darwin":
+        from keyring.backends.macOS import Keyring as _MacKeyring  # type: ignore
+        keyring.set_keyring(_MacKeyring())
 except ImportError:  # keyring is in requirements.txt; this keeps tests runnable without it
     keyring = None
 
