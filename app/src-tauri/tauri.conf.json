@@ -1,0 +1,62 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "ClipFarm",
+  "version": "0.1.0",
+  "identifier": "com.clipfarm.app",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "ClipFarm",
+        "width": 1360,
+        "height": 860,
+        "minWidth": 1100,
+        "minHeight": 700
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' http://127.0.0.1:* https: data: blob:; media-src 'self' http://127.0.0.1:*; connect-src 'self' http://127.0.0.1:* ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; font-src 'self' data:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "nsis"
+    ],
+    "createUpdaterArtifacts": false,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico",
+      "icons/icon.icns"
+    ],
+    "externalBin": [
+      "binaries/clipfarm-engine"
+    ],
+    "resources": {
+      "../../backend/bin/ffmpeg.exe": "bin/ffmpeg.exe",
+      "../../backend/bin/ffprobe.exe": "bin/ffprobe.exe",
+      "../../backend/assets/fonts/Anton-Regular.ttf": "assets/fonts/Anton-Regular.ttf"
+    },
+    "publisher": "ClipFarm",
+    "shortDescription": "Find, edit and schedule short-form stream clips",
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "displayLanguageSelector": false,
+        "installerIcon": "icons/icon.ico",
+        "startMenuFolder": "ClipFarm"
+      }
+    }
+  }
+}

@@ -1,0 +1,13 @@
+node_modules/
+app/dist/
+app/src-tauri/target/
+app/src-tauri/binaries/
+app/src-tauri/gen/
+backend/.venv/
+backend/build/
+backend/dist/
+backend/bin/*.exe
+backend/assets/fonts/*.ttf
+__pycache__/
+*.spec
+.pytest_cache/
