@@ -231,7 +231,8 @@ def test_ppv_ranks_above_pool_when_it_projects_higher(fresh_db):
     assert vals == sorted(vals, reverse=True)
     mins = forecast.pc_minutes_per_clip()
     for r in rows:
-        assert r["aud_per_pc_hour"] == pytest.approx(r["rank_value"] * 60 / mins, abs=0.01)
+        # rank_value is stored rounded to 3 dp, so allow that rounding (x 60 / minutes) in the comparison
+        assert r["aud_per_pc_hour"] == pytest.approx(r["rank_value"] * 60 / mins, abs=0.0005 * 60 / mins + 0.011)
 
 
 def test_pool_ranks_first_when_it_genuinely_projects_higher(fresh_db):
