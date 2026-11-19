@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 
 from .. import compliance, db
+from ..campaigns import autopilot, matching, rules
 from ..discovery.service import rank_game
 from ..editing.hooks import generate_package
 from ..editing.layout import Box
@@ -64,6 +65,13 @@ def project_tick(payload: dict, ctx: JobContext) -> None:
         if not ok:
             ctx.log(f"Skipping {s['display_name']}: {reason}", "warn")
             continue
+        left = autopilot.quota_left(p, s["id"])
+        if left == 0:
+            continue            # auto-pilot: today's clip quota for this streamer is used up
+        # Don't pile up fetches when a tick comes round before the last fetch ran (slow network, paused).
+        if db.q1("""SELECT 1 FROM jobs WHERE kind='fetch_sources' AND status IN ('queued','running')
+                    AND project_id=? AND json_extract(payload,'$.streamer_id')=?""", (pid, s["id"])):
+            continue
         enqueue("fetch_sources", {"project_id": pid, "streamer_id": s["id"]}, pid, priority=2)
     if p["game_id"]:
         rank_game(p["game_id"])
@@ -85,6 +93,9 @@ def fetch_sources(payload: dict, ctx: JobContext) -> None:
         hits += prov.clips(s["platform_user_id"], days=2, featured=False, n=30)
         hits += prov.vods(s["platform_user_id"], n=2)
         _ensure_chat_logger(s)
+    elif s["platform"] == "kick":
+        ctx.log(f"{s['display_name']} is on Kick: Kick's official API has no clips or VODs, so ClipFarm "
+                "can't clip Kick streams. Use their Twitch/YouTube channel if they have one.", "warn")
     elif hasattr(prov, "vods"):
         hits += prov.vods(s["platform_user_id"], n=2)
     new = 0
@@ -146,9 +157,9 @@ def process_source(payload: dict, ctx: JobContext) -> None:
         mid = db.ex("""INSERT INTO moments(source_id, start_sec, end_sec, score, signals, fingerprint, status)
                        VALUES (?,?,?,?,?,?,?)""",
                     (src_id, start, end, score, json.dumps({"clip_views": views}), fp, status))
-        if status == "queued":
+        if status == "queued" and autopilot.quota_left(p, src["streamer_id"]) != 0:
             enqueue("render_moment", {"project_id": pid, "moment_id": mid, "media": str(path),
-                                      "media_offset": 0.0}, pid, priority=3)
+                                      "media_offset": 0.0, "streamer_id": src["streamer_id"]}, pid, priority=3)
         else:
             db.ex("UPDATE sources SET status='processed' WHERE id=?", (src_id,))
         return
@@ -179,6 +190,9 @@ def process_source(payload: dict, ctx: JobContext) -> None:
             clip_offsets.append((off, c["view_count"] or 0))
     scorer.boost_with_clip_views(moments, clip_offsets)
     ctx.log(f"VOD {src['platform_id']}: {len(moments)} moment(s) above threshold")
+    left = autopilot.quota_left(p, src["streamer_id"])
+    if left is not None:
+        moments = sorted(moments, key=lambda m: m.score, reverse=True)[:left]   # best ones first
     for i, m in enumerate(moments):
         fp = dedupe.fingerprint(src["streamer_id"], src["created_at_platform"], m.peak, src["platform_id"])
         if dedupe.is_duplicate(fp):
@@ -188,7 +202,7 @@ def process_source(payload: dict, ctx: JobContext) -> None:
                     (src_id, m.start, m.end, m.score, json.dumps(m.signals), fp))
         section = media.download_section(src["url"], work, f"src{src_id}_m{mid}", m.start, m.end)
         enqueue("render_moment", {"project_id": pid, "moment_id": mid, "media": str(section),
-                                  "media_offset": m.start}, pid, priority=4)
+                                  "media_offset": m.start, "streamer_id": src["streamer_id"]}, pid, priority=4)
         ctx.progress(0.3 + 0.7 * (i + 1) / max(1, len(moments)))
     Path(audio_path).unlink(missing_ok=True)   # audio no longer needed
     if not moments:
@@ -207,10 +221,9 @@ def render_moment(payload: dict, ctx: JobContext) -> None:
     settings = p["settings"]
     streamer = db.q1("SELECT * FROM streamers WHERE id=?", (m["streamer_id"],))
     game = db.q1("SELECT name FROM games WHERE id=?", (p["game_id"],)) if p["game_id"] else {"name": ""}
-    program = db.q1("""SELECT p.* FROM programs p JOIN streamer_programs sp ON sp.program_id=p.id
-                       WHERE sp.streamer_id=? AND p.active=1 ORDER BY p.payout_per_1k DESC LIMIT 1""",
-                    (m["streamer_id"],))
-    reqs = compliance.program_requirements(program["id"] if program else None)
+    program = _campaign_for(m["streamer_id"], settings)
+    req = rules.requirements(program)
+    reqs = {"tags": [t.lstrip("#") for t in req["tags"]], "credit": req["credit"], "disclosure": req["disclosure"]}
 
     media_path = Path(payload["media"])
     offset = payload.get("media_offset", 0.0)
@@ -225,12 +238,14 @@ def render_moment(payload: dict, ctx: JobContext) -> None:
     credit = (reqs["credit"] or "{url}").replace("{url}", platform_url + streamer["login"]) \
         .replace("{name}", streamer["display_name"])
     fc = db.get_setting(f"facecam:{streamer['id']}")   # saved facecam box, if detected before
+    layout, rule_notes, review_flags = rules.choose_layout(settings.get("layout", db.get_setting("layout", "auto")),
+                                                           req["onscreen"], bool(fc))
     render_cfg = db.get_setting("render", {})
     cap_cfg = {**db.get_setting("captions", {}), **settings.get("captions", {})}
     out = storage.media_dir() / "clips" / f"{streamer['login']}_{mid}.mp4"
     result = render(RenderSpec(
         source=media_path, start=max(0.0, start), end=end, out=out,
-        layout=settings.get("layout", db.get_setting("layout", "auto")),
+        layout=layout,
         facecam=Box(**fc) if fc else None, words=words,
         caption_style=cap_cfg.get("style", "bold_pop"), words_per_chunk=cap_cfg.get("words_per_chunk", 3),
         hook=pkg["hook"], credit=credit, progress_bar=settings.get("progress_bar", True),
@@ -244,14 +259,23 @@ def render_moment(payload: dict, ctx: JobContext) -> None:
     if reqs["disclosure"]:
         description += f"\n{reqs['disclosure']}"
     description += f"\nCredit: {credit}"
-    auto = settings.get("auto_approve", False)
+    if req["onscreen"] and layout == rules.FULL_FRAME and result["layout"] != rules.FULL_FRAME:
+        review_flags.append("Campaign needs the full frame but a different layout was rendered.")
+    caption = rules.caption_text(pkg["title"], pkg["description"], pkg["hashtags"], credit, reqs["disclosure"],
+                                 req["tags"])
+    missing = rules.check_caption(caption, req)
+    if missing:
+        review_flags.append("Caption is missing: " + ", ".join(missing))
+    auto = settings.get("auto_approve", False) and not review_flags
     clip_id = db.ex("""INSERT INTO clips(project_id, moment_id, streamer_id, game_id, program_id, file_path, thumb_path,
                          duration_sec, hook_text, title, description, hashtags, layout, caption_style, content_hash,
-                         review_status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                         review_status, rules_applied, review_flags, caption_text, needs_payout_confirm)
+                         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (pid, mid, streamer["id"], p["game_id"], program["id"] if program else None, result["path"],
                      result["thumb"], result["duration"], pkg["hook"], pkg["title"], description,
                      json.dumps(pkg["hashtags"]), result["layout"], cap_cfg.get("style"), result["sha256"],
-                     "approved" if auto else "pending"))
+                     "approved" if auto else "pending", rules.as_json(rule_notes, req), json.dumps(review_flags),
+                     caption, int(program is None)))
     db.ex("UPDATE moments SET status='rendered', transcript=? WHERE id=?", (transcript, mid))
     # Source can be cleaned once no more renders are waiting on it.
     pending = db.q1("""SELECT COUNT(*) n FROM jobs WHERE kind='render_moment' AND status IN ('queued','running')
@@ -264,9 +288,114 @@ def render_moment(payload: dict, ctx: JobContext) -> None:
     emit("clip_ready", clip_id=clip_id, title=pkg["title"], streamer=streamer["display_name"])
 
 
+def _campaign_for(streamer_id: int, settings: dict) -> dict | None:
+    """The campaign a clip is made for: the auto-pilot's pick, else the active campaign with the best
+    projected earnings, else the best rate."""
+    q = settings.get("quotas", {}).get(str(streamer_id))
+    if q and q.get("program_id"):
+        prog = db.q1("SELECT * FROM programs WHERE id=?", (q["program_id"],))
+        if prog:
+            return prog
+    camps = matching.active_campaigns_for(streamer_id)
+    if not camps:
+        return None
+    def value(c):
+        r = db.q1("SELECT MAX(aud_per_pc_hour) v FROM projections WHERE streamer_id=? AND program_id=?",
+                  (streamer_id, c["id"]))
+        return ((r["v"] if r and r["v"] is not None else -1), c["payout_per_1k"] or 0)
+    return max(camps, key=value)
+
+
 @handler("cleanup")
 def cleanup(payload: dict, ctx: JobContext) -> None:
     storage.cleanup()
+
+
+@handler("download_model")
+def download_model_job(payload: dict, ctx: JobContext) -> None:
+    from ..highlights.transcribe import download_model
+    path = download_model(payload.get("size", "small"))
+    ctx.log(f"Speech model ready in {path}")
+    emit("health", message="Speech model downloaded")
+
+
+@handler("pull_llm")
+def pull_llm(payload: dict, ctx: JobContext) -> None:
+    import requests
+    r = requests.post(f"{payload['base_url']}/api/pull", json={"model": payload["model"], "stream": False},
+                      timeout=3600)
+    r.raise_for_status()
+    ctx.log(f"Ollama model {payload['model']} downloaded")
+
+
+@handler("autopilot_tick")
+def autopilot_tick(payload: dict, ctx: JobContext) -> None:
+    s = autopilot.settings()
+    try:
+        matching.match_all()
+        res = autopilot.tick()
+        ctx.log(f"Auto-pilot: {len(res['plan'])} streamer(s) in the plan")
+    finally:
+        if s["enabled"] and not db.q1("SELECT 1 FROM jobs WHERE kind='autopilot_tick' AND status='queued'"):
+            enqueue("autopilot_tick", {}, priority=1, delay_sec=int(s["tick_minutes"]) * 60)
+
+
+@handler("post_due")
+def post_due(payload: dict, ctx: JobContext) -> None:
+    """Upload scheduled posts whose time has come (YouTube API). Manual platforms stay in the
+    'post manually' list until the user pastes the link."""
+    from ..posting import platforms as posting
+    from ..posting.submissions import PostingBlocked, create_submission_item
+    due = db.q("""SELECT p.*, a.platform FROM posts p JOIN accounts a ON a.id=p.account_id
+                  WHERE p.status='scheduled' AND p.manual=0 AND p.scheduled_at <= datetime('now','localtime')""")
+    for post in due:
+        clip = db.q1("SELECT * FROM clips WHERE id=?", (post["clip_id"],))
+        if clip["review_status"] != "approved":
+            continue
+        db.ex("UPDATE posts SET status='uploading' WHERE id=? AND status='scheduled'", (post["id"],))
+        try:
+            res = posting.post(post["platform"], post["account_id"], clip)
+            db.ex("UPDATE posts SET status='posted', posted_at=datetime('now'), url=?, external_id=? WHERE id=?",
+                  (res["url"], res["external_id"], post["id"]))
+            create_submission_item(post["id"])
+            emit("posted", clip_id=clip["id"], url=res["url"])
+        except PostingBlocked as e:
+            db.ex("UPDATE posts SET status='failed', error=? WHERE id=?", (str(e), post["id"]))
+        except Exception as e:
+            db.ex("UPDATE posts SET status='scheduled', error=? WHERE id=?", (str(e)[:500], post["id"]))
+            raise
+    if not db.q1("SELECT 1 FROM jobs WHERE kind='post_due' AND status='queued'"):
+        enqueue("post_due", {}, priority=3, delay_sec=300)
+
+
+@handler("metrics")
+def metrics(payload: dict, ctx: JobContext) -> None:
+    """Pull views for posted YouTube Shorts every 6 hours (others are entered by hand)."""
+    from ..posting.youtube import channel_stats
+    rows = db.q("""SELECT p.id, p.external_id, p.account_id FROM posts p JOIN accounts a ON a.id=p.account_id
+                   WHERE a.platform='youtube' AND p.status='posted' AND p.external_id IS NOT NULL
+                   AND p.posted_at >= datetime('now','-30 days')""")
+    by_acct: dict[int, list] = {}
+    for r in rows:
+        by_acct.setdefault(r["account_id"], []).append(r)
+    for aid, posts in by_acct.items():
+        stats = channel_stats(aid, [p["external_id"] for p in posts])
+        for p in posts:
+            st = stats.get(p["external_id"])
+            if st:
+                db.ex("INSERT OR IGNORE INTO post_metrics(post_id, views, likes, comments) VALUES (?,?,?,?)",
+                      (p["id"], st["views"], st["likes"], st["comments"]))
+    if not db.q1("SELECT 1 FROM jobs WHERE kind='metrics' AND status='queued'"):
+        enqueue("metrics", {}, priority=8, delay_sec=6 * 3600)
+
+
+@handler("health_check")
+def health_check(payload: dict, ctx: JobContext) -> None:
+    from .. import health
+    res = health.run_all(payload.get("only"))
+    bad = [r for r in res if r["status"] == "red"]
+    if bad:
+        emit("health", message=f"{len(bad)} setup problem(s): " + ", ".join(r["title"] for r in bad))
 
 
 def export_clip(clip_id: int, dest_dir: Path) -> dict:
@@ -275,6 +404,10 @@ def export_clip(clip_id: int, dest_dir: Path) -> dict:
     dest_dir.mkdir(parents=True, exist_ok=True)
     dst = dest_dir / Path(c["file_path"]).name
     shutil.copy2(c["file_path"], dst)
-    tags = " ".join("#" + t for t in json.loads(c["hashtags"] or "[]"))
-    dst.with_suffix(".txt").write_text(f"{c['title']}\n\n{c['description']}\n\n{tags}\n", encoding="utf-8")
+    if c.get("caption_text"):
+        text = c["caption_text"] + "\n"
+    else:
+        tags = " ".join("#" + t for t in json.loads(c["hashtags"] or "[]"))
+        text = f"{c['title']}\n\n{c['description']}\n\n{tags}\n"
+    dst.with_suffix(".txt").write_text(text, encoding="utf-8")
     return {"video": str(dst), "caption_file": str(dst.with_suffix(".txt"))}

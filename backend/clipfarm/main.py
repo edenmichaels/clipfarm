@@ -13,18 +13,121 @@ import time
 
 import uvicorn
 
-from . import config, db
+from . import config, db, redact, secrets
 from .jobs import pipeline  # noqa: F401  (registers job handlers)
-from .jobs.engine import Engine
+from .jobs.engine import Engine, enqueue
+
+log = logging.getLogger("clipfarm")
+
+
+class _RedactingStream:
+    """Wraps engine.log/stderr so tracebacks and crash output never contain keys or tokens."""
+    def __init__(self, stream):
+        self._s = stream
+
+    def write(self, text):
+        return self._s.write(redact.redact(text))
+
+    def flush(self):
+        return self._s.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._s, name)
 
 
 def _ensure_stdio() -> None:
     """A windowed (no-console) build has no stdout/stderr; uvicorn and print() would crash.
-    Send them to a log file in the app data folder instead."""
+    Send them to a log file in the app data folder instead. Everything written is redacted."""
     if sys.stdout is None or sys.stderr is None:
-        log = open(config.app_data_dir() / "engine.log", "a", encoding="utf-8", buffering=1)
-        sys.stdout = sys.stdout or log
-        sys.stderr = sys.stderr or log
+        f = open(config.app_data_dir() / "engine.log", "a", encoding="utf-8", buffering=1)
+        sys.stdout = sys.stdout or f
+        sys.stderr = sys.stderr or f
+    sys.stdout = _RedactingStream(sys.stdout)
+    sys.stderr = _RedactingStream(sys.stderr)
+
+
+def wipe_user_data() -> int:
+    """Called by the uninstaller when "delete the application data" is ticked: removes every ClipFarm key
+    from Credential Manager, the encrypted backup and the %APPDATA%\\ClipFarm folder."""
+    import shutil
+    data = config.app_data_dir()
+    ids = []
+    try:
+        db.init_db()
+        ids = [a["id"] for a in db.q("SELECT id FROM accounts")]
+    except Exception:
+        pass
+    n = secrets.wipe_all(ids)
+    try:
+        db.connect().close()
+    except Exception:
+        pass
+    shutil.rmtree(data, ignore_errors=True)
+    return n
+
+
+def self_test(out_path: str) -> int:
+    """`clipfarm-engine.exe --self-test result.json`: checks an installed copy works without a terminal.
+    Renders a short clip (layout, captions, hook, credit) with the bundled FFmpeg/font, round-trips a key
+    through Credential Manager + vault, and runs the offline health checks. Exit code 0 = pass."""
+    import json
+    import subprocess
+    import tempfile
+    from pathlib import Path
+    from . import health
+    from .editing.ffmpeg_util import ffmpeg_bin, probe
+    from .editing.render import RenderSpec, render
+    res: dict = {"ok": False, "steps": {}}
+    try:
+        db.init_db()
+        res["steps"]["data_dir"] = str(config.app_data_dir())
+        res["steps"]["ffmpeg"] = ffmpeg_bin()
+        work = Path(tempfile.mkdtemp(prefix="clipfarm self test "))
+        src = work / "source clip.mp4"
+        subprocess.run([ffmpeg_bin(), "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=1280x720:r=30:d=8",
+                        "-f", "lavfi", "-i", "sine=f=330:d=8", "-shortest", "-c:v", "libx264", "-preset", "ultrafast",
+                        "-c:a", "aac", str(src)], check=True, capture_output=True)
+        words = [{"word": w, "start": 1 + i * 0.4, "end": 1.35 + i * 0.4} for i, w in enumerate("no way that worked".split())]
+        r = render(RenderSpec(src, 0.5, 7.5, work / "out clip.mp4", layout="blur_fill", words=words,
+                              hook="Self test", credit="twitch.tv/clipfarm", quality="fast"))
+        info = probe(Path(r["path"]))
+        assert (info["width"], info["height"]) == (1080, 1920), info
+        res["steps"]["render"] = {"encoder": r["encoder"], "duration": info["duration"], "layout": r["layout"]}
+        secrets.set_secret("selftest_key", "selftest-value-123")
+        assert secrets.get_secret("selftest_key") == "selftest-value-123"
+        secrets.delete_secret("selftest_key")
+        res["steps"]["keys"] = {"keychain": secrets.keychain_backend if secrets.keyring else None,
+                                "error": secrets.keychain_error}
+        checks = health.run_all(["engine", "storage", "keys", "ffmpeg", "font", "gpu"])
+        res["steps"]["health"] = {c["id"]: c["status"] for c in checks}
+        res["ok"] = all(c["status"] != "red" for c in checks)
+    except Exception as e:
+        import traceback
+        res["error"] = redact.redact(f"{e}\n{traceback.format_exc()}")
+    Path(out_path).write_text(json.dumps(res, indent=2), encoding="utf-8")
+    return 0 if res["ok"] else 1
+
+
+def _startup_jobs() -> None:
+    """Restore keys, then queue the quiet start-up checks and the recurring jobs (once each)."""
+    try:
+        ids = [a["id"] for a in db.q("SELECT id FROM accounts")]
+        res = secrets.restore(ids)
+        if res["restored_to_keychain"] or res["backed_up_to_vault"]:
+            db.log("info", "keys", f"Restored {res['restored_to_keychain']} key(s) from the encrypted backup; "
+                                   f"backed up {res['backed_up_to_vault']} key(s).")
+    except Exception as e:
+        db.log("error", "keys", f"Key restore failed: {e}")
+
+    def once(kind: str, delay: int = 0, priority: int = 5, payload: dict | None = None) -> None:
+        if not db.q1("SELECT 1 FROM jobs WHERE kind=? AND status IN ('queued','running')", (kind,)):
+            enqueue(kind, payload or {}, priority=priority, delay_sec=delay)
+
+    once("health_check", delay=3, priority=1)
+    once("post_due", delay=60, priority=3)
+    once("metrics", delay=600, priority=8)
+    if (db.get_setting("autopilot") or {}).get("enabled"):
+        once("autopilot_tick", delay=20, priority=1)
 
 
 def _parent_alive(pid: int) -> bool:
@@ -60,16 +163,26 @@ def _watch_parent() -> None:
 
 
 def main() -> None:
+    if "--wipe-user-data" in sys.argv:
+        n = wipe_user_data()
+        print(f"Removed {n} key(s) and the ClipFarm data folder.")
+        return
+    if "--self-test" in sys.argv:
+        i = sys.argv.index("--self-test")
+        out = sys.argv[i + 1] if len(sys.argv) > i + 1 else str(config.app_data_dir() / "self-test.json")
+        sys.exit(self_test(out))
     _ensure_stdio()
+    logging.basicConfig(level=logging.INFO, stream=sys.stderr)
+    redact.install_logging_filter()
     _watch_parent()
     db.init_db()
+    _startup_jobs()
     workers = int(os.environ.get("CLIPFARM_WORKERS", "2"))
     engine = Engine(workers=workers, render_workers=1)
     engine.start()
 
     from .api import app
 
-    logging.basicConfig(level=logging.INFO, stream=sys.stderr)
     print(f"CLIPFARM_STARTING {config.API_PORT}", flush=True)
     try:
         # log_config=None: keep uvicorn from reconfiguring logging (it assumes a real console).

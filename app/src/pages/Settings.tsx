@@ -1,16 +1,16 @@
 // Settings with tabs: General · Connections · Posting · Rules (mockup layout).
 import { useEffect, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
-import { api } from "../api";
+import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { api, PLATFORM_LABEL } from "../api";
 import { applyAccent } from "../App";
 import Connections from "../components/Connections";
 import Disclaimer from "../components/Disclaimer";
 
-const TABS = ["General", "Connections", "Posting", "Rules"];
+const TABS = ["General", "Connections", "Accounts", "Posting", "Backup", "Rules"];
 const ACCENTS = ["#ffd400", "#3ccf7a", "#4da3ff", "#ff5a7a"];
 
-export default function Settings() {
-  const [tab, setTab] = useState("General");
+export default function Settings({ initialTab }: { initialTab?: string }) {
+  const [tab, setTab] = useState(initialTab && TABS.includes(initialTab) ? initialTab : "General");
   const [s, setS] = useState<any>(null);
   const [sys, setSys] = useState<any>(null);
   const [msg, setMsg] = useState("");
@@ -36,7 +36,7 @@ export default function Settings() {
         <h1>Settings</h1>
         <div className="row">
           {msg && <span className={msg === "Saved" ? "ok-text" : "bad-text"}>{msg}</span>}
-          {tab !== "Connections" && <button className="btn-primary" onClick={save}>Save settings</button>}
+          {!["Connections", "Accounts", "Backup"].includes(tab) && <button className="btn-primary" onClick={save}>Save settings</button>}
         </div>
       </header>
       <div className="row" style={{ gap: 8 }}>
@@ -103,6 +103,12 @@ export default function Settings() {
           </section>
 
           <section className="card stack">
+            <h2 className="accent">Money</h2>
+            <label className="line">USD → AUD exchange rate {num("usd_to_aud", undefined, 0.01, 80)}</label>
+            <span className="muted">Used for every A$ figure. Check the current rate now and then.</span>
+          </section>
+
+          <section className="card stack">
             <h2 className="accent">Appearance</h2>
             <div className="line">Accent colour
               <div className="row" style={{ gap: 8 }}>{ACCENTS.map((c) => (
@@ -121,11 +127,88 @@ export default function Settings() {
           <label className="line">Posts per day per account {num("posting", "posts_per_day_per_account", 1, 60)}</label>
           <label className="line">Posting hours <span>{num("posting", "window_start_hour", 1, 55)} to {num("posting", "window_end_hour", 1, 55)}</span></label>
           <label className="line">Minimum minutes between posts {num("posting", "min_gap_minutes", 1, 60)}</label>
-          <span className="muted">Auto-posting is coming in the next version.</span>
+          <span className="muted">YouTube Shorts upload automatically at the scheduled time once your channel is connected (about 6 a day on Google's free quota). TikTok, Instagram and X are posted by you: ClipFarm suggests the time, copies the caption and adds the "Submit to campaign" checklist item when you paste the link.</span>
         </section>
       )}
 
+      {tab === "Accounts" && <Accounts />}
+      {tab === "Backup" && <Backup />}
+
       {tab === "Rules" && <Disclaimer />}
+    </div>
+  );
+}
+
+
+function Accounts() {
+  const [rows, setRows] = useState<any[]>([]);
+  const [username, setUsername] = useState("");
+  const [msg, setMsg] = useState("");
+  const load = () => {
+    api.get("/accounts").then(setRows).catch((e) => setMsg(e.message));
+    api.get("/settings").then((s) => setUsername(s.content_rewards_username || "")).catch(() => {});
+  };
+  useEffect(() => { load(); }, []);
+  const patch = (a: any, body: any) => api.patch(`/accounts/${a.id}`, body).then(load).catch((e) => setMsg(e.message));
+  return (
+    <section className="card stack" style={{ maxWidth: 760 }}>
+      <h2 className="accent">Posting accounts</h2>
+      <span className="muted">ClipFarm never stores passwords. YouTube signs in with Google (Settings &gt; Connections &gt; Connect YouTube channel); the others are posted by hand for now.</span>
+      <table>
+        <thead><tr><th>Platform</th><th>Handle</th><th>Sign-in</th><th>Followers</th><th>Max posts/day</th></tr></thead>
+        <tbody>{rows.map((a) => (
+          <tr key={a.id}>
+            <td>{PLATFORM_LABEL[a.platform] ?? a.platform}</td>
+            <td>{a.handle}</td>
+            <td><span className={`pill ${a.oauth_status === "connected" ? "ok" : a.oauth_status === "needs_reconnect" ? "bad" : "warn"}`}>
+              {a.oauth_status === "connected" ? "Connected" : a.oauth_status === "needs_reconnect" ? "Reconnect needed" : a.platform === "youtube" ? "Not signed in" : "Manual posting"}</span></td>
+            <td><input type="number" style={{ width: 90 }} defaultValue={a.followers ?? ""} onBlur={(e) => patch(a, { followers: e.target.value === "" ? null : +e.target.value })} /></td>
+            <td><input type="number" style={{ width: 60 }} defaultValue={a.max_posts_per_day ?? ""} placeholder="3" onBlur={(e) => patch(a, { max_posts_per_day: e.target.value === "" ? null : +e.target.value })} /></td>
+          </tr>))}</tbody>
+      </table>
+      <span className="muted small-text">Followers make the view projections fit your accounts. Update them now and then.</span>
+      <label className="line">Content Rewards / Whop username
+        <input style={{ width: 200 }} value={username} onChange={(e) => setUsername(e.target.value)}
+          onBlur={() => api.put("/settings", { content_rewards_username: username }).then(() => setMsg("Saved")).catch((e) => setMsg(e.message))} /></label>
+      {msg && <span className="muted">{msg}</span>}
+    </section>
+  );
+}
+
+function Backup() {
+  const [pw, setPw] = useState("");
+  const [msg, setMsg] = useState("");
+  const [sys, setSys] = useState<any>(null);
+  useEffect(() => { api.get("/system").then(setSys).catch(() => {}); }, []);
+  const doExport = async () => {
+    const path = await saveDialog({ defaultPath: "ClipFarm-backup.clipfarm", filters: [{ name: "ClipFarm backup", extensions: ["clipfarm"] }] });
+    if (!path) return;
+    try { await api.post("/backup/export", { password: pw, path }); setMsg(`Saved to ${path}. Keep the password safe: without it the file can't be opened.`); }
+    catch (e: any) { setMsg(e.message); }
+  };
+  const doImport = async () => {
+    const path = await open({ multiple: false, filters: [{ name: "ClipFarm backup", extensions: ["clipfarm"] }] });
+    if (typeof path !== "string") return;
+    try { const r = await api.post("/backup/import", { password: pw, path }); setMsg(`Imported ${r.secrets} key(s) and ${r.settings} setting(s).`); }
+    catch (e: any) { setMsg(e.message); }
+  };
+  return (
+    <div className="cards2">
+      <section className="card stack">
+        <h2 className="accent">Your keys are safe across updates</h2>
+        <span>API keys and sign-ins are kept in Windows Credential Manager ("ClipFarm"){sys?.keychain ? "" : " (not available on this PC)"} with an encrypted backup at <code>{sys?.vault?.path ?? "%APPDATA%\\ClipFarm\\vault.dat"}</code>{sys?.vault ? ` (${sys.vault.count} item(s), ${sys.vault.protector})` : ""}.</span>
+        <span className="muted">Updating or reinstalling ClipFarm never removes them. Only the uninstaller's "Delete the application data" box (unticked by default) does. New versions install over the top, so you don't need to uninstall to update.</span>
+      </section>
+      <section className="card stack">
+        <h2 className="accent">Move to a new PC</h2>
+        <span className="muted">Export all keys, sign-ins and settings into one password-protected file. Import it on the new PC.</span>
+        <label className="field">Password (8+ characters)<input type="password" value={pw} onChange={(e) => setPw(e.target.value)} /></label>
+        <div className="row" style={{ gap: 8 }}>
+          <button className="btn-primary" onClick={doExport} disabled={pw.length < 8}>Export settings and keys…</button>
+          <button className="btn-ghost" onClick={doImport} disabled={pw.length < 8}>Import…</button>
+        </div>
+        {msg && <span className="muted">{msg}</span>}
+      </section>
     </div>
   );
 }

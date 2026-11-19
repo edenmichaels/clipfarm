@@ -13,7 +13,9 @@ const clippable = (s: any) => s.permission_status === "allowed" || s.permission_
 const bestProgram = (s: any) => [...(s.programs || [])].sort((a, b) => (b.payout_per_1k || 0) - (a.payout_per_1k || 0))[0];
 const programText = (s: any) => {
   const p = bestProgram(s);
-  return p ? `${p.name} · ${p.payout_per_1k != null ? `$${p.payout_per_1k}/1k` : "rate ?"}` : "none known";
+  if (!p) return "No payout";
+  const est = s.projection ? ` · est. A$${s.projection.per_clip_likely?.toFixed(2)}/clip` : "";
+  return `${p.name} · ${p.payout_per_1k != null ? `$${p.payout_per_1k}/1k` : "pool"}${est}`;
 };
 const nice = (a: string) => ({ youtube_shorts: "Shorts", tiktok: "TikTok", instagram_reels: "Reels", x: "X" } as any)[a] || a;
 
@@ -32,6 +34,7 @@ export default function StreamerTable({ gameId, streamers, selected, onSelect, r
   const [view, setView] = useState<"table" | "cards">("table");
   const [editing, setEditing] = useState<any>(null);
   const [hideBlocked, setHideBlocked] = useState(true);
+  const [why, setWhy] = useState<any>(null);
 
   const rows = useMemo(() => {
     const r = streamers.filter((s) => !hideBlocked || s.permission_status !== "prohibited");
@@ -78,7 +81,7 @@ export default function StreamerTable({ gameId, streamers, selected, onSelect, r
                   <td><Perm s={s} /></td>
                   <td>{programText(s)}</td>
                   <td className="muted">{(s.best_platforms || []).map(nice).join(", ") || "—"}</td>
-                  <td><button onClick={() => setEditing(s)}>Edit</button></td>
+                  <td className="row" style={{ gap: 4, flexWrap: "nowrap" }}><button onClick={() => setWhy(s)}>Why?</button><button onClick={() => setEditing(s)}>Edit</button></td>
                 </tr>);
             })}</tbody>
           </table>
@@ -96,12 +99,14 @@ export default function StreamerTable({ gameId, streamers, selected, onSelect, r
               <div className="row" style={{ gap: 8 }}>
                 <button className={selected.includes(s.id) ? "seg on" : "seg"} onClick={() => toggle(s)}>{selected.includes(s.id) ? "Selected" : "Select"}</button>
                 <button onClick={() => setEditing(s)}>Edit</button>
+                <button onClick={() => setWhy(s)}>Why this rank?</button>
               </div>
             </div>
           ))}
         </div>
       )}
       {editing && <EditStreamer s={editing} gameId={gameId} onClose={() => { setEditing(null); reload(); }} />}
+      {why && <WhyRanked s={why} gameId={gameId} onClose={() => setWhy(null)} />}
     </div>
   );
 }
@@ -158,6 +163,32 @@ function EditStreamer({ s, gameId, onClose }: { s: any; gameId: number; onClose:
         </div>
         {err && <span className="bad-text">{err}</span>}
         <div className="row"><button className="btn-primary" onClick={save}>Save</button><button className="btn-ghost" onClick={onClose}>Cancel</button></div>
+      </div>
+    </div>
+  );
+}
+
+function WhyRanked({ s, gameId, onClose }: { s: any; gameId: number; onClose: () => void }) {
+  const [w, setW] = useState<any>(null);
+  useEffect(() => { api.get(`/streamers/${s.id}/why?game_id=${gameId}`).then(setW).catch(() => {}); }, [s.id]);
+  return (
+    <div className="modal" onClick={onClose}>
+      <div className="modal-body stack tight" onClick={(e) => e.stopPropagation()} role="dialog" aria-label={`Why ${s.display_name} is ranked here`}>
+        <h2>Why {s.display_name} is ranked here</h2>
+        {!w ? <span className="muted">Loading…</span> : <>
+          <b>Clip Profit Score {w.score != null ? Math.round(w.score) : "—"} / 100</b>
+          {w.parts.map((p: any) => (
+            <div key={p.part} className="why-part">
+              <span>{p.label}</span>
+              <div className="bar thin"><div style={{ width: `${Math.round(p.value * 100)}%` }} /></div>
+              <span className="num">+{p.points}</span>
+            </div>))}
+          {w.projections.slice(0, 4).map((p: any) => (
+            <span key={`${p.program_id}-${p.platform}`} className="small-text">{p.program} on {nice(p.platform)}: A${p.per_clip_likely?.toFixed(2)}/clip (A${p.per_clip_low?.toFixed(0)}–{p.per_clip_high?.toFixed(0)}), A${p.aud_per_pc_hour?.toFixed(2)} per PC-hour
+              {p.details?.effective_min_views ? ` · needs ${p.details.effective_min_views.toLocaleString()} views before a clip pays` : ""}{p.warnings?.length ? " · ⚠ some campaign fields need confirming" : ""}</span>))}
+          {w.notes.map((n: string, i: number) => <span key={i} className="warn-text">{n}</span>)}
+        </>}
+        <div><button className="btn-ghost" onClick={onClose}>Close</button></div>
       </div>
     </div>
   );

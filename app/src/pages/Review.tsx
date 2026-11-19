@@ -83,6 +83,10 @@ function ClipEditor({ clip, onDone }: { clip: any; onDone: () => void }) {
           <h2 style={{ fontSize: 18 }}>{clip.streamer}</h2>
           <span className="muted">· {clip.program || "no program"}{clip.score != null ? ` · highlight score ${clip.score.toFixed(2)}` : ""}</span>
         </div>
+        {JSON.parse(clip.review_flags || "[]").map((f: string, i: number) => <span key={i} className="warn-text">⚠ {f}</span>)}
+        {clip.rules_applied && (() => { const r = JSON.parse(clip.rules_applied); return (r.program || r.notes?.length) ? (
+          <span className="muted small-text">Campaign rules applied{r.program ? ` (${r.program})` : ""}: {[...(r.tags || []), r.disclosure, ...(r.notes || [])].filter(Boolean).join(" · ")}</span>) : null; })()}
+        {clip.needs_payout_confirm ? <span className="warn-text">No active campaign for this streamer: this clip won't be paid.</span> : null}
         <label className="field">Hook (first 2 seconds)<input value={c.hook_text || ""} onChange={(e) => setC({ ...c, hook_text: e.target.value })} /></label>
         <label className="field">Title<input value={c.title || ""} onChange={(e) => setC({ ...c, title: e.target.value })} /></label>
         <label className="field">Description<textarea rows={3} value={c.description || ""} onChange={(e) => setC({ ...c, description: e.target.value })} /></label>
@@ -93,6 +97,7 @@ function ClipEditor({ clip, onDone }: { clip: any; onDone: () => void }) {
           <button className="btn-ghost" onClick={doExport} disabled={!clip.file_path}>Export MP4 + caption</button>
         </div>
         {msg && <span className="ok-text">{msg}</span>}
+        {clip.review_status === "approved" && <Schedule clip={clip} onMsg={setMsg} />}
         <div className="checklist" style={{ marginTop: 4 }}>
           <h3>Rewards checklist</h3>
           {checklist.map((i, k) => <span key={k} className={i.done ? "ok-text" : "muted"}>{i.done ? "✓" : "○"} {i.item}</span>)}
@@ -100,5 +105,26 @@ function ClipEditor({ clip, onDone }: { clip: any; onDone: () => void }) {
         <span className="muted" style={{ fontSize: 12 }}>Editing the hook here updates the post text. The text burned into the video stays as rendered.</span>
       </div>
     </section>
+  );
+}
+
+function Schedule({ clip, onMsg }: { clip: any; onMsg: (m: string) => void }) {
+  const [accounts, setAccounts] = useState<any[]>([]);
+  const [pick, setPick] = useState<number[]>([]);
+  useEffect(() => { api.get("/accounts").then(setAccounts).catch(() => {}); }, []);
+  const go = async () => {
+    try {
+      const r = await api.post(`/clips/${clip.id}/schedule`, { account_ids: pick });
+      onMsg(r.map((x: any) => `${x.account}: ${x.scheduled_at}${x.manual ? " (post it from Post & Submit)" : ""}`).join(" · "));
+    } catch (e: any) { onMsg(e.message); }
+  };
+  return (
+    <div className="stack tight">
+      <b>Schedule</b>
+      <div className="row" style={{ gap: 6 }}>{accounts.map((a) => (
+        <button key={a.id} className={pick.includes(a.id) ? "pill-btn on" : "pill-btn"}
+          onClick={() => setPick(pick.includes(a.id) ? pick.filter((x) => x !== a.id) : [...pick, a.id])}>{a.handle}</button>))}</div>
+      <div><button className="btn-ghost" onClick={go} disabled={!pick.length}>Pick times for me</button></div>
+    </div>
   );
 }

@@ -1,8 +1,41 @@
 // Thin client for the local Python API. The Tauri shell tells us the port + per-launch token.
+// If the engine crashes, the shell restarts it on the same port/token; meanwhile requests wait and
+// retry, and the UI shows "Reconnecting" (see onConnection) instead of a blank screen.
 import { invoke } from "@tauri-apps/api/core";
 
 let base = "http://127.0.0.1:47821"; // replaced by the real port from the shell
 let token = "";
+
+export type ConnState = "connecting" | "connected" | "reconnecting" | "failed";
+let state: ConnState = "connecting";
+const listeners = new Set<(s: ConnState, detail?: string) => void>();
+
+function setState(s: ConnState, detail?: string) {
+  if (s === state && !detail) return;
+  state = s;
+  listeners.forEach((l) => l(s, detail));
+}
+export function onConnection(cb: (s: ConnState, detail?: string) => void): () => void {
+  listeners.add(cb);
+  cb(state);
+  return () => { listeners.delete(cb); };
+}
+export const connectionState = () => state;
+
+async function healthy(): Promise<boolean> {
+  try {
+    const r = await fetch(`${base}/health`);
+    return r.ok;
+  } catch { return false; }
+}
+
+async function waitForEngine(tries: number): Promise<boolean> {
+  for (let i = 0; i < tries; i++) {
+    if (await healthy()) { setState("connected"); return true; }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return false;
+}
 
 export async function initApi(): Promise<void> {
   try {
@@ -12,29 +45,52 @@ export async function initApi(): Promise<void> {
   } catch {
     /* running in a plain browser during dev: use defaults, backend in dev mode (no token) */
   }
+  // The shell reports engine restarts so the UI can show "Reconnecting" straight away.
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    await listen<{ state: string; message?: string }>("engine-status", (e) => {
+      if (e.payload.state === "restarting") setState("reconnecting", e.payload.message);
+      else if (e.payload.state === "failed") setState("failed", e.payload.message);
+      else if (e.payload.state === "running") waitForEngine(60);
+    });
+  } catch { /* not in Tauri */ }
   // Wait for the sidecar to come up (first launch can take a few seconds).
-  for (let i = 0; i < 60; i++) {
-    try {
-      const r = await fetch(`${base}/health`);
-      if (r.ok) return;
-    } catch {}
-    await new Promise((r) => setTimeout(r, 500));
-  }
-  throw new Error("The ClipFarm engine didn't start. Check Logs or reinstall.");
+  if (await waitForEngine(60)) return;
+  setState("failed");
+  throw new Error("The ClipFarm engine didn't start. Open Logs, or reinstall ClipFarm.");
+}
+
+class ApiError extends Error {
+  detail: any;
+  status: number;
+  constructor(msg: string, status: number, detail: any) { super(msg); this.status = status; this.detail = detail; }
 }
 
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const r = await fetch(base + path, {
-    method,
-    headers: { "Content-Type": "application/json", "X-ClipFarm-Token": token },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  if (!r.ok) {
-    const detail = await r.json().catch(() => ({}));
-    const d = detail.detail;
-    throw new Error(typeof d === "string" ? d : d?.message ? `${d.message} ${(d.reasons || []).join(" ")}` : r.statusText);
+  // Retry while the engine is restarting (network error), up to ~60 s.
+  for (let attempt = 0; ; attempt++) {
+    let r: Response;
+    try {
+      r = await fetch(base + path, {
+        method,
+        headers: { "Content-Type": "application/json", "X-ClipFarm-Token": token },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+    } catch (e) {
+      if (attempt >= 120) { setState("failed"); throw new Error("Lost connection to the ClipFarm engine."); }
+      setState("reconnecting");
+      await new Promise((res) => setTimeout(res, 500));
+      continue;
+    }
+    if (state !== "connected") setState("connected");
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({}));
+      const d = detail.detail;
+      const msg = typeof d === "string" ? d : d?.message ? `${d.message} ${(d.reasons || []).join(" ")}`.trim() : r.statusText;
+      throw new ApiError(msg, r.status, d);
+    }
+    return r.json();
   }
-  return r.json();
 }
 
 export const api = {
@@ -58,3 +114,10 @@ export const PERMISSIONS = {
   unknown: { label: "Unknown", cls: "warn" },
   prohibited: { label: "Prohibited", cls: "bad" },
 } as const;
+
+export const PLATFORM_LABEL: Record<string, string> = {
+  youtube_shorts: "Shorts", tiktok: "TikTok", instagram_reels: "Reels", x: "X", youtube: "YouTube", instagram: "Instagram",
+};
+export const aud = (v: number | null | undefined, digits = 2) => (v == null ? "—" : `A$${v.toFixed(digits)}`);
+export const band = (lo?: number | null, li?: number | null, hi?: number | null) =>
+  li == null ? "—" : `${aud(li)} (${aud(lo ?? 0, 0)}–${aud(hi ?? 0, 0)})`;

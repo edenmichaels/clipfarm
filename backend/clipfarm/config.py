@@ -50,6 +50,12 @@ DEFAULT_SETTINGS: dict = {
                 "window_start_hour": 9, "window_end_hour": 22, "min_gap_minutes": 90},
     "block_unknown_permission": True,   # unknown streamers need explicit opt-in per streamer
     "ranking_refresh_minutes": 30,
+    # --- v0.2: projections & auto-pilot ---
+    "usd_to_aud": 1.53,                 # exchange rate used for every A$ figure (edit in Settings)
+    "game_launch_date": "2026-11-19",   # day 0 of the launch-hype curve
+    "pc_minutes_per_clip": 4.0,         # until enough real render times are measured
+    "autopilot": {"enabled": False, "max_clips_per_day": 20, "max_posts_per_account_per_day": 3,
+                  "min_projected_aud_per_clip": 0.50, "clips_per_streamer_per_day": 4, "tick_minutes": 30},
 }
 
 API_HOST = "127.0.0.1"

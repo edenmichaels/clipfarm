@@ -96,11 +96,18 @@ class Engine:
 
     def _loop(self, where: str) -> None:
         while not self.stop_event.is_set():
-            job = self._claim(where)
-            if not job:
-                self.stop_event.wait(1.0)
-                continue
-            self._run(job)
+            try:
+                job = self._claim(where)
+                if not job:
+                    self.stop_event.wait(1.0)
+                    continue
+                self._run(job)
+            except Exception as e:      # a worker must never die (it used to on a failing job's error event)
+                try:
+                    db.log("error", "engine", f"Worker error: {e}")
+                except Exception:
+                    pass
+                self.stop_event.wait(2.0)
 
     def _run(self, job: dict) -> None:
         ctx = JobContext(job)
@@ -115,7 +122,8 @@ class Engine:
             if str(c) == "paused":
                 db.ex("UPDATE jobs SET status='paused' WHERE id=?", (job["id"],))
         except Exception as e:
-            err = f"{e}\n{traceback.format_exc(limit=3)}"
+            from ..redact import redact
+            err = redact(f"{e}\n{traceback.format_exc(limit=3)}")
             retry = job["attempts"] < job["max_attempts"] and not getattr(e, "permanent", False)
             if retry:
                 delay = 30 * 2 ** (job["attempts"] - 1)
@@ -123,7 +131,7 @@ class Engine:
                       (err, f"+{delay} seconds", job["id"]))
             else:
                 db.ex("UPDATE jobs SET status='failed', error=? WHERE id=?", (err, job["id"]))
-                emit("error", job_id=job["id"], kind=job["kind"], message=str(e))
+                emit("error", job_id=job["id"], job_kind=job["kind"], message=redact(str(e)))
             db.log("error", job["kind"], str(e), job["id"])
 
 

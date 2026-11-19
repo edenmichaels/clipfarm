@@ -53,8 +53,47 @@ class YouTubeProvider:
         return out
 
     def vods(self, channel_id: str, n: int = 5) -> list[SourceHit]:
-        res = self._get("search", {"part": "snippet", "channelId": channel_id, "type": "video",
-                                   "eventType": "completed", "order": "date", "maxResults": n})
-        return [SourceHit("vod", i["id"]["videoId"], f"https://www.youtube.com/watch?v={i['id']['videoId']}",
-                          i["snippet"]["title"], None, None, i["snippet"]["publishedAt"])
-                for i in res.get("items", [])]
+        """Finished livestreams, newest first. Uses the uploads playlist (about 3 quota units) instead of
+        search.list (100 units), which ran out the daily quota within an hour when called every tick."""
+        ch = self._get("channels", {"part": "contentDetails", "id": channel_id}).get("items", [])
+        if not ch:
+            return []
+        uploads = ch[0]["contentDetails"]["relatedPlaylists"]["uploads"]
+        items = self._get("playlistItems", {"part": "contentDetails,snippet", "playlistId": uploads,
+                                            "maxResults": 15}).get("items", [])
+        if not items:
+            return []
+        ids = [i["contentDetails"]["videoId"] for i in items]
+        vids = self._get("videos", {"part": "liveStreamingDetails,contentDetails,statistics,snippet",
+                                    "id": ",".join(ids)}).get("items", [])
+        out = []
+        for v in vids:
+            live = v.get("liveStreamingDetails") or {}
+            if not live.get("actualEndTime"):
+                continue        # only finished streams are VODs we can analyse
+            out.append(SourceHit("vod", v["id"], f"https://www.youtube.com/watch?v={v['id']}",
+                                 v["snippet"]["title"], int(v.get("statistics", {}).get("viewCount", 0) or 0),
+                                 _iso_duration(v.get("contentDetails", {}).get("duration", "")),
+                                 live.get("actualStartTime") or v["snippet"]["publishedAt"]))
+        return out[:n]
+
+    def channel_by_handle(self, handle: str) -> StreamerHit | None:
+        """@handle -> channel (1 quota unit)."""
+        items = self._get("channels", {"part": "snippet,statistics", "forHandle": handle.lstrip("@")}).get("items", [])
+        if not items:
+            return None
+        c = items[0]
+        stats = c.get("statistics", {})
+        return StreamerHit("youtube", c["id"], c["snippet"].get("customUrl", handle), c["snippet"]["title"], False,
+                           followers=None if stats.get("hiddenSubscriberCount") else int(stats.get("subscriberCount", 0)),
+                           avatar_url=c["snippet"].get("thumbnails", {}).get("default", {}).get("url"))
+
+
+def _iso_duration(s: str) -> float | None:
+    """'PT3H12M5S' -> seconds."""
+    import re
+    m = re.fullmatch(r"P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", s or "")
+    if not m:
+        return None
+    d, h, mi, se = (int(x or 0) for x in m.groups())
+    return float(d * 86400 + h * 3600 + mi * 60 + se)

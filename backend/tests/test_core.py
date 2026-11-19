@@ -186,9 +186,9 @@ def test_render_moment_pipeline(fresh_db, sample_video):
     from clipfarm.jobs.engine import JobContext, enqueue
     sid = _streamer("program_member")
     gid = db.ex("INSERT INTO games(name) VALUES ('Grand Theft Auto VI')")
-    prog = db.ex("""INSERT INTO programs(name, operator, payout_per_1k, required_tags, required_credit, disclosure)
-                    VALUES ('Test Program','whop',1.5,'["gta6clips"]','Credit: {url}','#partner')""")
-    db.ex("INSERT INTO streamer_programs VALUES (?,?)", (sid, prog))
+    prog = db.ex("""INSERT INTO programs(name, operator, payout_per_1k, required_tags, required_credit, disclosure, joined)
+                    VALUES ('Test Program','whop',1.5,'["gta6clips"]','Credit: {url}','#partner', 1)""")
+    db.ex("INSERT INTO streamer_programs(streamer_id, program_id, confirmed) VALUES (?,?,1)", (sid, prog))
     db.set_setting("disclaimer_accepted", True)
     pid = db.ex("INSERT INTO projects(name, game_id, duration_sec, output_settings, status) VALUES (?,?,?,?, 'running')",
                 ("t", gid, 3600, json.dumps({"layout": "blur_fill"})))

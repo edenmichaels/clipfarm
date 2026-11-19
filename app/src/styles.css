@@ -139,3 +139,16 @@ td.actions > div { display: flex; gap: 6px; justify-content: flex-end; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 
 @media (max-width: 1100px) { .tiles { grid-template-columns: repeat(3, minmax(0, 1fr)); } .options { grid-template-columns: 1fr; } }
+
+/* v0.2 */
+.reconnect { position: fixed; top: 0; left: 0; right: 0; z-index: 50; background: #3a2c0a; color: #ffd98a; padding: 10px 18px; display: flex; gap: 10px; align-items: center; border-bottom: 1px solid #6b5216; }
+.spinner.small { width: 16px; height: 16px; border-width: 2px; margin: 0; }
+.banner { display: flex; gap: 12px; align-items: center; justify-content: space-between; background: #3a1418; border: 1px solid #6b2630; color: #ffc2c8; padding: 10px 14px; border-radius: 10px; margin-bottom: 14px; }
+.light { display: inline-block; width: 12px; height: 12px; border-radius: 50%; flex: none; margin-top: 4px; }
+.light.green { background: #3ccf7a; } .light.yellow { background: #f5a524; } .light.red { background: #ff5a6a; }
+.health-row { display: flex; gap: 12px; align-items: flex-start; padding: 12px 14px; border-bottom: 1px solid #222731; }
+.health-row:last-child { border-bottom: none; }
+.flag { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 6px; background: #3a2c0a; color: #ffd98a; margin: 1px 3px 1px 0; }
+.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.why-part { display: grid; grid-template-columns: 1fr 70px 60px; gap: 8px; align-items: center; }
+.small-text { font-size: 12px; }

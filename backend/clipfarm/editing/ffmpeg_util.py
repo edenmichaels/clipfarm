@@ -9,10 +9,20 @@ import sys
 from functools import lru_cache
 from pathlib import Path
 
-# Installed app: the installer puts bin/ffmpeg.exe and assets/fonts next to the engine exe.
+# Installed app: the shell passes its resource folder (CLIPFARM_RESOURCE_DIR = the install folder, which
+# holds bin/ffmpeg.exe and assets/fonts) and the engine exe sits in the same folder.
 # Dev: backend/bin and backend/assets. Last resort: ffmpeg on PATH.
-_ROOTS = [Path(sys.executable).resolve().parent, Path(getattr(sys, "_MEIPASS", ".")),
-          Path(__file__).resolve().parents[2]]
+def _roots() -> list[Path]:
+    roots = []
+    if os.environ.get("CLIPFARM_RESOURCE_DIR"):
+        roots.append(Path(os.environ["CLIPFARM_RESOURCE_DIR"]))
+    roots += [Path(sys.executable).resolve().parent, Path(__file__).resolve().parents[2]]
+    if getattr(sys, "_MEIPASS", None):
+        roots.append(Path(sys._MEIPASS))
+    return roots
+
+
+_ROOTS = _roots()
 
 
 def _find(name: str) -> str:
@@ -85,7 +95,8 @@ def probe(path: Path) -> dict:
 
 
 def filter_path(p: Path | str) -> str:
-    """Escape a path for use inside an FFmpeg filter argument (Windows drive colons, quotes)."""
+    """Escape a path for use inside an FFmpeg filter argument (Windows drive colons, quotes).
+    Prefer render.py's approach (relative names inside a work folder), which avoids escaping entirely."""
     s = str(Path(p).resolve()).replace("\\", "/")
     return s.replace(":", r"\:").replace("'", r"\'")
 

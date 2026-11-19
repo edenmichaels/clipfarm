@@ -81,6 +81,21 @@ class TwitchProvider:
                 if u:
                     h.avatar_url = u.get("profile_image_url")
 
+    def users_by_login(self, logins: list[str]) -> list[StreamerHit]:
+        """Exact login lookup (used to match campaigns to channels)."""
+        out = []
+        for i in range(0, len(logins), 100):
+            params = [("login", l.lower().lstrip("@")) for l in logins[i:i + 100]]
+            for u in self.http.get("users", self._headers(), params)["data"]:
+                out.append(StreamerHit("twitch", u["id"], u["login"], u["display_name"], False,
+                                       avatar_url=u.get("profile_image_url")))
+        return out
+
+    def search_channels(self, query: str, n: int = 10) -> list[StreamerHit]:
+        data = self.http.get("search/channels", self._headers(), {"query": query, "first": n})["data"]
+        return [StreamerHit("twitch", c["id"], c["broadcaster_login"], c["display_name"], bool(c.get("is_live")),
+                            avatar_url=c.get("thumbnail_url")) for c in data]
+
     def follower_count(self, user_id: str) -> int | None:
         """Total followers. Helix may require a user token for this; returns None if refused."""
         try:

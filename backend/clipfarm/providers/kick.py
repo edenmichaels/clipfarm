@@ -50,3 +50,15 @@ class KickProvider:
                             s.get("slug", ""), True, viewers=s.get("viewer_count"),
                             title=s.get("stream_title"), avatar_url=s.get("profile_picture"))
                 for s in data]
+
+    def channel_by_slug(self, slug: str) -> StreamerHit | None:
+        data = self.http.get("channels", self._headers(), {"slug": slug.lower()}).get("data", [])
+        if not data:
+            return None
+        c = data[0]
+        return StreamerHit("kick", str(c["broadcaster_user_id"]), c.get("slug", slug), c.get("slug", slug), False)
+
+    # Kick's official public API has no clips or VOD endpoints, so Kick channels can be discovered and
+    # ranked but not clipped. (ClipFarm doesn't use Kick's private v2 endpoints.)
+    def vods(self, channel_id: str, n: int = 5) -> list:
+        return []

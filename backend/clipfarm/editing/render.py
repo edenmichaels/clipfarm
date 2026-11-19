@@ -4,7 +4,9 @@ credit -> audio polish -> encode (GPU if available) -> thumbnail.
 from __future__ import annotations
 
 import hashlib
+import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -42,7 +44,10 @@ def _dt(text: str) -> str:
             .replace("%", r"\%").replace(",", r"\,"))
 
 
-def build_command(spec: RenderSpec, ass_path: Path | None) -> tuple[list[str], str, dict]:
+def build_command(spec: RenderSpec, ass_path: Path | None, workdir: Path | None = None) -> tuple[list[str], str, dict]:
+    """FFmpeg runs with cwd=workdir. The captions file and font are copied there and referenced by plain
+    relative names, so filter strings never contain the user's path (spaces, apostrophes and drive
+    colons in Windows usernames all broke FFmpeg's filter parser)."""
     info = probe(spec.source)
     dur = max(1.0, spec.end - spec.start)
     layout_name = spec.layout
@@ -76,10 +81,21 @@ def build_command(spec: RenderSpec, ass_path: Path | None) -> tuple[list[str], s
         # 1.0 -> 1.06 over 1.5 s then hold; scale+crop keeps it cheap and frame-accurate.
         add("scale=w='trunc(1080*if(lt(t,1.5),1+0.04*t,1.06)/2)*2':h=-2:eval=frame,crop=1080:1920")
     font = default_font()
-    fontarg = f"fontfile='{filter_path(font)}':" if font else ""
-    if ass_path:
-        fontsdir = f":fontsdir='{filter_path(font.parent)}'" if font else ""
-        add(f"ass='{filter_path(ass_path)}'{fontsdir}")
+    if workdir is not None:
+        if font:
+            (workdir / "fonts").mkdir(exist_ok=True)
+            shutil.copy2(font, workdir / "fonts" / ("font" + font.suffix.lower()))
+            fontarg = f"fontfile=fonts/font{font.suffix.lower()}:"
+        else:
+            fontarg = ""
+        if ass_path:
+            shutil.copy2(ass_path, workdir / "captions.ass")
+            add("ass=captions.ass" + (":fontsdir=fonts" if font else ""))
+    else:   # legacy absolute-path form (kept for callers that don't pass a workdir)
+        fontarg = f"fontfile='{filter_path(font)}':" if font else ""
+        if ass_path:
+            fontsdir = f":fontsdir='{filter_path(font.parent)}'" if font else ""
+            add(f"ass='{filter_path(ass_path)}'{fontsdir}")
     if spec.hook:
         size = max(44, min(84, int(1500 / max(len(spec.hook), 1) * 1.6)))  # shrink long hooks to fit
         add(f"drawtext={fontarg}text='{_dt(spec.hook)}':fontsize={size}:fontcolor=white:borderw=6:bordercolor=black"
@@ -119,13 +135,17 @@ def render(spec: RenderSpec) -> dict:
     if spec.words:
         ass_path = build_ass(spec.words, spec.out.with_suffix(".ass"), spec.caption_style,
                              spec.words_per_chunk, offset=spec.start)
-    cmd, codec, meta = build_command(spec, ass_path)
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    if res.returncode != 0 and codec != "libx264":
-        # GPU driver hiccup: retry once on CPU rather than failing the job.
-        spec.encoder = "libx264"
-        cmd, codec, meta = build_command(spec, ass_path)
-        res = subprocess.run(cmd, capture_output=True, text=True)
+    work = Path(tempfile.mkdtemp(prefix="cfr_"))
+    try:
+        cmd, codec, meta = build_command(spec, ass_path, work)
+        res = subprocess.run(cmd, capture_output=True, text=True, cwd=work)
+        if res.returncode != 0 and codec != "libx264":
+            # GPU driver hiccup: retry once on CPU rather than failing the job.
+            spec.encoder = "libx264"
+            cmd, codec, meta = build_command(spec, ass_path, work)
+            res = subprocess.run(cmd, capture_output=True, text=True, cwd=work)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
     if res.returncode != 0:
         raise RuntimeError(f"FFmpeg failed: {res.stderr[-1500:]}")
     thumb = spec.out.with_suffix(".jpg")

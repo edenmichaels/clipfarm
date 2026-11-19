@@ -44,15 +44,22 @@ export default function NewProject({ done }: { done: () => void }) {
     });
     setGame({ id, name: g.name }); setSelected([]); setStep(2); refresh(id);
   };
-  const create = async () => {
+  const create = async (confirmNoPayout = false) => {
     setErr(""); setBusy(true);
     try {
       await api.post("/projects", {
         name: `${game!.name} · ${new Date().toLocaleDateString()}`, game_id: game!.id,
-        streamer_ids: selected, duration_sec: duration, output_settings: out,
+        streamer_ids: selected, duration_sec: duration, output_settings: out, confirm_no_payout: confirmNoPayout,
       });
       done();
-    } catch (e: any) { setErr(e.message); }
+    } catch (e: any) {
+      if (e.status === 409 && e.detail?.needs_confirmation && !confirmNoPayout) {
+        setBusy(false);
+        if (window.confirm(`${e.detail.message}\n\nOK = clip them anyway (no payout). Cancel = go back.`)) return create(true);
+        return;
+      }
+      setErr(e.message);
+    }
     setBusy(false);
   };
   const toggleIn = (arr: string[], v: string) => (arr.includes(v) ? arr.filter((x) => x !== v) : [...arr, v]);
@@ -162,7 +169,7 @@ export default function NewProject({ done }: { done: () => void }) {
           {err && <p className="bad-text">{err}</p>}
           {out.clip.min_sec > out.clip.max_sec && <p className="bad-text">Minimum length is longer than maximum.</p>}
           <div className="row"><button className="btn-ghost" onClick={() => setStep(3)}>Back</button>
-            <button className="btn-primary big" disabled={busy || out.clip.min_sec > out.clip.max_sec} onClick={create}>{busy ? "Starting…" : "Start project"}</button></div>
+            <button className="btn-primary big" disabled={busy || out.clip.min_sec > out.clip.max_sec} onClick={() => create()}>{busy ? "Starting…" : "Start project"}</button></div>
         </section>
       )}
     </div>

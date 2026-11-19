@@ -22,6 +22,7 @@ class RankInput:
     competition_count: int | None     # est. other clippers covering them (None = unknown)
     clips_per_stream_hour: float      # community clip rate — proxy for highlight frequency
     growth_pct: float                 # viewer change over the window, e.g. 0.12 = +12%
+    projected_aud_per_hour: float | None = None   # from campaigns/forecast.py; replaces the raw rate when known
 
 
 def audience_score(avg_viewers: float) -> float:
@@ -29,7 +30,15 @@ def audience_score(avg_viewers: float) -> float:
     return max(0.0, min(1.0, math.log10(max(avg_viewers, 0) + 1) / 5))
 
 
-def payout_score(payout_per_1k: float | None, permission_status: str) -> float:
+AUD_PER_HOUR_MAX = 20.0      # A$20 per hour of PC time or better = full marks
+
+
+def payout_score(payout_per_1k: float | None, permission_status: str,
+                 projected_aud_per_hour: float | None = None) -> float:
+    """Projected A$ per PC-hour when a campaign projection exists (rate, caps, min views, approval,
+    competition, budget and hype all included); otherwise the old rate-based estimate."""
+    if projected_aud_per_hour is not None:
+        return max(0.0, min(1.0, projected_aud_per_hour / AUD_PER_HOUR_MAX))
     if payout_per_1k is None:
         # Allowed-but-unpaid still has value (growing your account), so not zero.
         return 0.15 if permission_status == "allowed" else 0.0
@@ -68,7 +77,7 @@ def clip_profit_score(x: RankInput) -> dict:
         return {"score": 0.0, **parts, "tier": earnings_tier(x.avg_viewers), "blocked": True}
     parts = {
         "audience": audience_score(x.avg_viewers),
-        "payout": payout_score(x.payout_per_1k, x.permission_status),
+        "payout": payout_score(x.payout_per_1k, x.permission_status, x.projected_aud_per_hour),
         "competition": competition_score(x.competition_count),
         "highlight": highlight_score(x.clips_per_stream_hour),
         "growth": growth_score(x.growth_pct),
