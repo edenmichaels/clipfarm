@@ -157,3 +157,26 @@ Per-second signals → rolling z-score (5-min window, so a loud streamer isn't "
 - **Facecam detection** is a Haar-cascade heuristic (saved per streamer once found); action tracking follows motion, not objects. A manual box editor is planned.
 - **Follower counts** on Twitch may need a user token; they show "—" if refused.
 - **Earnings tiers are coarse estimates from public viewer counts**, labelled as such everywhere.
+
+---
+
+## v0.2 additions (19 Nov 2026)
+
+| Area | Where | What |
+|---|---|---|
+| Migrations | `backend/clipfarm/migrations.py` | Additive only (v2 columns/tables, v3 seed). Runs on every start; existing rows kept. |
+| Keys | `secrets.py`, `vault.py` | Credential Manager ("ClipFarm") + DPAPI vault `%APPDATA%\ClipFarm\vault.dat`, restored on start; password export/import (scrypt + AES-GCM). |
+| Redaction | `redact.py` | Known secret values + token/key patterns scrubbed from logs, job errors, diagnostics, engine.log. |
+| Setup Health | `health.py`, `netcheck.py`, `pages/Health.tsx` | Green/yellow/red checks with fixes; run quietly on start; banner; diagnostics file. |
+| Campaigns | `campaigns/` (`seed`, `importer`, `matching`, `fields`) | Paste-to-import (no public API), channel matching with confirmation, "needs confirming" flags. |
+| Projections | `campaigns/forecast.py` | Port of `market_forecast.py`: per streamer × campaign × platform, AUD low/likely/high, per clip/day/7d/30d, A$/PC-hour; refit after 2 weeks. |
+| Auto-pilot | `campaigns/autopilot.py` | Status refresh, plan within limits, switch log, drives the "Auto-pilot" project with per-streamer quotas. |
+| Render rules | `campaigns/rules.py` | Tags/credit/disclosure in the caption; overlay/face rules pick a safe layout or flag for review. |
+| Posting | `posting/submissions.py` | Scheduling with safety rules, manual post links, one submission per post, payouts. |
+| Shell | `app/src-tauri/src/main.rs` | Engine watchdog (restart with back-off), resource dir, updater plugin. |
+| Installer | `app/src-tauri/windows/hooks.nsh` | Uninstall keeps data unless "Delete the application data" is ticked; then wipes keys + data. |
+| CI | `.github/workflows/build.yml` | Contract + e2e tests, frozen-engine smoke test, silent install + `--self-test` with no Python/FFmpeg on PATH, optional signed updates. |
+
+Clip Profit Score: the payout part now uses projected A$ per PC-hour (`AUD_PER_HOUR_MAX = 20` = full marks) when a
+campaign projection exists. Streamers without an active campaign are "no payout": auto-pilot never clips them and
+manual clipping asks for confirmation (`confirm_no_payout`).
