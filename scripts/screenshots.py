@@ -49,8 +49,7 @@ with sync_playwright() as p:
         row.click()
         page.wait_for_timeout(1500)
         shot(page, "3b-streamer-panel", full=False)
-        page.keyboard.press("Escape")
-        page.locator(".modal").first.click(position={"x": 5, "y": 5})
+        page.get_by_role("button", name="Close").first.click()
         page.wait_for_timeout(800)
     if page.locator(".srow-main").count():
         attempt("panel", panel)
@@ -60,8 +59,7 @@ with sync_playwright() as p:
             ticks = page.locator("button.tick")       # v0.2 table: tick the first clippable streamers
             for i in range(min(2, ticks.count())):
                 ticks.nth(i).click()
-        nxt = page.get_by_role("button", name="Next", exact=False).last
-        nxt.click()
+        page.get_by_role("button", name="Next", exact=False).last.click(timeout=10000)
         page.wait_for_timeout(2500)
         shot(page, "4-new-project-step3")
         more = page.get_by_role("button", name="Next: output")

@@ -239,6 +239,16 @@ jobs:
         if: failure()
         run: tail -n 60 /tmp/engine-*.log /tmp/vite-*.log || true
 
+      - name: Publish screenshots to the ci-screenshots branch (easy to view on GitHub)
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd shots
+          git init -q && git checkout -q -b ci-screenshots
+          git add -A && git -c user.name="ClipFarm CI" -c user.email="ci@clipfarm.invalid" commit -qm "Screenshots for ${GITHUB_SHA}"
+          git push -qf "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.git" ci-screenshots
+
       - uses: actions/upload-artifact@v4
         with:
           name: ClipFarm-screenshots-before-after
