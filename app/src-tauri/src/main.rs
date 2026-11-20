@@ -8,6 +8,8 @@
 // - Auto-updater: new versions install over the top, so uninstalling is never needed to update.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod campaign_browser;
+
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -177,7 +179,13 @@ fn main() {
             exiting: AtomicBool::new(false),
             crashes: Mutex::new(Vec::new()),
         })
-        .invoke_handler(tauri::generate_handler![backend_info, updates_enabled])
+        .manage(campaign_browser::Pending::default())
+        .invoke_handler(tauri::generate_handler![
+            backend_info,
+            updates_enabled,
+            campaign_browser::open_campaign_browser,
+            campaign_browser::campaign_browser_status
+        ])
         .setup(move |app| {
             // --- start the Python engine sidecar (with watchdog) ---
             spawn_engine(app.handle())?;
@@ -210,7 +218,11 @@ fn main() {
         })
         .on_window_event(|window, event| {
             // Close button = hide to tray, so jobs keep running.
+            // The campaign browser closes normally (its sign-in is kept in the WebView2 profile).
             if let WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() != "main" {
+                    return;
+                }
                 let _ = window.hide();
                 api.prevent_close();
             }

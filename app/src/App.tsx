@@ -6,22 +6,26 @@ import { Brand } from "./components/Icons";
 import Setup from "./pages/Setup";
 import Dashboard from "./pages/Dashboard";
 import NewProject from "./pages/NewProject";
-import Review from "./pages/Review";
-import Programs from "./pages/Programs";
+import MyClips from "./pages/MyClips";
 import Settings from "./pages/Settings";
-import Logs from "./pages/Logs";
-import Health from "./pages/Health";
-import Campaigns from "./pages/Campaigns";
 import Earnings from "./pages/Earnings";
-import Submissions from "./pages/Submissions";
+import { listenForImports } from "./lib/campaignBrowser";
 
-export type Page = "dashboard" | "new" | "review" | "campaigns" | "submissions" | "earnings" | "programs" | "settings" | "health" | "logs";
+/** The five screens in the menu. */
+export type MainPage = "dashboard" | "new" | "clips" | "earnings" | "settings";
+/** Older screen names still work and open where that screen lives now. */
+export type Page = MainPage | "review" | "submissions" | "campaigns" | "programs" | "health" | "logs";
 
-const NAV: [Page, string][] = [
-  ["dashboard", "Home"], ["new", "New Project"], ["review", "Review Clips"], ["campaigns", "Campaigns"],
-  ["submissions", "Post & Submit"], ["earnings", "Earnings"], ["programs", "Rewards Programs"],
-  ["settings", "Settings"], ["health", "Setup Health"], ["logs", "Logs"],
+const NAV: [MainPage, string][] = [
+  ["dashboard", "Home"], ["new", "New Project"], ["clips", "My Clips"], ["earnings", "Earnings"], ["settings", "Settings"],
 ];
+
+/** Where each v0.2 screen moved to in v0.3. */
+const MOVED: Record<string, [MainPage, string]> = {
+  review: ["clips", "To review"], submissions: ["clips", "Post & Submit"],
+  campaigns: ["settings", "Campaigns"], programs: ["settings", "Rewards programs"],
+  health: ["settings", "Setup health"], logs: ["settings", "Logs"],
+};
 
 /** Apply the user's accent colour app-wide. */
 export function applyAccent(color?: string) {
@@ -32,12 +36,13 @@ export default function App() {
   const [ready, setReady] = useState(false);
   const [error, setError] = useState("");
   const [setupDone, setSetupDone] = useState(false);
-  const [page, setPage] = useState<Page>("dashboard");
+  const [page, setPage] = useState<MainPage>("dashboard");
   const [encoder, setEncoder] = useState("");
   const [conn, setConn] = useState<ConnState>("connecting");
   const [connDetail, setConnDetail] = useState("");
   const [banner, setBanner] = useState<string | null>(null);
-  const [settingsTab, setSettingsTab] = useState<string | undefined>(undefined);
+  const [tab, setTab] = useState<string | undefined>(undefined);
+  const [toast, setToast] = useState("");
 
   useEffect(() => onConnection((s, d) => { setConn(s); if (d) setConnDetail(d); }), []);
 
@@ -50,7 +55,16 @@ export default function App() {
     return () => clearInterval(t);
   }, [ready]);
 
-  const go = (p: Page, tab?: string) => { setSettingsTab(tab); setPage(p); };
+  const go = (p: Page, t?: string) => {
+    const [main, movedTab] = MOVED[p] ?? [p as MainPage, undefined];
+    setTab(t ?? movedTab); setPage(main);
+  };
+
+  // "Import this page" in the campaign browser -> engine -> summary toast here.
+  useEffect(() => {
+    if (!ready) return;
+    listenForImports((m) => { setToast(m); window.setTimeout(() => setToast(""), 9000); });
+  }, [ready]);
 
   // Updates install over the top of the current version, so keys and settings are untouched.
   const [update, setUpdate] = useState<any>(null);
@@ -104,7 +118,7 @@ export default function App() {
         if (ev.type === "error") sendNotification({ title: "ClipFarm problem", body: ev.message });
         if (ev.type === "project" && ev.status === "completed") sendNotification({ title: "Project finished", body: `Project #${ev.project_id} is done` });
         if (ev.type === "health") { sendNotification({ title: "ClipFarm setup", body: ev.message }); api.get("/health/checks").then((h) => setBanner(h.summary?.banner ?? null)).catch(() => {}); }
-        if (ev.type === "posted") sendNotification({ title: "Posted", body: "Submit it to the campaign from Post & Submit." });
+        if (ev.type === "posted") sendNotification({ title: "Posted", body: "Submit it to the campaign from My Clips › Post & Submit." });
       } catch { /* ignore malformed events */ }
     };
     return () => es.close();
@@ -146,22 +160,18 @@ export default function App() {
             <button className="btn-primary" onClick={installUpdate} disabled={!!updating}>{updating || "Update now"}</button>
           </div>
         )}
-        {banner && page !== "health" && (
+        {banner && page === "dashboard" && (
           <div className="banner" role="alert">
             <span>{banner}</span>
             <button className="btn-ghost" onClick={() => go("health")}>Fix my setup</button>
           </div>
         )}
-        {page === "dashboard" && <Dashboard go={setPage} />}
-        {page === "new" && <NewProject done={() => setPage("dashboard")} />}
-        {page === "review" && <Review />}
-        {page === "programs" && <Programs />}
-        {page === "settings" && <Settings initialTab={settingsTab} />}
-        {page === "logs" && <Logs />}
-        {page === "health" && <Health go={go} />}
-        {page === "campaigns" && <Campaigns />}
+        {page === "dashboard" && <Dashboard go={go} />}
+        {page === "new" && <NewProject done={() => go("dashboard")} go={go} />}
+        {page === "clips" && <MyClips initialTab={tab} />}
         {page === "earnings" && <Earnings />}
-        {page === "submissions" && <Submissions />}
+        {page === "settings" && <Settings initialTab={tab} go={go} />}
+        {toast && <div className="toast" role="status">{toast}</div>}
       </main>
     </div>
   );

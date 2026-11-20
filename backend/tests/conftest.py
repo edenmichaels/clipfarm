@@ -19,3 +19,15 @@ def _wipe_test_keys():
         secrets.wipe_all()
     except Exception:
         pass
+
+
+@pytest.fixture()
+def fresh_db(tmp_path, monkeypatch):
+    """A new, migrated database with the seed data (campaigns, accounts). Offline LLM."""
+    from clipfarm import db
+    monkeypatch.setenv("CLIPFARM_DATA_DIR", str(tmp_path))
+    db.init_db(tmp_path / "t.db")
+    db.set_setting("media_dir", str(tmp_path / "media"))
+    db.set_setting("transcription", {"enabled": False})
+    db.set_setting("llm", {"provider": "ollama", "base_url": "http://127.0.0.1:9"})
+    return tmp_path

@@ -20,7 +20,7 @@ from pydantic import BaseModel
 
 from . import __version__, compliance, db, secrets, vault
 from . import health as healthmod
-from .campaigns import autopilot, forecast, importer, matching
+from .campaigns import autofill, autopilot, forecast, grouping, importer, matching
 from .discovery import service as disc
 from .posting import submissions as subs
 from .redact import redact
@@ -272,9 +272,12 @@ def create_project(p: ProjectIn):
         raise HTTPException(409, {"message": "These streamers have no active campaign, so their clips won't be "
                                              "paid: " + ", ".join(unpaid) + ". Clip them anyway?",
                                   "needs_confirmation": unpaid, "reasons": []})
+    filled = autofill.fill(p.streamer_ids, p.output_settings.get("platforms"))
+    out = autofill.output_settings(p.output_settings, filled)
+    autofill.remember({**p.output_settings, "duration_sec": p.duration_sec})
     with db.tx():
         pid = db.ex("INSERT INTO projects(name, game_id, duration_sec, output_settings) VALUES (?,?,?,?)",
-                    (p.name, p.game_id, p.duration_sec, json.dumps(p.output_settings)))
+                    (p.name, p.game_id, p.duration_sec, json.dumps(out)))
         for s in p.streamer_ids:
             db.ex("INSERT INTO project_streamers VALUES (?,?)", (pid, s))
     if p.start:
@@ -396,7 +399,28 @@ def dashboard():
                             FROM payouts py JOIN programs pr ON pr.id=py.program_id
                             GROUP BY pr.name, py.status, py.currency"""),
         "disk": storage.disk_status(),
+        **_home_extras(),
     }
+
+
+def _home_extras() -> dict:
+    rate = float(db.get_setting("usd_to_aud", 1.53))
+    week = db.q1("""SELECT COALESCE(SUM(COALESCE(amount_aud, amount * ?)),0) v FROM payouts
+                    WHERE status IN ('estimated','pending','approved','paid')
+                    AND COALESCE(paid_at, submitted_at) >= datetime('now','-7 days')""", (rate,))
+    est = db.q1("""SELECT COALESCE(SUM(projected_aud),0) v FROM posts WHERE status='posted'
+                   AND posted_at >= datetime('now','-7 days')""")
+    to_submit = db.q1("SELECT COUNT(*) n FROM submissions WHERE status='todo'")
+    projects = db.q("""SELECT p.id, p.name, p.status, p.started_at, p.ends_at, p.duration_sec,
+                       (SELECT COUNT(*) FROM clips c WHERE c.project_id=p.id) clips
+                       FROM projects p WHERE p.status IN ('running','paused') ORDER BY p.id DESC""")
+    for p in projects:
+        p["progress"] = db.q1("""SELECT CASE WHEN ? IS NULL OR ? IS NULL THEN 0 ELSE
+                                 MIN(1.0, MAX(0.0, (julianday('now') - julianday(?)) / (julianday(?) - julianday(?))))
+                                 END v""", (p["started_at"], p["ends_at"], p["started_at"], p["ends_at"],
+                                             p["started_at"]))["v"]
+    return {"earnings_week_aud": round(max(week["v"] or 0, est["v"] or 0), 2), "to_submit": to_submit["n"],
+            "projects_progress": projects}
 
 
 @app.get("/logs", dependencies=A)
@@ -535,7 +559,7 @@ def backup_import(b: BackupIn):
 # ---- campaigns -------------------------------------------------------------------------------
 def _campaign_row(r: dict) -> dict:
     for k in ("allowed_platforms", "required_tags", "required_onscreen", "needs_confirming", "channel_hints",
-              "field_sources"):
+              "field_sources", "last_changes"):
         try:
             r[k] = json.loads(r[k]) if r.get(k) else ([] if k not in ("channel_hints", "field_sources") else {})
         except ValueError:
@@ -578,6 +602,51 @@ def campaign_import(b: ImportIn):
             "campaign": _campaign_row(db.q1("SELECT * FROM programs WHERE id=?", (pid,)))}
 
 
+class PageIn(BaseModel):
+    """Sent by the in-app browser ONLY when the user presses "Import this page": the visible page's
+    URL, text and campaign links. ClipFarm never fetches Whop / Content Rewards pages itself."""
+    url: str
+    text: str
+    title: str = ""
+    links: list[dict] = []
+
+
+@app.post("/campaigns/import-page", dependencies=A)
+def campaign_import_page(b: PageIn):
+    if len(b.text) > 400_000:
+        raise HTTPException(413, "That page is too big to import.")
+    src = importer.PageSource(importer.PageInput(url=b.url, text=b.text, title=b.title, links=b.links[:200]))
+    summary = importer.run_import(src)
+    for item in summary.new + summary.updated:
+        matching.match_program(item["id"]) if item["joined"] else None
+    matching.sync_permissions()
+    return summary.as_dict()
+
+
+@app.post("/campaigns/import-paste", dependencies=A)
+def campaign_import_paste(b: ImportIn):
+    summary = importer.run_import(importer.PasteSource(b.text, b.url))
+    if not summary.total:
+        raise HTTPException(400, "Couldn't find any campaign details in that text. Copy the whole campaign page "
+                                 "(Ctrl+A, Ctrl+C) and paste it again.")
+    matching.sync_permissions()
+    return summary.as_dict()
+
+
+@app.post("/campaigns/{pid}/joined", dependencies=A)
+def campaign_set_joined(pid: int, body: dict):
+    """The user ticks "I've joined" after clicking Join themselves on the site."""
+    if not db.q1("SELECT 1 FROM programs WHERE id=?", (pid,)):
+        raise HTTPException(404)
+    j = bool(body.get("joined", True))
+    db.ex("UPDATE programs SET joined=?, joined_at=CASE WHEN ? THEN COALESCE(joined_at, date('now')) ELSE joined_at END "
+          "WHERE id=?", (int(j), int(j), pid))
+    if j:
+        matching.match_program(pid)
+    matching.sync_permissions()
+    return _campaign_row(db.q1("SELECT * FROM programs WHERE id=?", (pid,)))
+
+
 @app.patch("/campaigns/{pid}", dependencies=A)
 def campaign_patch(pid: int, body: dict):
     if not db.q1("SELECT 1 FROM programs WHERE id=?", (pid,)):
@@ -604,6 +673,43 @@ def campaign_match_decide(mid: int, body: dict):
     except KeyError:
         raise HTTPException(404)
     return {"ok": True, "pending": matching.pending_matches()}
+
+
+@app.post("/streamers/{sid}/match", dependencies=A)
+def streamer_match(sid: int):
+    """Called when the user clicks a streamer: assigns a confident match, or returns one question."""
+    try:
+        return matching.match_streamer(sid)
+    except KeyError:
+        raise HTTPException(404)
+
+
+@app.post("/streamers/{sid}/match/answer", dependencies=A)
+def streamer_match_answer(sid: int, body: dict):
+    try:
+        return matching.answer(sid, body.get("program_id"))
+    except KeyError:
+        raise HTTPException(404)
+
+
+@app.get("/games/{game_id}/streamers/grouped", dependencies=A)
+def streamers_grouped(game_id: int):
+    return grouping.grouped(game_id)
+
+
+class FillIn(BaseModel):
+    streamer_ids: list[int]
+    platforms: list[str] | None = None
+
+
+@app.get("/projects/defaults", dependencies=A)
+def project_defaults():
+    return autofill.defaults()
+
+
+@app.post("/projects/autofill", dependencies=A)
+def project_autofill(b: FillIn):
+    return autofill.fill(b.streamer_ids, b.platforms)
 
 
 @app.get("/projections", dependencies=A)

@@ -180,3 +180,16 @@ Per-second signals → rolling z-score (5-min window, so a loud streamer isn't "
 Clip Profit Score: the payout part now uses projected A$ per PC-hour (`AUD_PER_HOUR_MAX = 20` = full marks) when a
 campaign projection exists. Streamers without an active campaign are "no payout": auto-pilot never clips them and
 manual clipping asks for confirmation (`confirm_no_payout`).
+
+## v0.3 additions (20 Nov 2026)
+
+| Area | Where | What |
+|---|---|---|
+| Campaign sources | `backend/clipfarm/campaigns/importer.py` | One `CampaignSource` interface: `PageSource` (in-app browser), `PasteSource`, `ApiSource` (placeholder for an official API). `run_import()` upserts, diffs ("Rate: $1.00/1K → $1.50/1K") and summarises. Rules first, then the LLM for missing fields; LLM values not found in the page text are stored with source `llm` and stay "needs confirming". |
+| In-app browser | `app/src-tauri/src/campaign_browser.rs`, `campaign_browser.js` | Separate WebView2 window (`campaign-browser`) on contentrewards.com; persistent profile. Injected toolbar reads the visible page only on "Import this page" and hands it over by navigating to `https://clipfarm.import/chunk?...`, which `on_navigation` cancels and forwards to the main window. The site gets no Tauri IPC. Nothing clicks or submits. |
+| Match on click | `campaigns/matching.py` (`match_streamer`, `answer`) | Scores a streamer against every campaign (page link 0.97, single-platform name 0.92, multi-platform name 0.85, other platform 0.6). ≥ 0.9 with a clear winner = linked; otherwise one question. Answers in `match_decisions`, never asked again. |
+| Grouped list | `campaigns/grouping.py` | Joined / Worth joining / No campaign, sorted by projected A$ per clip (rank value). Worth joining excludes ended, out-of-budget, ending (< 48 h or < 15 % budget) and non-AU campaigns, and anything under the minimum $/clip. |
+| Project auto-fill | `campaigns/autofill.py` | Whop username, every posting account limited to each campaign's allowed platforms, campaign rules, per-streamer daily quotas from "clips per day". `last_project` setting = next project's defaults. |
+| Routes | `api.py` | `POST /campaigns/import-page`, `/campaigns/import-paste`, `/campaigns/{pid}/joined`, `/streamers/{sid}/match`, `/streamers/{sid}/match/answer`, `GET /games/{id}/streamers/grouped`, `GET /projects/defaults`, `POST /projects/autofill`; `/dashboard` adds progress, clips to submit, earnings this week. |
+| Migration v4 | `migrations.py` | `programs.last_changes`, `import_source`, `last_imported_at`; `streamer_programs.decided_by_user`; `match_decisions` table (v0.2 confirmations copied in as answered). |
+| UI | `app/src` | Menu: Home, New Project, My Clips (Review, Post & Submit), Earnings, Settings (+ Campaigns, Rewards programs, Setup health, Logs). Old page names still route (`MOVED` in `App.tsx`). New Project = 3 steps (`components/StreamerSections.tsx`). |

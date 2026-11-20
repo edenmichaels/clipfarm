@@ -8,7 +8,7 @@ import type { Page } from "../App";
 const UI_FIXES: Record<string, { label: string; run: (go: (p: Page, tab?: string) => void) => Promise<void> | void }> = {
   open_connections: { label: "Open Connections", run: (go) => go("settings", "Connections") },
   open_settings: { label: "Open Settings", run: (go) => go("settings", "General") },
-  open_campaigns: { label: "Open Campaigns", run: (go) => go("campaigns") },
+  open_campaigns: { label: "Open Campaigns", run: (go) => go("settings", "Campaigns") },
   reconnect_youtube: { label: "Reconnect YouTube", run: async () => { const { url } = await api.get("/oauth/youtube/start"); await openUrl(url); } },
   open_ollama: { label: "Get Ollama", run: () => openUrl("https://ollama.com/download") },
   open_youtube_api_library: { label: "Open API Library", run: () => openUrl("https://console.cloud.google.com/apis/library/youtube.googleapis.com") },
@@ -83,7 +83,7 @@ export default function Health({ go }: { go: (p: Page, tab?: string) => void }) 
               <span className="muted small-text">Checked {c.checked_at}</span>
             </div>
             {c.fix && (
-              <button className={c.status === "red" ? "btn-primary" : "btn-ghost"} onClick={() => fix(c.fix)} disabled={busy}>
+              <button onClick={() => fix(c.fix)} disabled={busy}>
                 {UI_FIXES[c.fix]?.label ?? ENGINE_FIX_LABEL[c.fix] ?? "Fix"}
               </button>
             )}

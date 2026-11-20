@@ -252,13 +252,51 @@ def test_health_backup_misc(client, tmp_path):
     res = call(client, "POST", "/backup/import", json={"password": "a long password", "path": str(bfile)})
     assert res["secrets"] >= 1
     d = call(client, "GET", "/dashboard")
-    assert {"clips", "projects_active", "jobs_running", "earnings", "disk"} <= set(d)
+    assert {"clips", "projects_active", "jobs_running", "earnings", "disk", "earnings_week_aud", "to_submit",
+            "projects_progress"} <= set(d)
     assert isinstance(call(client, "GET", "/logs"), list)
     cover("GET", "/events")                       # auth checked in test_auth_and_public_health (stream never ends)
     assert "Google OAuth" in call(client, "GET", "/oauth/youtube/start", expect=400)["detail"]
     r = client.get("/oauth/youtube/callback?code=x&state=bogus")
     cover("GET", "/oauth/youtube/callback")
     assert r.status_code == 400 and "expired" in r.text
+
+
+# ---- v0.3: page import, match on click, grouped list, project auto-fill ------------------------------
+def test_v03_routes(client):
+    from test_v02 import PAGE
+    url = "https://contentrewards.com/c/campaigns/bbd3a963-9a23-457c-bc15-6697971d9902"
+    r = call(client, "POST", "/campaigns/import-page", json={"url": url, "text": PAGE, "title": "x", "links": []})
+    assert r["total"] == 1 and r["summary"].startswith("Imported 1 campaign")
+    call(client, "POST", "/campaigns/import-page", json={"url": url, "text": "x" * 400_001}, expect=413)
+    r = call(client, "POST", "/campaigns/import-paste", json={"text": PAGE.replace("$1.00", "$1.25"), "url": url})
+    assert r["total"] == 1
+    call(client, "POST", "/campaigns/import-paste", json={"text": "nothing here"}, expect=400)
+    kreek = db.q1("SELECT id FROM programs WHERE streamer_label='KreekCraft'")["id"]
+    c = call(client, "POST", f"/campaigns/{kreek}/joined", route="/campaigns/{pid}/joined", json={"joined": False})
+    assert c["joined"] == 0
+    call(client, "POST", f"/campaigns/{kreek}/joined", route="/campaigns/{pid}/joined", json={"joined": True})
+    call(client, "POST", "/campaigns/99999/joined", route="/campaigns/{pid}/joined", json={}, expect=404)
+
+    sid = _streamer("unknown", "kreekcraft")
+    q = call(client, "POST", f"/streamers/{sid}/match", route="/streamers/{sid}/match")
+    assert q["state"] == "ask"
+    a = call(client, "POST", f"/streamers/{sid}/match/answer", route="/streamers/{sid}/match/answer",
+             json={"program_id": kreek})
+    assert a["state"] == "matched"
+    assert call(client, "POST", f"/streamers/{sid}/match", route="/streamers/{sid}/match")["state"] == "matched"
+    call(client, "POST", "/streamers/99999/match", route="/streamers/{sid}/match", expect=404)
+    call(client, "POST", "/streamers/99999/match/answer", route="/streamers/{sid}/match/answer", json={}, expect=404)
+
+    gid = call(client, "POST", "/games", json={"name": "Grand Theft Auto VI"})["id"]
+    g = call(client, "GET", f"/games/{gid}/streamers/grouped", route="/games/{game_id}/streamers/grouped")
+    assert {"joined", "worth_joining", "worth_joining_left_out", "no_campaign", "min_aud_per_clip"} <= set(g)
+
+    d = call(client, "GET", "/projects/defaults")
+    assert d["platforms"] and d["duration_sec"]
+    f = call(client, "POST", "/projects/autofill", json={"streamer_ids": [sid], "platforms": ["tiktok", "x"]})
+    assert f["rewards_account"]["username"] == "grandtheftclipper" and "Whop: grandtheftclipper" in f["summary"]
+    assert f["streamers"][0]["campaign"]["id"] == kreek
 
 
 def test_every_route_is_covered():

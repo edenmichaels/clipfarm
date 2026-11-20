@@ -1,5 +1,6 @@
 // Post & Submit: clips waiting to be posted by hand (TikTok/Instagram/X), and the
 // "Submit to <campaign> on Content Rewards" checklist with the post link ready to copy.
+import { openCampaignBrowser } from "../lib/campaignBrowser";
 import { useEffect, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api, aud, PLATFORM_LABEL } from "../api";
@@ -52,7 +53,7 @@ export default function Submissions() {
             {p.manual ? (
               <div className="row" style={{ gap: 8, flexWrap: "nowrap" }}>
                 <input className="grow" placeholder="After posting, paste the post link here" value={links[p.id] || ""} onChange={(e) => setLinks({ ...links, [p.id]: e.target.value })} />
-                <button className="btn-primary" onClick={() => posted(p)} disabled={!links[p.id]}>I've posted it</button>
+                <button onClick={() => posted(p)} disabled={!links[p.id]}>I've posted it</button>
               </div>
             ) : <span className="muted small-text">Uploads automatically at the scheduled time.</span>}
             {p.error && <span className="bad-text small-text">{p.error}</span>}
@@ -69,7 +70,7 @@ export default function Submissions() {
             </span>
             <span className="row" style={{ gap: 6 }}>
               <button className="btn-ghost" onClick={() => copy(s.post_url, "Post link")}>Copy post link</button>
-              {s.program_url && <button className="btn-primary" onClick={() => openUrl(s.program_url)}>Open campaign</button>}
+              {s.program_url && <button onClick={() => openCampaignBrowser(s.program_url).catch(() => openUrl(s.program_url))}>Open campaign to submit</button>}
             </span>
           </div>))}
       </section>

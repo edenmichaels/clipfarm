@@ -1,5 +1,62 @@
 # ClipFarm changelog
 
+## 0.3.0 — 20 Nov 2026
+
+The app is simpler: five menu items, a three-step New Project, and campaigns that set themselves up.
+
+### Campaigns import themselves (only when you ask)
+- New **campaign browser** inside ClipFarm (Settings › Campaigns › Open campaign browser). It opens Content Rewards;
+  you sign in once and stay signed in.
+- Go to a campaign, or the Discover list, and press **Import this page** on the ClipFarm bar at the bottom of the
+  window. ClipFarm reads only that page. On a list it imports every campaign on it at once.
+- Your AI model (Ollama, or the one set in Settings) fills in anything the page rules missed: rate, minimum views,
+  max per clip, prize pool and target, budget left, end date, platforms, hashtags, credit, disclosure, on-screen
+  rules and whether Australians are paid. Anything it can't back up from the page text is marked **needs confirming**.
+- Importing a campaign you already have updates it and shows what changed, e.g. "Rate: $1.00/1K → $1.50/1K".
+- After each import: "Imported 6 campaigns: 2 new, 3 updated, 1 ended."
+- Pasting a page still works (Settings › Campaigns › Paste instead).
+- ClipFarm never visits Whop or Content Rewards by itself, never runs imports in the background, and never presses
+  Join, Submit or any other button there. You do that yourself. Tests check all three.
+
+### Clicking a streamer finds their campaign
+- Click a streamer and their campaign is matched straight away ("Matched to KreekCraft GTA 6 Clipping").
+- If ClipFarm isn't sure (for example a Kick channel with the same name), it asks you once and remembers the answer.
+  Matches you've already confirmed are never asked again.
+- The streamer panel shows the campaign, its rules, projected earnings and whether you've joined.
+
+### Streamers sorted by campaign and money
+- The streamer list is now three sections, each sorted by projected A$ per clip (hover for the low–high range):
+  **Joined** (ready to clip), **Worth joining** (pays above your minimum, with a one-line reason and an
+  **Open to join** button), and **No campaign** (collapsed; still asks before clipping).
+- Campaigns that have ended, are out of budget, are ending soon or don't pay Australians drop out of Worth joining.
+  Expand "not worth joining right now" to see why.
+- After you press Join on the site, ClipFarm picks it up on your next import, or tick **I've joined**.
+- "Why here?" still shows the full ranking breakdown.
+
+### New Project in three steps, filled in for you
+1. Pick a game, or **Auto-pilot: let ClipFarm choose**.
+2. Pick streamers. Your best joined campaigns are already ticked.
+3. Review and start: run length, clips per day and platforms, with one summary line of everything filled in, e.g.
+   "3 streamers · 3 campaigns · posting to TikTok, Shorts, Reels · Whop: grandtheftclipper".
+- Every project gets your Whop / Content Rewards account, every posting account (including ones you add later),
+  each streamer's campaign with its hashtags, credit, disclosure and overlay rules, and only the platforms that
+  campaign allows.
+- Your last project's choices become the defaults for the next one.
+
+### A simpler app
+- Menu: **Home, New Project, My Clips, Earnings, Settings**.
+  - Review and Post & Submit are tabs in **My Clips**.
+  - Campaigns, Rewards programs, Setup health and Logs are tabs in **Settings**.
+  - The "Fix my setup" banner still shows on Home when something's wrong.
+- Home shows one **New Project** button, running projects with progress, clips waiting for review, clips to
+  submit and earnings this week. Totals and storage are under "Show details".
+- Same spacing, cards, buttons and colours on every screen; fewer borders; one main button per screen; empty
+  screens say what to do next. Nothing was removed.
+
+### Under the hood
+- Database update 4 (automatic, keeps everything): remembers your match answers, what changed in each import and
+  where it came from. Matches you confirmed in 0.2 count as answered.
+
 ## 0.2.0 — 19 Nov 2026
 
 ### Your keys survive updates and reinstalls

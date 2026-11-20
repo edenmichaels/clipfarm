@@ -1,16 +1,26 @@
-// Settings with tabs: General · Connections · Posting · Rules (mockup layout).
+// Settings. v0.3: also home to Campaigns (edit fields, confirm flags), Rewards programs, Setup health
+// and Logs, which used to be separate menu items.
 import { useEffect, useState } from "react";
 import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { api, PLATFORM_LABEL } from "../api";
 import { applyAccent } from "../App";
 import Connections from "../components/Connections";
 import Disclaimer from "../components/Disclaimer";
+import type { Page } from "../App";
+import Campaigns from "./Campaigns";
+import Programs from "./Programs";
+import Health from "./Health";
+import Logs from "./Logs";
 
-const TABS = ["General", "Connections", "Accounts", "Posting", "Backup", "Rules"];
+export const TABS = ["General", "Accounts", "Connections", "Campaigns", "Posting", "Rewards programs", "Backup",
+  "Setup health", "Logs", "Rules"];
+// Tabs that save themselves (no "Save settings" button).
+const SELF_SAVING = ["Connections", "Accounts", "Backup", "Campaigns", "Rewards programs", "Setup health", "Logs"];
 const ACCENTS = ["#ffd400", "#3ccf7a", "#4da3ff", "#ff5a7a"];
 
-export default function Settings({ initialTab }: { initialTab?: string }) {
+export default function Settings({ initialTab, go }: { initialTab?: string; go: (p: Page, tab?: string) => void }) {
   const [tab, setTab] = useState(initialTab && TABS.includes(initialTab) ? initialTab : "General");
+  useEffect(() => { if (initialTab && TABS.includes(initialTab)) setTab(initialTab); }, [initialTab]);
   const [s, setS] = useState<any>(null);
   const [sys, setSys] = useState<any>(null);
   const [msg, setMsg] = useState("");
@@ -36,11 +46,11 @@ export default function Settings({ initialTab }: { initialTab?: string }) {
         <h1>Settings</h1>
         <div className="row">
           {msg && <span className={msg === "Saved" ? "ok-text" : "bad-text"}>{msg}</span>}
-          {!["Connections", "Accounts", "Backup"].includes(tab) && <button className="btn-primary" onClick={save}>Save settings</button>}
+          {!SELF_SAVING.includes(tab) && <button className="btn-primary" onClick={save}>Save settings</button>}
         </div>
       </header>
-      <div className="row" style={{ gap: 8 }}>
-        {TABS.map((t) => <button key={t} className={tab === t ? "tab on" : "tab"} onClick={() => setTab(t)}>{t}</button>)}
+      <div className="tabs" role="tablist">
+        {TABS.map((t) => <button key={t} role="tab" aria-selected={tab === t} className={tab === t ? "tab on" : "tab"} onClick={() => setTab(t)}>{t}</button>)}
       </div>
 
       {tab === "General" && (
@@ -135,6 +145,10 @@ export default function Settings({ initialTab }: { initialTab?: string }) {
       {tab === "Backup" && <Backup />}
 
       {tab === "Rules" && <Disclaimer />}
+      {tab === "Campaigns" && <div className="embedded"><Campaigns /></div>}
+      {tab === "Rewards programs" && <div className="embedded"><Programs /></div>}
+      {tab === "Setup health" && <div className="embedded"><Health go={go} /></div>}
+      {tab === "Logs" && <div className="embedded"><Logs /></div>}
     </div>
   );
 }

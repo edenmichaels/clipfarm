@@ -152,3 +152,60 @@ td.actions > div { display: flex; gap: 6px; justify-content: flex-end; }
 .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .why-part { display: grid; grid-template-columns: 1fr 70px 60px; gap: 8px; align-items: center; }
 .small-text { font-size: 12px; }
+
+/* ======================================================================
+   v0.3 — one design system: same spacing, card style, button sizes and colours on every screen.
+   Fewer borders (cards and tiles sit on a slightly lighter panel), one primary button per screen.
+   ====================================================================== */
+:root { --radius: 12px; --pad: 18px; --gap: 16px; --line-soft: #232833; }
+.card, .tile { border-color: transparent; border-radius: var(--radius); }
+th, td { border-bottom-color: var(--line-soft); }
+button, .btn-ghost { min-height: 36px; border-radius: 10px; padding: 7px 14px; }
+.btn-primary { min-height: 40px; }
+.btn-primary.big { min-height: 46px; }
+.btn-quiet { background: none; border-color: transparent; color: var(--muted); }
+.btn-quiet:hover:not(:disabled) { color: var(--text); border-color: transparent; }
+.link-btn { background: none; border: none; color: var(--muted); padding: 0; min-height: 0; text-decoration: underline; text-underline-offset: 3px; align-self: flex-start; }
+.link-btn:hover { color: var(--text); }
+.small-text { font-size: 12px; }
+
+.page-head { display: flex; justify-content: space-between; align-items: flex-start; gap: var(--gap); flex-wrap: wrap; }
+.page-head > div { display: flex; flex-direction: column; gap: 4px; max-width: 760px; }
+.tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+.embedded > .stack > header h1, .embedded > .stack > .page-head h1 { font-size: 19px; }
+
+/* Home */
+.tiles.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.tile.link { text-align: left; cursor: pointer; min-height: 0; padding: var(--pad); }
+.tile.link:hover { background: var(--panel2); }
+.empty { padding: 14px 0 4px; display: flex; flex-direction: column; gap: 6px; }
+.empty-line { padding: 6px 2px; }
+.project-row { display: flex; align-items: center; gap: var(--gap); padding: 10px 0; border-top: 1px solid var(--line-soft); }
+.project-row:first-of-type { border-top: none; }
+.project-row .bar { margin-top: 8px; }
+
+/* New Project */
+.autopilot-card { display: flex; flex-direction: column; gap: 6px; text-align: left; padding: var(--pad); background: var(--panel); border: 1px dashed var(--line2); max-width: 620px; }
+.autopilot-card b { color: var(--accent); font-size: 15px; }
+.footer-bar { position: sticky; bottom: -28px; display: flex; justify-content: space-between; align-items: center; gap: var(--gap); padding: 14px 0; background: var(--bg); }
+.summary-line { background: var(--panel); border-radius: var(--radius); padding: 14px var(--pad); font-weight: 600; color: var(--soft); }
+.ssection { display: flex; flex-direction: column; gap: 4px; background: var(--panel); border-radius: var(--radius); padding: 12px 14px; }
+.ssection h3 { padding: 2px 2px 6px; }
+.section-toggle { background: none; border: none; padding: 0; min-height: 0; text-align: left; }
+.srow { display: flex; align-items: center; gap: 12px; padding: 8px 6px; border-radius: 10px; }
+.srow:hover { background: var(--panel2); }
+.srow.on { background: #ffd40014; }
+.srow-main { flex: 1; min-width: 0; display: grid; grid-template-columns: minmax(120px, 200px) minmax(90px, 160px) 1fr; align-items: center; gap: 10px; text-align: left; background: none; border: none; padding: 0; min-height: 0; }
+.sname { font-weight: 600; }
+.sreason { color: var(--soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.srow-actions { display: flex; gap: 6px; }
+.money { font-weight: 700; min-width: 92px; text-align: right; cursor: help; }
+.money small { color: var(--muted); font-weight: 400; margin-left: 2px; }
+.tick.ghost { visibility: hidden; }
+.choice { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; padding: 10px 14px; }
+.facts { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; }
+.facts > span { color: var(--muted); }
+.note-ok { color: var(--ok); }
+
+/* toasts */
+.toast { position: fixed; right: 24px; bottom: 24px; max-width: 460px; background: var(--panel2); border-radius: var(--radius); padding: 14px 18px; box-shadow: 0 10px 30px #0008; z-index: 20; }

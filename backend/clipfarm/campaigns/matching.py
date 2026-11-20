@@ -172,3 +172,127 @@ def active_campaigns_for(streamer_id: int) -> list[dict]:
     return db.q("""SELECT p.* FROM programs p JOIN streamer_programs sp ON sp.program_id=p.id
                    WHERE sp.streamer_id=? AND sp.confirmed=1 AND p.active=1 AND p.joined=1
                    AND COALESCE(p.status,'active') IN ('active','ending')""", (streamer_id,))
+
+
+# ======================================================================================
+# v0.3: match on click (from the streamer's side), with answers remembered forever
+# ======================================================================================
+ASK_BELOW = AUTO_LINK
+
+
+def _decisions(streamer_id: int) -> dict:
+    return {r["program_id"]: r["decision"] for r in
+            db.q("SELECT program_id, decision FROM match_decisions WHERE streamer_id=?", (streamer_id,))}
+
+
+def remember(streamer_id: int, program_id: int | None, decision: str) -> None:
+    db.ex("""INSERT INTO match_decisions(streamer_id, program_id, decision) VALUES (?,?,?)
+             ON CONFLICT(streamer_id, program_id) DO UPDATE SET decision=excluded.decision,
+             decided_at=datetime('now')""", (streamer_id, program_id, decision))
+
+
+def _score(streamer: dict, prog: dict) -> tuple[float, str]:
+    """How sure are we this campaign is for this channel? (no network: pure comparison)"""
+    hints = json.loads(prog.get("channel_hints") or "{}")
+    plat, login = streamer["platform"], (streamer["login"] or "").lstrip("@").lower()
+    names = {_norm(streamer.get("login")), _norm(streamer.get("display_name"))} - {""}
+    label = _norm(prog.get("streamer_label"))
+    h = hints.get(plat)
+    if h is not None:
+        value, source = (h["value"], h.get("source", "name")) if isinstance(h, dict) else (h, "name")
+        if value.lstrip("@").lower() == login or _norm(value) in names:
+            if source == "page":
+                return 0.97, f"The campaign page links this {plat.title()} channel"
+            return (0.92, f"Campaign streamer '{prog['streamer_label']}' is this {plat.title()} channel") \
+                if len(hints) == 1 else (0.85, f"Name matches, but the campaign lists channels on "
+                                               f"{', '.join(k.title() for k in hints)}")
+    if label and label in names:
+        if hints and plat not in hints:
+            return 0.6, (f"Same name, but the campaign lists {', '.join(k.title() for k in hints)} "
+                         f"— not {plat.title()}")
+        return 0.9 if not hints else 0.8, f"Name matches '{prog['streamer_label']}'"
+    if label and any(label in n or n in label for n in names if len(n) >= 4):
+        return 0.55, f"Similar name to '{prog['streamer_label']}'"
+    return 0.0, ""
+
+
+def match_streamer(streamer_id: int) -> dict:
+    """Run when the user clicks a streamer. Returns one of:
+    {"state": "matched", "campaign": {...}, "note": "Matched to X", "auto": bool}
+    {"state": "ask", "question": str, "options": [{program_id, name, reason, confidence}]}
+    {"state": "none"}
+    Confirmed links are returned as-is and never asked about again."""
+    s = db.q1("SELECT * FROM streamers WHERE id=?", (streamer_id,))
+    if not s:
+        raise KeyError(streamer_id)
+    decided = _decisions(streamer_id)
+    linked = db.q("""SELECT p.* FROM programs p JOIN streamer_programs sp ON sp.program_id=p.id
+                     WHERE sp.streamer_id=? AND sp.confirmed=1 AND p.active=1
+                     ORDER BY p.joined DESC, COALESCE(p.payout_per_1k,0) DESC""", (streamer_id,))
+    linked = [p for p in linked if decided.get(p["id"]) != "rejected"]
+    if linked:
+        p = linked[0]
+        return {"state": "matched", "campaign": _brief(p), "note": f"Matched to {p['name']}", "auto": False}
+    if decided.get(None) == "none":
+        return {"state": "none"}
+
+    scored = []
+    for p in db.q("""SELECT * FROM programs WHERE active=1 AND streamer_label IS NOT NULL
+                     AND COALESCE(status,'active') != 'ended'"""):
+        if decided.get(p["id"]) == "rejected":
+            continue
+        conf, reason = _score(s, p)
+        if conf > 0:
+            scored.append((conf, p, reason))
+    scored.sort(key=lambda x: (-x[0], -int(x[1]["joined"] or 0)))
+    if not scored:
+        return {"state": "none"}
+    best, p, reason = scored[0]
+    clear_winner = len(scored) == 1 or best - scored[1][0] >= 0.1
+    if best >= AUTO_LINK and clear_winner:
+        link(p["id"], streamer_id, best, reason, confirmed=True)
+        remember(streamer_id, p["id"], "accepted")
+        db.log("info", "campaigns", f"Matched {s['display_name'] or s['login']} to {p['name']} ({reason})")
+        return {"state": "matched", "campaign": _brief(p), "note": f"Matched to {p['name']}", "auto": True,
+                "reason": reason}
+    who = s["display_name"] or s["login"]
+    return {"state": "ask",
+            "question": f"Is {who} on {s['platform'].title()} the streamer in this campaign?",
+            "options": [{"program_id": q["id"], "name": q["name"], "reason": r, "confidence": round(c, 2),
+                         "joined": bool(q["joined"])} for c, q, r in scored[:3]]}
+
+
+def answer(streamer_id: int, program_id: int | None) -> dict:
+    """The user's answer to the match question. program_id None = 'none of these'. Remembered forever."""
+    s = db.q1("SELECT * FROM streamers WHERE id=?", (streamer_id,))
+    if not s:
+        raise KeyError(streamer_id)
+    shown = [o["program_id"] for o in (match_streamer(streamer_id).get("options") or [])]
+    if program_id is None:
+        for pid in shown:
+            remember(streamer_id, pid, "rejected")
+        remember(streamer_id, None, "none")
+        return {"state": "none"}
+    for pid in shown:
+        if pid != program_id:
+            remember(streamer_id, pid, "rejected")
+    remember(streamer_id, program_id, "accepted")
+    link(program_id, streamer_id, 1.0, "Confirmed by you", confirmed=True)
+    db.ex("UPDATE streamer_programs SET decided_by_user=1 WHERE streamer_id=? AND program_id=?",
+          (streamer_id, program_id))
+    p = db.q1("SELECT * FROM programs WHERE id=?", (program_id,))
+    return {"state": "matched", "campaign": _brief(p), "note": f"Matched to {p['name']}", "auto": False}
+
+
+def _brief(p: dict) -> dict:
+    keys = ("id", "name", "url", "campaign_type", "payout_per_1k", "min_views", "min_payout", "max_payout",
+            "pool_size", "view_threshold", "budget_remaining", "budget_total", "ends_at", "status", "joined",
+            "pays_au", "required_credit", "disclosure", "streamer_label")
+    out = {k: p.get(k) for k in keys}
+    for k in ("allowed_platforms", "required_tags", "required_onscreen", "needs_confirming"):
+        try:
+            out[k] = json.loads(p.get(k) or "[]")
+        except (TypeError, ValueError):
+            out[k] = []
+    out["joined"] = bool(p.get("joined"))
+    return out

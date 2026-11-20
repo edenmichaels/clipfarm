@@ -1,8 +1,8 @@
-// Campaigns: sortable table with projected earnings, rules, status and "needs confirming" flags;
-// paste-to-import; streamer matches to confirm; auto-pilot controls and its decision log.
+// Campaigns (Settings › Campaigns): import from the in-app campaign browser (or paste), edit fields,
+// confirm "needs confirming" flags, mark campaigns joined, confirm streamer matches, auto-pilot.
 import { useEffect, useMemo, useState } from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { api, aud, band, PLATFORM_LABEL } from "../api";
+import { onCampaignImport, openCampaignBrowser } from "../lib/campaignBrowser";
 
 const FIELD_LABEL: Record<string, string> = {
   campaign_type: "Type", payout_per_1k: "Rate per 1K views (USD)", min_views: "Min views per clip", min_payout: "Min payout per clip (USD)",
@@ -38,7 +38,8 @@ export default function Campaigns() {
   const [msg, setMsg] = useState(""); const [busy, setBusy] = useState(false);
 
   const load = () => Promise.all([api.get("/campaigns").then(setRows), api.get("/campaigns/matches").then(setMatches)]).catch((e) => setMsg(e.message));
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); return onCampaignImport((r) => { setMsg(r.summary); load(); }); }, []);
+  const [showPaste, setShowPaste] = useState(false);
 
   const sorted = useMemo(() => {
     const col = COLS.find(([k]) => k === sort[0])!;
@@ -48,10 +49,9 @@ export default function Campaigns() {
   const doImport = async () => {
     setBusy(true); setMsg("");
     try {
-      const r = await api.post("/campaigns/import", { text: paste, url: pasteUrl || null });
-      setMsg(`Imported "${r.campaign.name}": found ${r.found.join(", ") || "no fields"}.` +
-        (r.match.linked.length ? ` Linked to ${r.match.linked.map((l: any) => l.login).join(", ")}.` : "") +
-        (r.match.pending.length ? " A streamer match needs your OK below." : "") + (r.match.waiting ? ` ${r.match.waiting}` : ""));
+      const r = await api.post("/campaigns/import-paste", { text: paste, url: pasteUrl || null });
+      const changes = r.updated.flatMap((u: any) => u.changes.map((c: string) => `${u.name}: ${c}`));
+      setMsg([r.summary, ...changes].join(" "));
       setPaste(""); setPasteUrl(""); load();
     } catch (e: any) { setMsg(e.message); }
     setBusy(false);
@@ -62,18 +62,19 @@ export default function Campaigns() {
     catch (e: any) { setMsg(e.message); }
     setBusy(false);
   };
+  const setJoined = (id: number, joined: boolean) => api.post(`/campaigns/${id}/joined`, { joined }).then(load).catch((e) => setMsg(e.message));
   const decide = (id: number, accept: boolean) => api.post(`/campaigns/matches/${id}`, { accept }).then(load).catch((e) => setMsg(e.message));
 
   return (
     <div className="stack">
-      <header className="row between">
-        <div className="stack tight" style={{ gap: 4 }}>
+      <header className="page-head">
+        <div>
           <h1>Campaigns</h1>
-          <span className="muted">Projected earnings are ESTIMATES in Australian dollars. Low–high shows a likely range.</span>
+          <p className="muted">Open Content Rewards inside ClipFarm, go to a campaign (or the Discover list) and press <b>Import this page</b>. ClipFarm only reads the page you're looking at, and never joins or submits for you.</p>
         </div>
-        <button className="btn-ghost" onClick={refresh} disabled={busy}>Re-match &amp; re-project</button>
+        <button className="btn-primary" onClick={() => openCampaignBrowser().catch((e) => setMsg(e.message))}>Open campaign browser</button>
       </header>
-      {msg && <span className="muted">{msg}</span>}
+      {msg && <p className="note-ok">{msg}</p>}
 
       {matches.length > 0 && (
         <section className="card stack tight">
@@ -83,7 +84,7 @@ export default function Campaigns() {
             <div key={m.id} className="row between">
               <span><b>{m.program_name}</b> → {m.platform}: <b>{m.display_name}</b> ({m.candidate_login}) <span className="muted">· {m.reason} · {Math.round(m.confidence * 100)}% sure</span></span>
               <span className="row" style={{ gap: 6 }}>
-                <button className="btn-primary" onClick={() => decide(m.id, true)}>That's them</button>
+                <button onClick={() => decide(m.id, true)}>That's them</button>
                 <button className="btn-ghost" onClick={() => decide(m.id, false)}>Not them</button>
               </span>
             </div>))}
@@ -94,10 +95,11 @@ export default function Campaigns() {
         <table style={{ minWidth: 1100 }}>
           <thead><tr>{COLS.map(([k, l]) => (
             <th key={k} className="sortable" onClick={() => setSort([k, sort[0] === k ? -sort[1] : -1])}>{l}{sort[0] === k ? (sort[1] < 0 ? " ▼" : " ▲") : ""}</th>))}
-            <th>Streamer</th><th>Rules</th><th>Needs confirming</th><th /></tr></thead>
+            <th>Joined</th><th>Streamer</th><th>Rules</th><th>Needs confirming</th><th /></tr></thead>
           <tbody>{sorted.map((c) => (
             <tr key={c.id} className={c.status === "ended" || c.status === "out_of_budget" ? "blocked" : ""}>
-              <td style={{ fontWeight: 600 }}>{c.url ? <a href={c.url} onClick={(e) => { e.preventDefault(); openUrl(c.url); }}>{c.name}</a> : c.name}</td>
+              <td style={{ fontWeight: 600 }}>{c.url ? <a href={c.url} onClick={(e) => { e.preventDefault(); openCampaignBrowser(c.url).catch((er) => setMsg(er.message)); }}>{c.name}</a> : c.name}
+                {(c.last_changes || []).length > 0 && <div className="muted small-text">Last import: {c.last_changes.join("; ")}</div>}</td>
               <td>{c.campaign_type === "prize_pool" ? "Prize pool" : "Pay per view"}</td>
               <td className="num">{c.campaign_type === "prize_pool" ? `$${(c.pool_size ?? 0).toLocaleString()} · ${c.view_threshold ? (c.view_threshold / 1000).toLocaleString() + "K views" : "?"}` : c.payout_per_1k != null ? `$${c.payout_per_1k.toFixed(2)}/1K` : "?"}
                 {c.min_payout ? <div className="muted small-text">min ${c.min_payout} · max ${c.max_payout ?? "?"}</div> : null}</td>
@@ -108,6 +110,7 @@ export default function Campaigns() {
               <td className="num">{c.best ? aud(c.best.aud_per_pc_hour) : "—"}</td>
               <td className="num">{c.budget_remaining != null ? `$${Math.round(c.budget_remaining).toLocaleString()}` : "—"}</td>
               <td><span className={`pill ${STATUS_CLS[c.status] ?? ""}`}>{(c.status || "active").replace(/_/g, " ")}</span></td>
+              <td><button className={c.joined ? "tick on" : "tick"} aria-label={`I've joined ${c.name}`} title="Tick once you've pressed Join on the campaign page" onClick={() => setJoined(c.id, !c.joined)}>{c.joined ? "✓" : ""}</button></td>
               <td>{c.streamers.length ? c.streamers.map((s: any) => `${s.display_name} (${s.platform})${s.confirmed ? "" : "?"}`).join(", ") : <span className="muted">{c.streamer_label ? "not matched yet" : "no streamer"}</span>}</td>
               <td className="small-text">{[...(c.required_tags || []), ...(c.required_onscreen || []).map((x: string) => x.replace("streamer_", "keep ")),
                 (c.allowed_platforms || []).map((p: string) => PLATFORM_LABEL[p] ?? p).join("/")].filter(Boolean).join(" · ")}</td>
@@ -119,11 +122,14 @@ export default function Campaigns() {
 
       <div className="cards2">
         <section className="card stack tight">
-          <h2 className="accent">Import a campaign</h2>
-          <span className="muted">Content Rewards has no public API. Open the campaign page in your browser, press Ctrl+A then Ctrl+C, and paste it here. Paste the page again any time to refresh its budget and rules.</span>
-          <label className="field">Campaign link (optional)<input value={pasteUrl} placeholder="https://contentrewards.com/c/campaigns/…" onChange={(e) => setPasteUrl(e.target.value)} /></label>
-          <label className="field">Page text<textarea rows={6} value={paste} onChange={(e) => setPaste(e.target.value)} placeholder="Paste the whole campaign page here" /></label>
-          <div><button className="btn-primary" onClick={doImport} disabled={busy || !paste.trim()}>Import</button></div>
+          <h2>Paste instead</h2>
+          <span className="muted">If the campaign browser won't work, open the campaign in any browser, press Ctrl+A then Ctrl+C, and paste it here.</span>
+          {!showPaste ? <div><button onClick={() => setShowPaste(true)}>Paste a campaign page</button></div> : <>
+            <label className="field">Campaign link (optional)<input value={pasteUrl} placeholder="https://contentrewards.com/c/campaigns/…" onChange={(e) => setPasteUrl(e.target.value)} /></label>
+            <label className="field">Page text<textarea rows={6} value={paste} onChange={(e) => setPaste(e.target.value)} placeholder="Paste the whole campaign page here" /></label>
+            <div className="row" style={{ gap: 8 }}><button onClick={doImport} disabled={busy || !paste.trim()}>Import</button>
+              <button className="btn-quiet" onClick={refresh} disabled={busy}>Re-match &amp; re-project all</button></div>
+          </>}
         </section>
         <AutoPilot onChange={load} />
       </div>
@@ -191,7 +197,7 @@ function AutoPilot({ onChange }: { onChange: () => void }) {
     <section className="card stack tight">
       <div className="row between">
         <h2 className="accent">Auto-pilot</h2>
-        <button className={s.enabled ? "btn-primary" : "btn-ghost"} onClick={() => put({ enabled: !s.enabled })}>{s.enabled ? "On" : "Off"}</button>
+        <button className={s.enabled ? "seg on" : "seg"} onClick={() => put({ enabled: !s.enabled })}>{s.enabled ? "On" : "Off"}</button>
       </div>
       <span className="muted">Picks which campaign streamers to clip, how many clips and where to post, by projected A$ per hour of PC time. It never clips streamers without a campaign.</span>
       <label className="line">Max clips per day {num("max_clips_per_day")}</label>

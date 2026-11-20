@@ -149,7 +149,35 @@ def _v3(conn: sqlite3.Connection) -> None:
     seed(conn)
 
 
-MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [(2, _v2), (3, _v3)]
+# ---- v4: page import, remembered match answers, per-account platforms ------------------------
+def _v4(conn: sqlite3.Connection) -> None:
+    _add(conn, "programs", "last_changes", "TEXT")       # JSON list: "Rate: $1.00/1K → $1.50/1K"
+    _add(conn, "programs", "import_source", "TEXT")      # in_app_browser | paste | manual | seed | official_api
+    _add(conn, "programs", "last_imported_at", "TEXT")
+    _add(conn, "streamer_programs", "decided_by_user", "INTEGER DEFAULT 0")
+    _script(conn, """
+    -- Answers to "Is this the right campaign?" -- remembered forever, never asked again.
+    CREATE TABLE IF NOT EXISTS match_decisions (
+        id          INTEGER PRIMARY KEY,
+        streamer_id INTEGER NOT NULL REFERENCES streamers(id) ON DELETE CASCADE,
+        program_id  INTEGER REFERENCES programs(id) ON DELETE CASCADE,   -- NULL = "none of these"
+        decision    TEXT NOT NULL CHECK (decision IN ('accepted','rejected','none')),
+        decided_at  TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE (streamer_id, program_id)
+    );
+    CREATE INDEX IF NOT EXISTS ix_match_decisions_streamer ON match_decisions(streamer_id)
+    """)
+    # Links the user already confirmed in v0.2 count as answered.
+    conn.execute("""INSERT OR IGNORE INTO match_decisions(streamer_id, program_id, decision)
+                    SELECT streamer_id, program_id, 'accepted' FROM streamer_programs WHERE confirmed=1""")
+    conn.execute("""INSERT OR IGNORE INTO match_decisions(streamer_id, program_id, decision)
+                    SELECT s.id, cm.program_id, 'rejected' FROM campaign_matches cm
+                    JOIN streamers s ON s.platform=cm.platform AND s.platform_user_id=cm.candidate_user_id
+                    WHERE cm.status='rejected'""")
+    conn.execute("UPDATE programs SET import_source=COALESCE(import_source, source)")
+
+
+MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [(2, _v2), (3, _v3), (4, _v4)]
 LATEST = MIGRATIONS[-1][0]
 
 

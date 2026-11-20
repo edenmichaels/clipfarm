@@ -168,7 +168,7 @@ function EditStreamer({ s, gameId, onClose }: { s: any; gameId: number; onClose:
   );
 }
 
-function WhyRanked({ s, gameId, onClose }: { s: any; gameId: number; onClose: () => void }) {
+export function WhyRanked({ s, gameId, onClose }: { s: any; gameId: number; onClose: () => void }) {
   const [w, setW] = useState<any>(null);
   useEffect(() => { api.get(`/streamers/${s.id}/why?game_id=${gameId}`).then(setW).catch(() => {}); }, [s.id]);
   return (
