@@ -235,9 +235,9 @@ jobs:
           shoot after "$GITHUB_WORKSPACE"
           ls -R shots
 
-      - name: Show logs if something failed
-        if: failure()
-        run: tail -n 60 /tmp/engine-*.log /tmp/vite-*.log || true
+      - name: Show engine errors
+        if: always()
+        run: grep -h -B2 -A25 "Traceback" /tmp/engine-*.log | head -n 150 || echo "No engine errors"
 
       - name: Publish screenshots to the ci-screenshots branch (easy to view on GitHub)
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository

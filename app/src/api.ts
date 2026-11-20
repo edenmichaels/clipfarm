@@ -77,6 +77,12 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
         body: body === undefined ? undefined : JSON.stringify(body),
       });
     } catch (e) {
+      // A request that fails inside the engine can come back without CORS headers and look like a network
+      // error. If the engine itself answers, it's that one request: report it instead of "Reconnecting".
+      if (attempt === 0 && (await healthy())) {
+        if (state !== "connected") setState("connected");
+        throw new ApiError("ClipFarm couldn't do that. Details are in Settings › Logs.", 500, null);
+      }
       if (attempt >= 120) { setState("failed"); throw new Error("Lost connection to the ClipFarm engine."); }
       setState("reconnecting");
       await new Promise((res) => setTimeout(res, 500));
@@ -117,6 +123,7 @@ export const PERMISSIONS = {
 
 export const PLATFORM_LABEL: Record<string, string> = {
   youtube_shorts: "Shorts", tiktok: "TikTok", instagram_reels: "Reels", x: "X", youtube: "YouTube", instagram: "Instagram",
+  twitch: "Twitch", kick: "Kick",
 };
 export const aud = (v: number | null | undefined, digits = 2) => (v == null ? "—" : `A$${v.toFixed(digits)}`);
 export const band = (lo?: number | null, li?: number | null, hi?: number | null) =>

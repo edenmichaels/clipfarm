@@ -195,7 +195,7 @@ export default function NewProject({ done, go }: { done: () => void; go: (p: Pag
                       <td>{s.campaign ? s.campaign.name : <span className="muted">No campaign (not paid)</span>}</td>
                       <td>{s.accounts.length ? s.accounts.map((a: any) => `${PLATFORM_LABEL[a.platform] ?? a.platform} ${a.handle}${a.connected ? "" : " (not connected)"}`).join(", ") : <span className="muted">none</span>}
                         {s.skipped_platforms.length > 0 && <div className="muted small-text">Not {s.skipped_platforms.map((p: string) => PLATFORM_LABEL[p] ?? p).join(", ")}: campaign doesn't allow it</div>}</td>
-                      <td className="small-text">{s.rules ? [s.rules.hashtags?.join(" "), s.rules.credit && `credit ${s.rules.credit}`, s.rules.disclosure,
+                      <td className="small-text">{s.rules ? [s.rules.hashtags?.join(" "), s.rules.credit && `credit: ${s.rules.credit.replace("{url}", "campaign link").replace("{name}", s.name)}`, s.rules.disclosure,
                         ...(s.rules.on_screen || []).map((x: string) => x.replace("streamer_", "keep ").replace("_", " "))].filter(Boolean).join(" · ") || "—" : "—"}</td>
                     </tr>))}</tbody>
                 </table>

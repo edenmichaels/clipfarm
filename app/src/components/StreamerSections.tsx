@@ -168,7 +168,7 @@ function StreamerPanel({ s, onClose, onSelect }: { s: any; onClose: (changed: bo
               <span>Pays</span><b>{c.campaign_type === "prize_pool" ? `$${(c.pool_size ?? 0).toLocaleString()} prize pool` : c.payout_per_1k != null ? `$${c.payout_per_1k}/1K views` : "?"}</b>
               {c.max_payout != null && <><span>Per clip</span><b>{c.min_payout ? `$${c.min_payout} min · ` : ""}${c.max_payout} max</b></>}
               <span>Projected</span><b>{pj ? `${aud(pj.per_clip[1])} per clip (${aud(pj.per_clip[0])}–${aud(pj.per_clip[2])})` : "—"}</b>
-              <span>Post to</span><b>{(c.allowed_platforms || []).map((p: string) => PLATFORM_LABEL[p] ?? p).join(", ") || "any"}</b>
+              <span>Post to</span><b>{(c.allowed_platforms || []).map((p: string) => PLATFORM_LABEL[p] ?? p).join(", ") || "Not set yet (check the campaign page)"}</b>
               {c.required_tags?.length > 0 && <><span>Hashtags</span><b>{c.required_tags.join(" ")}</b></>}
               {c.required_onscreen?.length > 0 && <><span>On screen</span><b>{c.required_onscreen.map((x: string) => x.replace("streamer_", "keep ").replace("_", " ")).join(", ")}</b></>}
               {c.disclosure && <><span>Disclosure</span><b>{c.disclosure}</b></>}
