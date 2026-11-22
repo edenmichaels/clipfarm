@@ -258,7 +258,38 @@ def _v5(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE moments SET detector=COALESCE(detector,'v1')")
 
 
-MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [(2, _v2), (3, _v3), (4, _v4), (5, _v5)]
+# ---- v6: edit projects (EDL), version history, caption templates ---------------------------------
+def _v6(conn: sqlite3.Connection) -> None:
+    _script(conn, """
+    CREATE TABLE IF NOT EXISTS edit_projects (
+        id         INTEGER PRIMARY KEY,
+        clip_id    INTEGER NOT NULL UNIQUE REFERENCES clips(id) ON DELETE CASCADE,
+        data       TEXT NOT NULL,                 -- the edit decision list (JSON)
+        head       INTEGER NOT NULL DEFAULT 1,    -- current version (undo/redo moves it)
+        status     TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new','edited','ready','posted')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS edit_versions (
+        id         INTEGER PRIMARY KEY,
+        project_id INTEGER NOT NULL REFERENCES edit_projects(id) ON DELETE CASCADE,
+        version    INTEGER NOT NULL,
+        data       TEXT NOT NULL,
+        label      TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE (project_id, version)
+    );
+    CREATE TABLE IF NOT EXISTS caption_templates (
+        id         INTEGER PRIMARY KEY,
+        name       TEXT NOT NULL UNIQUE,
+        data       TEXT NOT NULL,                 -- template fields (font, colours, animation, ...)
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+    """)
+    _add(conn, "clips", "source_path", "TEXT")    # kept source section, so the clip stays editable
+
+
+MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [(2, _v2), (3, _v3), (4, _v4), (5, _v5), (6, _v6)]
 LATEST = MIGRATIONS[-1][0]
 
 

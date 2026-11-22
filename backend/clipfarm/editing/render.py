@@ -60,6 +60,21 @@ class RenderSpec:
     swells: list[tuple[float, float]] = field(default_factory=list)    # clip time
     beats: list[float] = field(default_factory=list)                   # clip time, zoom pulses
     target_lufs: float = -14.0
+    # v0.5 edit-project extras (all clip time)
+    template: dict | None = None         # full caption template (overrides caption_style)
+    captions_enabled: bool = True
+    layout_segments: list[tuple[float, str]] = field(default_factory=list)
+    zooms: list[dict] = field(default_factory=list)        # [{t, amount, dur, kind: punch|pulse}]
+    flashes: list[tuple[float, float]] = field(default_factory=list)
+    shakes: list[tuple[float, float]] = field(default_factory=list)
+    sfx: list[dict] = field(default_factory=list)          # [{path, t, gain_db}]
+    speech_gain_db: float = 0.0
+    enhance: bool = False                # speech clarity (high-pass + gentle compression)
+    denoise: bool = False                # background noise reduction
+    music_volume_db: float = 0.0
+    scale_to: tuple[int, int] | None = None                # proxy previews, e.g. (540, 960)
+    max_bitrate: str | None = None       # export presets
+    srt_out: Path | None = None
     base: Path | None = None             # reuse an existing base render
     encoder: str = "auto"
     quality: str = "high"
@@ -162,6 +177,12 @@ def build_audio(spec: RenderSpec, base: Path, meta: dict, bleeps: list[tuple[flo
     if meta.get("has_audio"):
         cmd += ["-i", str(base)]
         voice = f"[{inputs}:a]aresample=48000,aformat=channel_layouts=stereo"
+        if spec.denoise:
+            voice += ",afftdn=nr=12:nf=-30"
+        if spec.enhance:
+            voice += ",highpass=f=90,acompressor=threshold=0.08:ratio=3:attack=10:release=150:makeup=2"
+        if spec.speech_gain_db:
+            voice += f",volume={spec.speech_gain_db:.2f}dB"
         if bleeps:
             voice += f",volume=0:enable='{_between_sum(bleeps)}'"
         chains.append(voice + "[voice]")
@@ -179,7 +200,8 @@ def build_audio(spec: RenderSpec, base: Path, meta: dict, bleeps: list[tuple[flo
         inputs += 1
     if spec.music and Path(spec.music).exists():
         cmd += ["-stream_loop", "-1", "-ss", f"{max(0.0, spec.music_offset):.3f}", "-i", str(spec.music)]
-        level = spec.music_level_lufs - (spec.music_track_lufs if spec.music_track_lufs is not None else -14.0)
+        level = spec.music_level_lufs - (spec.music_track_lufs if spec.music_track_lufs is not None else -14.0) \
+            + spec.music_volume_db
         speech = merge_intervals(spec.speech, 0.15)
         sw = merge_intervals(spec.swells)
         sp_env, sw_env = _trapezoid(speech, 0.12), _trapezoid(sw, 0.3)
@@ -191,6 +213,14 @@ def build_audio(spec: RenderSpec, base: Path, meta: dict, bleeps: list[tuple[flo
                       f"volume={level:.2f}dB,volume='pow(10,({gain})/20)':eval=frame,{fade_in},"
                       f"afade=t=out:st={max(0.0, dur - 1.0):.3f}:d=1[music]")
         mix.append("[music]")
+        inputs += 1
+    for k, fx in enumerate(spec.sfx[:16]):
+        if not Path(fx["path"]).exists():
+            continue
+        cmd += ["-i", str(fx["path"])]
+        chains.append(f"[{inputs}:a]aresample=48000,aformat=channel_layouts=stereo,volume={float(fx.get('gain_db', 0)):.1f}dB,"
+                      f"adelay={int(max(0.0, float(fx['t'])) * 1000)}:all=1[sfx{k}]")
+        mix.append(f"[sfx{k}]")
         inputs += 1
     if len(mix) > 1:
         chains.append(f"{''.join(mix)}amix=inputs={len(mix)}:duration=first:normalize=0:dropout_transition=0[mix]")
@@ -222,13 +252,25 @@ def integrated_lufs(path: Path) -> float:
 def _zoom_expr(spec: RenderSpec) -> str | None:
     parts = []
     if spec.punch_zoom:
-        parts.append("if(lt(t,1.5),1+0.04*t,1.06)")
+        parts.append("if(lt(t,1.5),0.04*t,0.06)")
     for b in spec.beats[:8]:
         parts.append(f"0.035*exp(-pow((t-{b:.3f})/0.09,2))")
+    for z in spec.zooms[:24]:
+        amt, t0, d = float(z.get("amount", 0.12)), float(z["t"]), max(0.2, float(z.get("dur", 1.2)))
+        if z.get("kind") == "pulse":
+            parts.append(f"{amt:.3f}*exp(-pow((t-{t0:.3f})/0.1,2))")
+        else:   # punch-in: snap in, hold, ease out
+            parts.append(f"{amt:.3f}*if(between(t,{t0:.3f},{t0 + d:.3f}),min(1,(t-{t0:.3f})/0.08),"
+                         f"if(between(t,{t0 + d:.3f},{t0 + d + 0.3:.3f}),1-(t-{t0 + d:.3f})/0.3,0))")
+    for a, b in spec.shakes[:12]:
+        parts.append(f"0.05*between(t,{a:.3f},{b:.3f})")      # room for the shake
     if not parts:
         return None
-    z = "+".join(parts) if spec.punch_zoom else "1+" + "+".join(parts)
-    return f"scale=w='trunc(1080*({z})/2)*2':h=-2:eval=frame,crop=1080:1920"
+    z = "1+" + "+".join(parts)
+    sx = "+".join(f"between(t,{a:.3f},{b:.3f})*18*sin(t*71)" for a, b in spec.shakes[:12]) or "0"
+    sy = "+".join(f"between(t,{a:.3f},{b:.3f})*14*cos(t*83)" for a, b in spec.shakes[:12]) or "0"
+    return (f"scale=w='trunc(1080*({z})/2)*2':h=-2:eval=frame,"
+            f"crop=1080:1920:x='max(0,min(iw-1080,(iw-1080)/2+{sx}))':y='max(0,min(ih-1920,(ih-1920)/2+{sy}))'")
 
 
 def finish(spec: RenderSpec, base: Path, meta: dict, out: Path | None = None, music: bool = True) -> dict:
@@ -239,7 +281,8 @@ def finish(spec: RenderSpec, base: Path, meta: dict, out: Path | None = None, mu
         fd = fonts_dir()
         if fd:
             shutil.copytree(fd, work / "fonts", dirs_exist_ok=True)
-        track = build_track(spec.words, work / "captions.ass", spec.caption_style, spec.words_per_chunk,
+        track = build_track(spec.words if spec.captions_enabled else [], work / "captions.ass",
+                            spec.template or spec.caption_style, spec.words_per_chunk, layout_segments=spec.layout_segments,
                             offset=spec.start, layout=meta["layout"], src_w=meta.get("src_w", 1920),
                             src_h=meta.get("src_h", 1080), keep_clear=tuple(spec.keep_clear),
                             nudge=spec.caption_nudge, uppercase=spec.uppercase, profanity=spec.profanity,
@@ -272,9 +315,21 @@ def finish(spec: RenderSpec, base: Path, meta: dict, out: Path | None = None, mu
             chain.append(f"[{n_in}:v]scale={e['size']}:{e['size']},format=rgba[e{n_in}]")
             add(f"[e{n_in}]overlay=x={e['x']}:y={e['y']}:enable='between(t,{e['start']:.3f},{e['end']:.3f})'")
             n_in += 1
+        for k, (a, b) in enumerate(spec.flashes[:12]):
+            chain.append(f"color=c=white:s=1080x1920:r={spec.fps}:d={dur:.3f},format=rgba,"
+                         f"colorchannelmixer=aa=0.75[fl{k}]")
+            add(f"[fl{k}]overlay=0:0:enable='between(t,{a:.3f},{b:.3f})'")
         if spec.progress_bar:
             chain.append(f"color=c=0xFFE500:s=1080x14:r={spec.fps}:d={dur:.3f}[pbar]")
             add(f"[pbar]overlay=x='-w+w*t/{dur:.3f}':y=H-h:eof_action=pass")
+        if spec.scale_to:
+            add(f"scale={spec.scale_to[0]}:{spec.scale_to[1]}")
+        if spec.srt_out:
+            ev = track.events if spec.captions_enabled else build_track(
+                spec.words, work / "srt.ass", spec.template or spec.caption_style, spec.words_per_chunk,
+                offset=spec.start, layout=meta["layout"], src_w=meta.get("src_w", 1920), src_h=meta.get("src_h", 1080),
+                uppercase=False, profanity=spec.profanity, fillers=spec.fillers).events
+            write_srt(ev, spec.srt_out)
         af = (f"loudnorm=I={spec.target_lufs}:TP=-1.5:LRA=11:linear=true:measured_I={ln['input_i']}:"
               f"measured_TP={ln['input_tp']}:measured_LRA={ln['input_lra']}:measured_thresh={ln['input_thresh']}:"
               f"offset={ln['target_offset']},aresample=48000")
@@ -282,7 +337,9 @@ def finish(spec: RenderSpec, base: Path, meta: dict, out: Path | None = None, mu
 
         def full(c):
             return cmd + ["-filter_complex", ";".join(chain), "-map", f"[{last}]", "-map", "1:a", "-af", af,
-                          "-c:a", "aac", "-b:a", "192k", *encoder_args(c, spec.quality), "-pix_fmt", "yuv420p",
+                          "-c:a", "aac", "-b:a", "192k", *encoder_args(c, spec.quality),
+                          *(["-maxrate", spec.max_bitrate, "-bufsize", spec.max_bitrate] if spec.max_bitrate else []),
+                          "-pix_fmt", "yuv420p",
                           "-movflags", "+faststart", "-t", f"{dur:.3f}", str(out)]
         res = _run(full(codec), cwd=work)
         if res.returncode != 0 and codec != "libx264":
@@ -298,6 +355,28 @@ def finish(spec: RenderSpec, base: Path, meta: dict, out: Path | None = None, mu
     return {"path": str(out), "thumb": str(thumb) if thumb.exists() else None, "encoder": codec, "duration": dur,
             "sha256": sha256(out), "events": track.events, "bleeps": track.bleeps,
             "music": str(spec.music) if music and spec.music else None, **meta}
+
+
+def write_srt(events: list[dict], out: Path) -> Path:
+    """Captions as a separate .srt (export presets that don't burn them in)."""
+    def ts(t):
+        ms = int(round(t * 1000))
+        h, r = divmod(ms, 3600000)
+        m, r = divmod(r, 60000)
+        sec, ms = divmod(r, 1000)
+        return f"{h:02d}:{m:02d}:{sec:02d},{ms:03d}"
+    blocks, seen = [], set()
+    for e in events:
+        text = "\n".join(" ".join(r) for r in e["rows"])
+        key = (text, e["y"])
+        if key in seen and blocks and blocks[-1][2] == text:
+            blocks[-1][1] = e["end"]
+            continue
+        seen.add(key)
+        blocks.append([e["start"], e["end"], text])
+    out.write_text("\n".join(f"{i + 1}\n{ts(a)} --> {ts(b)}\n{t}\n" for i, (a, b, t) in enumerate(blocks)),
+                   encoding="utf-8")
+    return out
 
 
 def _emoji_dir() -> Path | None:

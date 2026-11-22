@@ -11,6 +11,7 @@ import base64
 import html
 import json
 import os
+import re
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
@@ -418,7 +419,7 @@ def _clip(cid: int) -> dict:
 def clip_edit_info(cid: int):
     """What Review needs to preview and edit captions on the actual clip."""
     c = _clip(cid)
-    d = json.loads(c.get("render_spec") or "{}")
+    d = _edit_render_view(cid) or json.loads(c.get("render_spec") or "{}")
     ev = Path(c["file_path"]).with_suffix(".events.json") if c.get("file_path") else None
     fb = db.q1("SELECT rating, tags FROM clip_feedback WHERE clip_id=?", (cid,))
     track = musiclib.get(c["music_track_id"]) if c.get("music_track_id") else None
@@ -449,10 +450,34 @@ class RerenderIn(BaseModel):
     original_audio_only: bool | None = None
 
 
+def _edit_render_view(cid: int) -> dict | None:
+    """For edit-project clips: the same shape Review's caption studio reads from v0.4 clips."""
+    from .edit import compile as ec, project as ep
+    p = ep.get(cid)
+    if not p:
+        return None
+    e = p["edl"]
+    try:
+        key = ec.base_key(e)
+    except Exception:
+        return None
+    base = storage.media_dir() / "edit_cache" / f"c{cid}" / f"base_{key}.mp4"
+    if not base.exists():
+        m = db.q1("SELECT moment_id FROM clips WHERE id=?", (cid,))
+        alt = storage.media_dir() / "edit_cache" / f"m{m['moment_id']}" / f"base_{key}.mp4" if m else None
+        base = alt if alt and alt.exists() else base
+    tmpl = e["captions"]["template"]
+    first = (e["layout"]["keyframes"] or [{"layout": "blur_fill"}])[0]["layout"]
+    return {"base": str(base) if base.exists() else (e["source"]["path"] if Path(e["source"]["path"]).exists() else None),
+            "start": e["range"][0], "caption_style": tmpl if isinstance(tmpl, str) else "bold_pop",
+            "layout": "crop" if first in ("speaker", "pip") else first, "keep_clear": e["rules"].get("onscreen"),
+            "music": e["music"].get("path") if e["music"].get("enabled") else None}
+
+
 @app.post("/clips/{cid}/rerender", dependencies=A)
 def clip_rerender(cid: int, b: RerenderIn):
     c = _clip(cid)
-    d = json.loads(c.get("render_spec") or "{}")
+    d = _edit_render_view(cid) or json.loads(c.get("render_spec") or "{}")
     if not d.get("base") or not Path(d["base"]).exists():
         raise HTTPException(409, "This clip was made before captions could be edited (or its base file was "
                                  "cleaned up). New clips can be re-rendered.")
@@ -472,7 +497,7 @@ def clip_caption_preview(cid: int, b: RerenderIn):
     """Caption layout (no render) for the live preview while you nudge or edit words."""
     import tempfile
     c = _clip(cid)
-    d = json.loads(c.get("render_spec") or "{}")
+    d = _edit_render_view(cid) or json.loads(c.get("render_spec") or "{}")
     words = b.words if b.words is not None else json.loads(c.get("words") or "[]")
     meta = {}
     if d.get("base") and Path(d["base"]).with_suffix(".json").exists():
@@ -600,6 +625,225 @@ def trending_import(body: dict):
 def trending_delete(tid: int):
     db.ex("UPDATE trending_sounds SET active=0 WHERE id=?", (tid,))
     return {"ok": True}
+
+
+# ---- v0.5: edit projects (EDL), transcript editor, reframe, caption templates -------------------------
+from .edit import build as edit_build, compile as edit_compile, project as edit_project  # noqa: E402
+from .edit import reframe as edit_reframe, templates as edit_templates, timeline as edit_tl  # noqa: E402
+from .edit import transcript as edit_tr  # noqa: E402
+
+
+def _ep(cid: int) -> dict:
+    _clip(cid)
+    p = edit_build.ensure_project(cid)
+    if not p:
+        raise HTTPException(409, "This clip can't be edited: its source file is gone (it was cleaned up or made "
+                                 "before v0.4).")
+    return p
+
+
+def _view(p: dict) -> dict:
+    e = p["edl"]
+    words = e["captions"]["words"]
+    proxy = db.get_setting(f"proxy:{p['clip_id']}") or {}
+    return {**p, "duration": edit_tl.duration(e), "kept": edit_tl.kept(e),
+            "words_out": [{"i": i, **w, "out": edit_tl.to_out(e, float(w["start"]))} for i, w in enumerate(words)],
+            "fillers": edit_tr.filler_indices(e), "silences": edit_tr.silences(e),
+            "layout_segments": edit_compile.layout_segments(e),
+            "rule_fixes": edit_reframe.enforce_rules(e["layout"]["keyframes"], e["rules"].get("onscreen") or [],
+                                                     e["layout"].get("facecam"))[1],
+            "proxy": proxy.get("path") if proxy.get("head") == p["head"] and proxy.get("path") and Path(proxy["path"]).exists() else None}
+
+
+@app.get("/edit/{cid}", dependencies=A)
+def edit_get(cid: int):
+    return _view(_ep(cid))
+
+
+class EdlIn(BaseModel):
+    edl: dict
+    label: str = "Edit"
+
+
+@app.put("/edit/{cid}", dependencies=A)
+def edit_put(cid: int, b: EdlIn):
+    cur = _ep(cid)
+    e = b.edl
+    for k in ("source", "range", "cuts", "layout", "captions", "music", "rules"):
+        if k not in e:
+            raise HTTPException(400, f"Edit project is missing '{k}'.")
+    e["source"] = cur["edl"]["source"]                       # the source can't be swapped from the UI
+    if edit_tl.duration(e) < 1:
+        raise HTTPException(400, "The clip has to be at least 1 second long.")
+    return _view(edit_project.save(cid, e, b.label[:60]))
+
+
+@app.post("/edit/{cid}/undo", dependencies=A)
+def edit_undo(cid: int):
+    _ep(cid)
+    return _view(edit_project.undo(cid))
+
+
+@app.post("/edit/{cid}/redo", dependencies=A)
+def edit_redo(cid: int):
+    _ep(cid)
+    return _view(edit_project.redo(cid))
+
+
+@app.get("/edit/{cid}/history", dependencies=A)
+def edit_history(cid: int):
+    _ep(cid)
+    return edit_project.history(cid)
+
+
+@app.post("/edit/{cid}/transcript", dependencies=A)
+def edit_transcript(cid: int, body: dict):
+    """op: delete | restore (indices) · fillers · silences · range (start, end, source time) · fix (index, text)."""
+    _ep(cid)
+    op = body.get("op")
+    try:
+        if op == "delete":
+            fn, label = (lambda e: edit_tr.delete_words(e, body.get("indices", []))), "Delete words"
+        elif op == "restore":
+            fn, label = (lambda e: edit_tr.restore_words(e, body.get("indices", []))), "Restore words"
+        elif op == "fillers":
+            fn, label = edit_tr.remove_fillers, "Remove filler words"
+        elif op == "silences":
+            fn, label = (lambda e: edit_tr.remove_silences(e, float(body.get("min_gap", edit_tr.SILENCE)))), "Remove silences"
+        elif op == "range":
+            fn, label = (lambda e: edit_tr.set_range(e, body["start"], body["end"])), "Change clip range"
+        elif op == "fix":
+            fn, label = (lambda e: edit_tr.fix_word(e, int(body["index"]), str(body["text"]))), "Fix word"
+        else:
+            raise HTTPException(400, "op is delete, restore, fillers, silences, range or fix")
+        p = edit_project.update(cid, fn, label)
+    except (ValueError, KeyError, IndexError) as e:
+        raise HTTPException(400, str(e))
+    if edit_tl.duration(p["edl"]) < 1:
+        edit_project.undo(cid)
+        raise HTTPException(400, "That would leave less than 1 second of clip.")
+    return _view(p)
+
+
+@app.post("/edit/{cid}/reframe", dependencies=A)
+def edit_reframe_auto(cid: int):
+    """Re-run AI reframe on the current range (keeps your facecam box)."""
+    p = _ep(cid)
+    e = p["edl"]
+    fc = e["layout"].get("facecam")
+    from .editing.layout import Box
+    lay = edit_reframe.analyse(Path(e["source"]["path"]), e["range"][0], e["range"][1],
+                               facecam=Box(**fc) if fc else None, onscreen=e["rules"].get("onscreen") or [],
+                               speech=[(w["start"], w["end"]) for w in e["captions"]["words"]], detect_cam=fc is None)
+    return _view(edit_project.update(cid, lambda x: {**x, "layout": {**x["layout"], **lay}}, "AI reframe"))
+
+
+@app.post("/edit/{cid}/facecam", dependencies=A)
+def edit_facecam(cid: int, body: dict):
+    """Set the facecam box (fractions of the source frame); remember=True saves it for the streamer."""
+    _ep(cid)
+    box = {k: float(body[k]) for k in ("x", "y", "w", "h")}
+    if not (0 <= box["x"] < 1 and 0 <= box["y"] < 1 and 0.03 < box["w"] <= 1 and 0.03 < box["h"] <= 1
+            and box["x"] + box["w"] <= 1.001 and box["y"] + box["h"] <= 1.001):
+        raise HTTPException(400, "The facecam box has to be inside the video.")
+
+    def apply(e):
+        e["layout"]["facecam"] = box
+        for k in e["layout"]["keyframes"]:
+            if k["layout"] in ("split", "pip") or k.get("cam"):
+                k["cam"] = box
+        return e
+    out = edit_project.update(cid, apply, "Move facecam")
+    if body.get("remember", True):
+        c = db.q1("SELECT streamer_id FROM clips WHERE id=?", (cid,))
+        if c and c["streamer_id"]:
+            db.set_setting(f"facecam:{c['streamer_id']}", box)
+    return _view(out)
+
+
+@app.post("/edit/{cid}/fix-rules", dependencies=A)
+def edit_fix_rules(cid: int):
+    p = _ep(cid)
+    e = p["edl"]
+    kfs, fixed = edit_reframe.enforce_rules(e["layout"]["keyframes"], e["rules"].get("onscreen") or [], e["layout"].get("facecam"))
+    if not fixed:
+        return _view(p)
+    return _view(edit_project.update(cid, lambda x: {**x, "layout": {**x["layout"], "keyframes": kfs}}, "Fix campaign rules"))
+
+
+@app.post("/edit/{cid}/translate", dependencies=A)
+def edit_translate(cid: int, body: dict):
+    from .edit import translate as edit_trans
+    p = _ep(cid)
+    lang = body.get("language")
+    if not lang:
+        return _view(edit_project.update(cid, lambda e: {**e, "captions": {**e["captions"], "translate_to": None}},
+                                         "Original-language captions"))
+    try:
+        tr = edit_trans.translate_words(p["edl"]["captions"]["words"], lang, p["edl"]["captions"].get("language"))
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(400, str(e))
+
+    def apply(e):
+        e["captions"].setdefault("translations", {})[lang] = tr
+        e["captions"]["translate_to"] = lang
+        return e
+    return _view(edit_project.update(cid, apply, f"Captions in {edit_trans.LANGUAGES[lang]}"))
+
+
+@app.post("/edit/{cid}/preview", dependencies=A)
+def edit_preview(cid: int):
+    """Fast low-res preview render of the current edit (background job)."""
+    _ep(cid)
+    c = db.q1("SELECT project_id FROM clips WHERE id=?", (cid,))
+    out = storage.media_dir() / "edit_cache" / f"c{cid}" / "preview.mp4"
+    return {"job_id": eng.enqueue("export_edit", {"clip_id": cid, "quality": "proxy", "out": str(out)},
+                                  c["project_id"], priority=0)}
+
+
+@app.post("/edit/{cid}/export", dependencies=A)
+def edit_export(cid: int, body: dict):
+    _ep(cid)
+    preset = body.get("preset") or "tiktok"
+    if preset not in edit_compile.PRESETS:
+        raise HTTPException(400, f"preset is one of {', '.join(edit_compile.PRESETS)}")
+    c = db.q1("SELECT project_id FROM clips WHERE id=?", (cid,))
+    return {"job_id": eng.enqueue("export_edit", {"clip_id": cid, "preset": preset, "music": body.get("music", True)},
+                                  c["project_id"], priority=1)}
+
+
+@app.get("/export-presets", dependencies=A)
+def export_presets():
+    return edit_compile.PRESETS
+
+
+@app.get("/caption-templates", dependencies=A)
+def caption_templates():
+    from .editing import captions as cm
+    return {"templates": edit_templates.all_templates(), "defaults": edit_templates.defaults(),
+            "fonts": [{"family": f, "file": n} for f, n in cm.FONTS.items()], "animations": cm.ANIMATIONS}
+
+
+@app.post("/caption-templates", dependencies=A)
+def caption_template_save(body: dict):
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "Give the template a name.")
+    return edit_templates.save(name[:40], body.get("template") or {}, body.get("id"))
+
+
+@app.delete("/caption-templates/{tid}", dependencies=A)
+def caption_template_delete(tid: int):
+    edit_templates.delete(tid)
+    return {"ok": True}
+
+
+@app.put("/caption-templates/defaults", dependencies=A)
+def caption_template_defaults(body: dict):
+    scope = body.get("scope", "global")
+    if not re.fullmatch(r"global|account:\d+|program:\d+", scope):
+        raise HTTPException(400, "scope is global, account:<id> or program:<id>")
+    return edit_templates.set_default(scope, body.get("key"))
 
 
 # ---- dashboard / analytics / logs -----------------------------------------------------

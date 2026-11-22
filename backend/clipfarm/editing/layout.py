@@ -29,6 +29,13 @@ class Box:
 
 
 def _sample_frames(path: Path, start: float, end: float, n: int, width: int = 480):
+    """n frames spread over [start, end], decoded exactly by FFmpeg (OpenCV seeks snap to keyframes)."""
+    from ..edit.reframe import sample
+    fps = max(0.2, n / max(0.5, end - start))
+    return sample(path, start, end, fps, width)[:n]
+
+
+def _sample_frames_cv(path: Path, start: float, end: float, n: int, width: int = 480):
     import cv2  # opencv-python-headless
     cap = cv2.VideoCapture(str(path))
     frames = []

@@ -350,6 +350,59 @@ def test_v04_routes(client, tmp_path):
     call(client, "DELETE", f"/trending/{lst[0]['id']}", route="/trending/{tid}")
 
 
+# ---- v0.5: edit projects ------------------------------------------------------------------------------
+def test_v05_edit_routes(client, tmp_path):
+    import subprocess
+    src = tmp_path / "src.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=1920x1080:r=30:d=12", "-f", "lavfi",
+                    "-i", "sine=f=300:d=12", "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac",
+                    str(src)], check=True)
+    _, _, cid, _ = _linked_clip(tmp_path)
+    db.ex("UPDATE clips SET source_path=?, words=? WHERE id=?", (str(src), json.dumps(
+        [{"word": w, "start": 1 + i * 0.6, "end": 1.4 + i * 0.6} for i, w in enumerate("so um we did it".split())]), cid))
+    v = call(client, "GET", f"/edit/{cid}", route="/edit/{cid}")
+    assert v["edl"]["source"]["path"] == str(src) and v["duration"] > 10 and v["fillers"] == [1]
+    call(client, "GET", "/edit/99999", route="/edit/{cid}", expect=404)
+    e = v["edl"]
+    e["captions"]["nudge"] = -30
+    v = call(client, "PUT", f"/edit/{cid}", route="/edit/{cid}", json={"edl": e, "label": "Nudge"})
+    assert v["head"] == 2
+    call(client, "PUT", f"/edit/{cid}", route="/edit/{cid}", json={"edl": {"range": [0, 1]}}, expect=400)
+    v = call(client, "POST", f"/edit/{cid}/transcript", route="/edit/{cid}/transcript", json={"op": "fillers"})
+    assert v["edl"]["cuts"] and v["edl"]["captions"]["words"][1]["deleted"]
+    call(client, "POST", f"/edit/{cid}/transcript", route="/edit/{cid}/transcript", json={"op": "range", "start": 1, "end": 1.2},
+         expect=400)
+    call(client, "POST", f"/edit/{cid}/transcript", route="/edit/{cid}/transcript", json={"op": "nope"}, expect=400)
+    v = call(client, "POST", f"/edit/{cid}/transcript", route="/edit/{cid}/transcript", json={"op": "fix", "index": 4, "text": "IT!"})
+    assert v["edl"]["captions"]["words"][4]["word"] == "IT!"
+    assert call(client, "POST", f"/edit/{cid}/undo", route="/edit/{cid}/undo")["edl"]["captions"]["words"][4]["word"] == "it"
+    assert call(client, "POST", f"/edit/{cid}/redo", route="/edit/{cid}/redo")["edl"]["captions"]["words"][4]["word"] == "IT!"
+    assert len(call(client, "GET", f"/edit/{cid}/history", route="/edit/{cid}/history")) >= 3
+    v = call(client, "POST", f"/edit/{cid}/reframe", route="/edit/{cid}/reframe")
+    assert v["edl"]["layout"]["keyframes"]
+    v = call(client, "POST", f"/edit/{cid}/facecam", route="/edit/{cid}/facecam",
+             json={"x": 0.7, "y": 0.0, "w": 0.3, "h": 0.3})
+    assert v["edl"]["layout"]["facecam"]["x"] == 0.7
+    call(client, "POST", f"/edit/{cid}/facecam", route="/edit/{cid}/facecam", json={"x": 0.9, "y": 0, "w": 0.5, "h": 0.3},
+         expect=400)
+    call(client, "POST", f"/edit/{cid}/fix-rules", route="/edit/{cid}/fix-rules")
+    call(client, "POST", f"/edit/{cid}/translate", route="/edit/{cid}/translate", json={"language": "es"}, expect=400)
+    call(client, "POST", f"/edit/{cid}/translate", route="/edit/{cid}/translate", json={})
+    assert call(client, "POST", f"/edit/{cid}/preview", route="/edit/{cid}/preview")["job_id"]
+    assert call(client, "POST", f"/edit/{cid}/export", route="/edit/{cid}/export", json={"preset": "shorts"})["job_id"]
+    call(client, "POST", f"/edit/{cid}/export", route="/edit/{cid}/export", json={"preset": "vhs"}, expect=400)
+    assert "tiktok" in call(client, "GET", "/export-presets")
+    t = call(client, "GET", "/caption-templates")
+    assert len(t["templates"]) >= 4 and "karaoke" in t["animations"]
+    mine = call(client, "POST", "/caption-templates", json={"name": "Mine", "template": {"base": "minimal", "text": "#00ff00"}})
+    assert mine["template"]["text"] == "00FF00"
+    call(client, "POST", "/caption-templates", json={"template": {}}, expect=400)
+    d = call(client, "PUT", "/caption-templates/defaults", json={"scope": "account:1", "key": mine["key"]})
+    assert d["account:1"] == mine["key"]
+    call(client, "PUT", "/caption-templates/defaults", json={"scope": "everywhere", "key": "x"}, expect=400)
+    call(client, "DELETE", f"/caption-templates/{mine['id']}", route="/caption-templates/{tid}")
+
+
 def test_every_route_is_covered():
     from clipfarm import api
     routes = set()

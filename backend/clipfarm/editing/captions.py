@@ -91,6 +91,47 @@ class Preset:
     pop: int               # % scale the spoken word pops from (100 = no pop)
     max_words: int
     blur: float = 1.5      # softens the outline and shadow edge
+    animation: str = "pop"           # pop | bounce | karaoke | typewriter | none
+    y: float | None = None           # vertical centre as a fraction of the height (None = layout default)
+    emoji: bool = False
+
+    def as_dict(self) -> dict:
+        from dataclasses import asdict
+        return asdict(self)
+
+
+ANIMATIONS = ["pop", "bounce", "karaoke", "typewriter", "none"]
+TEMPLATE_FIELDS = ["family", "em", "uppercase", "text", "highlight", "outline", "outline_px", "shadow_px",
+                   "shadow_alpha", "pop", "max_words", "blur", "animation", "y", "emoji"]
+
+
+def template_from(t: dict | str | None) -> Preset:
+    """A template dict (user-made, possibly partial) or a preset key -> Preset. Invalid values fall back."""
+    if t is None or isinstance(t, str):
+        return preset(t)
+    base = preset(t.get("base") or t.get("key"))
+    vals = base.as_dict()
+    for k in TEMPLATE_FIELDS:
+        if k in t and t[k] is not None:
+            vals[k] = t[k]
+    if vals["family"] not in FONTS:
+        vals["family"] = base.family
+    if vals["animation"] not in ANIMATIONS:
+        vals["animation"] = "pop"
+    for c in ("text", "highlight", "outline"):
+        v = str(vals[c]).lstrip("#").upper()
+        vals[c] = v if re.fullmatch(r"[0-9A-F]{6}", v) else getattr(base, c)
+    vals["em"] = float(min(140, max(40, float(vals["em"]))))
+    vals["max_words"] = int(min(3, max(1, int(vals["max_words"]))))
+    vals["outline_px"] = float(min(16, max(0, float(vals["outline_px"]))))
+    vals["shadow_px"] = float(min(16, max(0, float(vals["shadow_px"]))))
+    vals["shadow_alpha"] = int(min(255, max(0, int(vals["shadow_alpha"]))))
+    vals["pop"] = int(min(140, max(100, int(vals["pop"]))))
+    if vals["y"] is not None:
+        vals["y"] = float(min(0.74, max(0.11, float(vals["y"]))))
+    vals["key"] = t.get("key") or base.key
+    vals["label"] = t.get("label") or t.get("name") or base.label
+    return Preset(**vals)
 
 
 PRESETS: dict[str, Preset] = {
@@ -109,7 +150,8 @@ def preset(key: str | None) -> Preset:
 
 
 def presets_public() -> list[dict]:
-    return [{"key": p.key, "label": p.label, "font": p.family, "font_file": FONTS[p.family], "outline_px": p.outline_px, "size_px": p.em, "uppercase": p.uppercase,
+    return [{"key": p.key, "label": p.label, "font": p.family, "font_file": FONTS[p.family], "outline_px": p.outline_px,
+             "animation": p.animation, "template": p.as_dict(), "size_px": p.em, "uppercase": p.uppercase,
              "text": "#" + p.text, "highlight": "#" + p.highlight, "outline": "#" + p.outline,
              "max_words": p.max_words, "pop": p.pop > 100} for p in PRESETS.values()]
 
@@ -321,11 +363,24 @@ def build_track(words: list[dict], out: Path, style_name: str = DEFAULT, words_p
                 keep_clear: tuple[str, ...] = (), nudge: float = 0.0, uppercase: bool | None = None,
                 profanity: str = "keep", fillers: str = "remove", emoji: bool = False, hook: str | None = None,
                 hook_sec: float = 2.2, credit: str | None = None, duration: float | None = None,
-                cam_h: int = 640) -> CaptionTrack:
-    """words: [{"word","start","end"}] in source time; `offset` is subtracted so they line up with the clip."""
-    pr = preset(style_name)
+                cam_h: int = 640, layout_segments: list[tuple[float, str]] | None = None) -> CaptionTrack:
+    """words: [{"word","start","end"}] in source time; `offset` is subtracted so they line up with the clip.
+    style_name: a preset key or a template dict. layout_segments: [(clip time, layout)] when the layout
+    changes mid-clip -- each caption uses the placement of the layout on screen when it appears."""
+    pr = template_from(style_name)
     upper = pr.uppercase if uppercase is None else uppercase
-    pl = placement(layout, src_w, src_h, tuple(keep_clear), nudge, cam_h)
+    emoji = emoji or pr.emoji
+
+    def place_for(t: float) -> Placement:
+        lay = layout
+        for t0, name in (layout_segments or []):
+            if t >= t0 - 1e-3:
+                lay = name
+        p = placement("crop" if lay in ("speaker", "pip") else lay, src_w, src_h, tuple(keep_clear), nudge, cam_h)
+        if pr.y is not None and lay != "split":
+            p.y = pr.y * H + nudge
+        return p
+    pl = place_for(0.0)
     fs = ass_size(pr.family, pr.em)
     header = f"""[Script Info]
 ScriptType: v4.00+
@@ -361,7 +416,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         stack = [ch]
         while stack:
             c = stack.pop(0)
-            if len(c) > 1 and not layout_chunk(c, pr, pl, upper).fits:
+            if len(c) > 1 and not layout_chunk(c, pr, place_for(c[0]["start"]), upper).fits:
                 stack[:0] = [c[:len(c) // 2], c[len(c) // 2:]]
             else:
                 chunks.append(c)
@@ -373,7 +428,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             chunk_end = min(chunk_end, nxt)
         if duration:
             chunk_end = min(chunk_end, duration)
-        blk = layout_chunk(chunk, pr, pl, upper)
+        cpl = place_for(chunk[0]["start"])
+        blk = layout_chunk(chunk, pr, cpl, upper)
         cfs = ass_size(pr.family, blk.em)
         first_y = blk.y - blk.height / 2 + blk.line_h / 2
         for j, cur in enumerate(chunk):
@@ -381,13 +437,27 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             end = chunk[j + 1]["start"] if j + 1 < len(chunk) else chunk_end
             end = max(end, start + 0.05)
             rows = []
+            order = [w for line in blk.lines for w in line]
+            cur_i = order.index(cur)
             for li, line in enumerate(blk.lines):
                 parts = []
                 for w in line:
                     txt = _esc(_word_text(w, upper))
-                    if w is cur:
-                        anim = (f"\\fscx{pr.pop}\\fscy{pr.pop}\\t(0,90,\\fscx100\\fscy100)" if pr.pop > 100 else "")
+                    wi = order.index(w)
+                    a = pr.animation
+                    if a == "typewriter" and wi > cur_i:
+                        parts.append(f"{{\\alpha&HFF&}}{txt}{{\\alpha&H00&}}")     # not typed yet (keeps layout)
+                    elif w is cur:
+                        if a == "pop" and pr.pop > 100:
+                            anim = f"\\fscx{pr.pop}\\fscy{pr.pop}\\t(0,90,\\fscx100\\fscy100)"
+                        elif a == "bounce":
+                            anim = (f"\\fscx{max(100, pr.pop - 6)}\\fscy78\\t(0,70,\\fscy{pr.pop + 8})"
+                                    f"\\t(70,150,\\fscx100\\fscy100)")
+                        else:
+                            anim = ""
                         parts.append(f"{{\\c{_c(pr.highlight)}{anim}}}{txt}{{\\c{_c(pr.text)}\\fscx100\\fscy100}}")
+                    elif a == "karaoke" and wi < cur_i:
+                        parts.append(f"{{\\c{_c(pr.highlight)}}}{txt}{{\\c{_c(pr.text)}}}")   # already sung
                     else:
                         parts.append(txt)
                 rows.append(" ".join(parts))
@@ -400,7 +470,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                            "y": round(blk.y), "em": round(blk.em, 1), "lines": len(blk.lines),
                            "line_h": round(blk.line_h, 1),
                            "rows": [[_word_text(w, upper) for w in line] for line in blk.lines],
-                           "hi": [[w is cur for w in line] for line in blk.lines]})
+                           "hi": [[w is cur for w in line] for line in blk.lines],
+                           "animation": pr.animation})
             if emoji and (code := emoji_for(cur["word"])):
                 size = int(blk.em * 1.1)
                 emojis.append({"code": code, "start": start, "end": max(end, start + 0.6), "size": size,

@@ -66,7 +66,8 @@ def transcribe(media: Path, size: str = "small", device: str = "auto",
         kwargs["clip_timestamps"] = [start, end] if end else [start]
     words = []
     try:
-        segments, _ = model.transcribe(str(media), **kwargs)
+        segments, info = model.transcribe(str(media), **kwargs)
+        transcribe.last_language = getattr(info, "language", None)      # Whisper's language detection
         for seg in segments:
             for w in seg.words or []:
                 words.append({"word": w.word.strip(), "start": float(w.start), "end": float(w.end)})
@@ -74,6 +75,9 @@ def transcribe(media: Path, size: str = "small", device: str = "auto",
         log.warning("Transcription failed (%s); rendering without captions", e)
         return []
     return words
+
+
+transcribe.last_language = None
 
 
 def speech_excitement(words: list[dict], duration_sec: int) -> np.ndarray:

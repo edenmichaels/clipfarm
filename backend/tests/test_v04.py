@@ -353,11 +353,20 @@ def test_speech_is_ducked_and_mix_is_minus_14_lufs(tmp_path, fresh_db):
     assert abs(integrated_lufs(Path(out["path"])) + 14) <= 1.0
 
 
-def test_only_library_music_can_be_used_and_no_trending_audio():
-    """Music only comes from the licensed library (pick.choose); trending sounds are names only."""
-    pipe = (ROOT / "backend/clipfarm/jobs/pipeline.py").read_text(encoding="utf-8")
-    assert "music=Path(track[\"path\"]) if track" in pipe and "music_pick.choose(" in pipe
-    assert not re.search(r"settings\.get\(\"music\"\)|settings\[\"music\"\]", pipe)   # no arbitrary file paths
+def test_only_library_music_can_be_used_and_no_trending_audio(fresh_db, tmp_path):
+    """Music only comes from the licensed library; anything else in an edit project is dropped at render."""
+    from clipfarm.edit import compile as EC
+    from clipfarm.music import library
+    library.ensure_bundled()
+    t = library.tracks()[0]
+    assert EC.licensed(t["path"])
+    stray = tmp_path / "some_trending_song.mp3"
+    stray.write_bytes(b"x")
+    assert not EC.licensed(str(stray))
+    db.ex("UPDATE music_tracks SET enabled=0 WHERE id=?", (t["id"],))
+    assert not EC.licensed(t["path"])                                              # disabled = not usable
+    build = (ROOT / "backend/clipfarm/edit/build.py").read_text(encoding="utf-8")
+    assert "music_pick.choose(" in build and 'track["path"]' in build
     src = "\n".join(p.read_text(encoding="utf-8") for p in (ROOT / "backend/clipfarm").rglob("*.py"))
     assert not re.search(r"(tiktok|instagram)\.com/[^\"']*(music|audio|sound)", src, re.I)
     tr = (ROOT / "backend/clipfarm/music/trending.py").read_text(encoding="utf-8")

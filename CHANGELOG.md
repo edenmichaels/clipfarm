@@ -1,5 +1,51 @@
 # ClipFarm changelog
 
+## 0.5.0 (Stage 2): every clip is an editable project
+
+### Edit projects
+- Each clip is now an edit project: the source, the cuts, the layout, captions, hook, zooms, effects, music and
+  campaign rules, saved as one list of edits. Nothing is baked in until you export, and you can always go back.
+- Every change is saved as a version: undo, redo and a history list.
+- Only what changed is re-rendered. Moving captions or swapping music reuses the already-cut video. A fast
+  low-res preview is available for editing; exports use the full-quality GPU encoder (NVIDIA / AMD / Intel)
+  and fall back to the CPU.
+- Highlight detection and auto-pilot now make edit projects and export them straight away, so hands-off still
+  works. Clips keep their source section so you can re-edit them later. Clips from 0.4 are converted the first
+  time you open them.
+
+### AI reframe
+- Each shot is recognised as facecam + gameplay, gameplay only, people/IRL, or a screen/menu, and gets the
+  right layout: split, smart crop that follows the action, speaker crop that follows whoever's talking,
+  picture-in-picture facecam, or the whole frame on a blurred background.
+- Layouts switch mid-clip when the scene changes; each switch is a keyframe you can change.
+- The camera moves smoothly with no jitter: small moves are ignored and fast moves are eased.
+- Facecam: found automatically, or set it yourself once and it's remembered for that streamer.
+- A campaign's required overlay or streamer face is never cropped out. Breaking that rule is flagged with a
+  one-click fix.
+- **Fixed:** frame sampling for tracking used to snap to keyframes and see the same picture repeatedly, so the
+  action crop barely moved. It now reads the exact frames.
+
+### Transcript editing
+- Delete words to cut them out of the video. "Remove filler words" and "Remove silences" are one click each.
+- Change the clip's start and end from the transcript. Fix a wrong word and the captions update.
+
+### Caption templates
+- Every caption look is an editable template: font, text and highlight colours, outline, shadow, size,
+  position, capitals, words on screen (1–3), animation (pop, bounce, karaoke, typewriter or none) and emoji.
+- Save your own templates and set a default for each account or campaign.
+- Captions follow layout switches (on the seam in split, normal position otherwise).
+- Captions in other languages: ClipFarm detects the spoken language, and your AI model translates while keeping
+  the timing.
+
+### Export presets
+- TikTok, YouTube Shorts, Instagram Reels and X (bitrate and length limits), plus "video + separate .srt captions".
+
+### Under the hood
+- Database update 6 (automatic): edit projects, version history and caption templates.
+- 49 new tests: projects render identically after reloading, undo/redo, deleted words remove exactly the right
+  audio, export presets, centring for every template × layout, reframe tracking and overlay safety, templates,
+  translation timing, and old clips.
+
 ## 0.4.0 (Stage 1 of the editor rebuild): better captions, better highlights, better music
 
 ### Captions

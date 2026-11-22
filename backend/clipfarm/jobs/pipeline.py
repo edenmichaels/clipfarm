@@ -17,9 +17,9 @@ from .. import compliance, db
 from ..campaigns import autopilot, matching, rules
 from ..discovery.service import rank_game
 from ..editing.hooks import generate_package
-from ..editing.layout import Box
 from ..editing.render import RenderSpec, render
 from ..music import pick as music_pick
+from ..edit import build as edit_build, compile as edit_compile, project as edit_project, templates as edit_templates
 from ..highlights import dedupe, detect, learning, rate, run, visual
 from ..highlights.chat_logger import ChatLogger, load_chat
 from ..highlights.transcribe import transcribe
@@ -287,45 +287,37 @@ def render_moment(payload: dict, ctx: JobContext) -> None:
     fc = db.get_setting(f"facecam:{streamer['id']}")   # saved facecam box, if detected before
     layout, rule_notes, review_flags = rules.choose_layout(settings.get("layout", db.get_setting("layout", "auto")),
                                                            req["onscreen"], bool(fc))
-    render_cfg = db.get_setting("render", {})
     cap_cfg = {**db.get_setting("captions", {}), **settings.get("captions", {})}
     out = storage.media_dir() / "clips" / f"{streamer['login']}_{mid}.mp4"
     clip_start, clip_end = max(0.0, start), end
     dur = clip_end - clip_start
     payoff = float(payload.get("payoff", dur * 0.6))
-
-    # ---- music: licensed library only; never on "original audio only" campaigns/projects ----
-    mcfg = db.get_setting("music", {}) or {}
     acct_ids = [int(a) for a in (settings.get("per_streamer", {}).get(str(m["streamer_id"]), {}).get("account_ids") or [])]
-    allowed, why_no_music = music_pick.music_allowed(program, settings)
-    track = plan = None
-    if allowed:
+
+    # Keep the source section: the clip is an edit project and stays editable.
+    keep = storage.media_dir() / "sources" / f"{streamer['login']}_m{mid}{media_path.suffix or '.mp4'}"
+    keep.parent.mkdir(parents=True, exist_ok=True)
+    if media_path.resolve() != keep.resolve():
         try:
-            track = music_pick.choose(mtype, acct_ids, seed=mid)
-        except Exception as e:
-            ctx.log(f"Music skipped: {e}")
-        if track:
-            plan = music_pick.plan(track, mtype, payoff, dur)
-    elif why_no_music:
-        rule_notes.append(why_no_music)
-    speech = [(w["start"] - clip_start, w["end"] - clip_start) for w in words if w["end"] > clip_start]
-    swells = [(max(0.0, payoff - 0.3), min(dur, payoff + 2.0))]
-    spec = RenderSpec(
-        source=media_path, start=clip_start, end=clip_end, out=out, layout=layout,
-        facecam=Box(**fc) if fc else None, words=words,
-        caption_style=cap_cfg.get("style", "bold_pop"), words_per_chunk=cap_cfg.get("words_per_chunk"),
-        uppercase=cap_cfg.get("uppercase"), profanity=cap_cfg.get("profanity", "keep"),
-        fillers=cap_cfg.get("fillers", "remove"), emoji=bool(cap_cfg.get("emoji", False)),
-        keep_clear=tuple(req["onscreen"]), hook=pkg["hook"], credit=credit,
-        progress_bar=settings.get("progress_bar", True), punch_zoom=settings.get("zoom", True),
-        music=Path(track["path"]) if track else None, music_offset=plan["offset"] if plan else 0.0,
-        music_entry=plan["entry"] if plan else 0.0, music_delay=plan["delay"] if plan else 0.0,
-        music_track_lufs=track.get("loudness") if track else None,
-        duck_db=float(mcfg.get("duck_db", 15)), speech=speech, swells=swells,
-        beats=plan["zoom_beats"] if plan else [],
-        encoder=render_cfg.get("encoder", "auto"), quality=render_cfg.get("quality", "high"),
-        fps=render_cfg.get("fps", 30))
-    result = render(spec)
+            shutil.move(str(media_path), keep) if media_path.name.startswith(f"src{m['src_id']}_m") else \
+                shutil.copy2(media_path, keep)
+        except OSError:
+            keep = media_path
+    # ---- auto-edit -> edit project (EDL) -> export -------------------------------------------------
+    edl = edit_build.auto_edit(
+        media=keep, start=clip_start, end=clip_end, words=words, streamer=streamer, program=program, req=req,
+        settings=settings, moment={"id": mid, "type": mtype, "reason": m.get("reason"), "score": m.get("score")},
+        hook=pkg["hook"], credit=credit, account_ids=acct_ids, payoff=payoff)
+    if why_off := edl["music"].get("why_off"):
+        rule_notes.append(why_off)
+    ctx.progress(0.5)
+    tmpl = edit_templates.get(edl["captions"]["template"])
+    result = edit_compile.render(edl, out, storage.media_dir() / "edit_cache" / f"m{mid}", "export",
+                                 template={**tmpl, **{k: v for k, v in cap_cfg.items() if k in ("uppercase", "emoji") and v is not None}})
+    result["layout"] = edl["layout"]["keyframes"][0]["layout"] if edl["layout"]["keyframes"] else "blur_fill"
+    result["facecam"] = None
+    track = {"id": edl["music"]["track_id"]} if edl["music"].get("enabled") and edl["music"].get("track_id") else None
+    plan = {k: edl["music"].get(k) for k in ("offset", "delay", "entry", "mode", "zoom_beats")} if track else None
     if result.get("facecam") and not fc:
         db.set_setting(f"facecam:{streamer['id']}", result["facecam"])   # reuse next time
     description = pkg["description"]
@@ -351,7 +343,10 @@ def render_moment(payload: dict, ctx: JobContext) -> None:
                      "approved" if auto else "pending", rules.as_json(rule_notes, req), json.dumps(review_flags),
                      caption, int(program is None), json.dumps(words), cap_cfg.get("style", "bold_pop"), mtype,
                      m.get("reason"), track["id"] if track else None, json.dumps(plan) if plan else None,
-                     result.get("base"), json.dumps(spec_json(spec, result))))
+                     result.get("base"), None))
+    db.ex("UPDATE clips SET source_path=? WHERE id=?", (str(keep), clip_id))
+    edit_project.create(clip_id, edl, "Auto-edit")
+    edit_project.set_status(clip_id, "ready")
     if track:
         music_pick.record_use(track["id"], clip_id, acct_ids)
     db.ex("UPDATE moments SET status='rendered', transcript=? WHERE id=?", (transcript, mid))
@@ -361,8 +356,6 @@ def render_moment(payload: dict, ctx: JobContext) -> None:
                        (SELECT id FROM moments WHERE source_id=?)""", (ctx.id, m["src_id"]))["n"]
     if not pending:
         db.ex("UPDATE sources SET status='processed' WHERE id=?", (m["src_id"],))
-    if media_path.name.startswith(f"src{m['src_id']}_m"):
-        media_path.unlink(missing_ok=True)       # VOD section only used for this clip
     emit("clip_ready", clip_id=clip_id, title=pkg["title"], streamer=streamer["display_name"])
 
 
@@ -424,11 +417,63 @@ def spec_from_clip(c: dict, changes: dict | None = None) -> RenderSpec:
     return spec
 
 
+def export_edit(clip_id: int, *, preset: str | None = None, music: bool = True, out: Path | None = None,
+                quality: str = "export") -> dict:
+    """Render a clip's edit project and update the clip (file, thumbnail, hash, status)."""
+    p = edit_build.ensure_project(clip_id)
+    if not p:
+        raise PermanentError("This clip has no editable source any more (it was cleaned up).")
+    c = db.q1("SELECT * FROM clips WHERE id=?", (clip_id,))
+    edl = p["edl"]
+    tmpl = edit_templates.get(edl["captions"]["template"]) if isinstance(edl["captions"]["template"], str) \
+        else edl["captions"]["template"]
+    target = out or Path(c["file_path"] or storage.media_dir() / "clips" / f"clip_{clip_id}.mp4")
+    res = edit_compile.render(edl, target, storage.media_dir() / "edit_cache" / f"c{clip_id}", quality, music=music,
+                              template=tmpl, preset=preset)
+    if out is None and quality == "export":
+        from ..edit import timeline as T
+        db.ex("""UPDATE clips SET file_path=?, thumb_path=?, content_hash=?, duration_sec=?, hook_text=COALESCE(?,hook_text),
+                 words=?, caption_preset=?, caption_nudge=?, original_audio_only=? WHERE id=?""",
+              (res["path"], res["thumb"], res["sha256"], T.duration(edl), edl["hook"].get("text"),
+               json.dumps(edl["captions"]["words"]), edl["captions"]["template"] if isinstance(edl["captions"]["template"], str) else "custom",
+               edl["captions"].get("nudge", 0), int(not edl["music"].get("enabled")), clip_id))
+        edit_project.set_status(clip_id, "ready")
+    return res
+
+
+@handler("export_edit")
+def export_edit_job(payload: dict, ctx: JobContext) -> None:
+    res = export_edit(payload["clip_id"], preset=payload.get("preset"), music=payload.get("music", True),
+                      quality=payload.get("quality", "export"),
+                      out=Path(payload["out"]) if payload.get("out") else None)
+    if payload.get("quality") == "proxy":
+        db.ex("UPDATE edit_projects SET updated_at=updated_at WHERE clip_id=?", (payload["clip_id"],))
+        db.set_setting(f"proxy:{payload['clip_id']}", {"path": res["path"], "head": (edit_project.get(payload["clip_id"]) or {}).get("head")})
+    emit("clip_ready", clip_id=payload["clip_id"], title="", streamer="Exported" if payload.get("quality") != "proxy" else "Preview")
+
+
 @handler("rerender_clip")
 def rerender_clip(payload: dict, ctx: JobContext) -> None:
     """Re-render captions/hook/music over the clip's base (seconds, not minutes). Review uses this."""
     c = db.q1("SELECT * FROM clips WHERE id=?", (payload["clip_id"],))
     ch = payload.get("changes") or {}
+    if edit_project.get(c["id"]):          # edit-project clips: apply the change to the EDL and export
+        def apply(e):
+            if ch.get("words") is not None:
+                e["captions"]["words"] = ch["words"]
+            if ch.get("caption_nudge") is not None:
+                e["captions"]["nudge"] = ch["caption_nudge"]
+            if ch.get("caption_style"):
+                e["captions"]["template"] = ch["caption_style"]
+            if ch.get("hook") is not None:
+                e["hook"]["text"] = ch["hook"]
+            if ch.get("original_audio_only"):
+                e["music"]["enabled"] = False
+            return e
+        edit_project.update(c["id"], apply, "Review edit")
+        export_edit(c["id"])
+        emit("clip_ready", clip_id=c["id"], title=c["title"], streamer="Re-rendered")
+        return
     spec = spec_from_clip(c, ch)
     spec.words = [{**w, "start": float(w["start"]), "end": float(w["end"])} for w in spec.words]
     res = render(spec)
@@ -450,9 +495,11 @@ def export_for_trending(payload: dict, ctx: JobContext) -> None:
     """Same video and captions, stream audio only: add a trending sound in TikTok/Instagram's editor."""
     from ..editing.render import export_without_music
     c = db.q1("SELECT * FROM clips WHERE id=?", (payload["clip_id"],))
-    spec = spec_from_clip(c)
     out = Path(c["file_path"]).with_name(Path(c["file_path"]).stem + "_for_trending_sound.mp4")
-    export_without_music(spec, out)
+    if edit_project.get(c["id"]):
+        export_edit(c["id"], music=False, out=out)
+    else:
+        export_without_music(spec_from_clip(c), out)
     db.ex("UPDATE clips SET nomusic_path=? WHERE id=?", (str(out), c["id"]))
 
 
