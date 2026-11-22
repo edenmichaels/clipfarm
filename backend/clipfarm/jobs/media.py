@@ -13,8 +13,15 @@ from pathlib import Path
 
 def _ydl(opts: dict):
     import yt_dlp  # type: ignore
+
+    from .. import proc
+    from ..editing.ffmpeg_util import ffmpeg_bin
+    proc.install_guard()            # yt-dlp starts ffmpeg itself: make sure it never opens a console window
     base = {"quiet": True, "no_warnings": True, "noprogress": True, "retries": 5,
             "concurrent_fragment_downloads": 4, "overwrites": False}
+    ff = ffmpeg_bin()
+    if Path(ff).is_file():
+        base["ffmpeg_location"] = str(Path(ff).parent)
     return yt_dlp.YoutubeDL({**base, **opts})
 
 

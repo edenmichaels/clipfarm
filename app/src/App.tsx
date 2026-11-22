@@ -40,6 +40,7 @@ export default function App() {
   const [setupDone, setSetupDone] = useState(false);
   const [page, setPage] = useState<MainPage>("dashboard");
   const [encoder, setEncoder] = useState("");
+  const [paused, setPaused] = useState(false);
   const [conn, setConn] = useState<ConnState>("connecting");
   const [connDetail, setConnDetail] = useState("");
   const [banner, setBanner] = useState<string | null>(null);
@@ -106,6 +107,25 @@ export default function App() {
       .catch((e) => setError(String(e.message || e)));
   }, []);
 
+  // Engine paused? (also changed from the tray menu, which sends "engine-paused")
+  useEffect(() => {
+    if (!ready) return;
+    const load = () => api.get("/engine/status").then((st) => { setPaused(!!st.paused); invoke("set_engine_paused", { paused: !!st.paused }).catch(() => {}); }).catch(() => {});
+    load();
+    const t = setInterval(load, 15_000);
+    let un: (() => void) | undefined;
+    import("@tauri-apps/api/event").then(({ listen }) => listen<boolean>("engine-paused", (e) => setPaused(!!e.payload)))
+      .then((f) => { un = f; }).catch(() => {});
+    return () => { clearInterval(t); un?.(); };
+  }, [ready]);
+  const togglePause = async () => {
+    try {
+      const st = await api.post(paused ? "/engine/resume" : "/engine/pause");
+      setPaused(!!st.paused);
+      invoke("set_engine_paused", { paused: !!st.paused }).catch(() => {});
+    } catch { /* engine unreachable: the reconnect banner explains */ }
+  };
+
   // Backend events -> desktop toasts (also while minimised to the tray).
   useEffect(() => {
     if (!ready) return;
@@ -151,8 +171,13 @@ export default function App() {
         ))}
         <div className="engine">
           <span className="muted" style={{ fontSize: 12 }}>Engine</span>
-          <span className="engine-status"><span className="dot" style={conn === "connected" ? undefined : { background: "#f5a524" }} />
-            {conn === "connected" ? "Running" : "Reconnecting"}{encoder ? ` · ${encoder}` : ""}</span>
+          <div className="row between" style={{ gap: 6, flexWrap: "nowrap" }}>
+            <span className="engine-status"><span className="dot" style={conn !== "connected" ? { background: "#f5a524" } : paused ? { background: "var(--muted)" } : undefined} />
+              {conn !== "connected" ? "Reconnecting" : paused ? "Paused" : "Running"}{encoder ? ` · ${encoder}` : ""}</span>
+            <button className="engine-toggle" onClick={togglePause} disabled={conn !== "connected"}
+              title={paused ? "Resume: start processing again" : "Pause: stop processing now (ffmpeg is stopped too)"}
+              aria-label={paused ? "Resume engine" : "Pause engine"}>{paused ? "▶ Resume" : "⏸ Pause"}</button>
+          </div>
         </div>
       </nav>
       <main className="content">

@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import numpy as np
+from .. import proc
 
 SR = 44100
 A4 = 440.0
@@ -450,7 +451,6 @@ def build(name: str) -> Track:
 
 def render_all(out_dir, ffmpeg: str) -> list[dict]:
     """Write every track as .m4a + return manifest entries."""
-    import subprocess
     import tempfile
     from pathlib import Path
     out_dir = Path(out_dir)
@@ -463,7 +463,7 @@ def render_all(out_dir, ffmpeg: str) -> list[dict]:
             pcm = (tr.master() * 32767).astype("<i2").tobytes()
             with tempfile.NamedTemporaryFile(suffix=".raw", delete=False) as f:
                 f.write(pcm)
-            subprocess.run([ffmpeg, "-v", "error", "-y", "-f", "s16le", "-ar", str(SR), "-ac", "2", "-i", f.name,
+            proc.run([ffmpeg, "-v", "error", "-y", "-f", "s16le", "-ar", str(SR), "-ac", "2", "-i", f.name,
                             "-c:a", "aac", "-b:a", "192k", str(dst)], check=True)
             Path(f.name).unlink(missing_ok=True)
         manifest.append({"file": dst.name, "title": tr.title, "artist": "ClipFarm Originals", "moods": tr.moods,

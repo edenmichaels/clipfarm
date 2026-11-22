@@ -37,6 +37,14 @@ pub fn open_campaign_browser(app: AppHandle, url: Option<String>) -> Result<(), 
     if !allowed(&target) {
         return Err("The campaign browser only opens Content Rewards and Whop pages.".into());
     }
+    // Only open it from something you clicked in the visible main window, never in the background.
+    let main_visible = app
+        .get_webview_window("main")
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false);
+    if !main_visible {
+        return Err("Open ClipFarm first, then open the campaign browser.".into());
+    }
     if let Some(w) = app.get_webview_window(LABEL) {
         w.navigate(target).map_err(|e| e.to_string())?;
         let _ = w.unminimize();

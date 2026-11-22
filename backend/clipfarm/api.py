@@ -322,6 +322,70 @@ def retry_job(jid: int):
     return {"ok": True}
 
 
+# ---- engine control + failed sources ----------------------------------------------------------
+@app.get("/engine/status", dependencies=A)
+def engine_status():
+    from . import proc
+    return {"paused": eng.is_paused(), "children": proc.running(),
+            "jobs_running": db.q1("SELECT COUNT(*) n FROM jobs WHERE status='running'")["n"],
+            "failed_sources": db.q1("SELECT COUNT(*) n FROM sources WHERE status='error'")["n"]}
+
+
+@app.post("/engine/pause", dependencies=A)
+def engine_pause():
+    stopped = eng.pause_engine()
+    return {**engine_status(), "stopped": stopped}
+
+
+@app.post("/engine/resume", dependencies=A)
+def engine_resume():
+    eng.resume_engine()
+    return engine_status()
+
+
+@app.post("/engine/shutdown", dependencies=A)
+def engine_shutdown():
+    """Quit: stop every child process (ffmpeg) and exit the engine. The desktop app calls this before closing."""
+    from . import proc
+    eng.PAUSED.set()                     # nothing new starts; interrupted jobs are requeued, not failed
+    n = proc.kill_all()
+
+    def bye():
+        import time as _t
+        _t.sleep(0.3)
+        proc.kill_all()
+        os._exit(0)
+    import threading as _th
+    _th.Thread(target=bye, daemon=True).start()
+    return {"ok": True, "stopped": n}
+
+
+@app.get("/sources/problems", dependencies=A)
+def sources_problems():
+    """Sources that failed (with their error and a Retry button) or are waiting to be retried."""
+    return db.q("""SELECT so.id, so.kind, so.title, so.url, so.status, so.error, so.retry_at, so.failed_at,
+                   s.display_name streamer FROM sources so JOIN streamers s ON s.id=so.streamer_id
+                   WHERE so.status='error' OR (so.error IS NOT NULL AND so.status NOT IN ('processed','deleted'))
+                   ORDER BY so.status='error' DESC, so.id DESC LIMIT 100""")
+
+
+@app.post("/sources/{sid}/retry", dependencies=A)
+def source_retry(sid: int):
+    src = db.q1("SELECT * FROM sources WHERE id=?", (sid,))
+    if not src:
+        raise HTTPException(404, "Source not found")
+    last = db.q1("""SELECT payload, project_id FROM jobs WHERE kind='process_source'
+                    AND json_extract(payload,'$.source_id')=? ORDER BY id DESC LIMIT 1""", (sid,))
+    if not last:
+        raise HTTPException(409, "This source was never processed, so there's nothing to retry.")
+    if db.q1("""SELECT 1 FROM jobs WHERE kind='process_source' AND status IN ('queued','running')
+                AND json_extract(payload,'$.source_id')=?""", (sid,)):
+        return {"ok": True, "already_queued": True}
+    db.ex("UPDATE sources SET status='new', error=NULL, retry_at=NULL, failed_at=NULL WHERE id=?", (sid,))
+    jid = eng.enqueue("process_source", json.loads(last["payload"]), last["project_id"], priority=3)
+    return {"ok": True, "job_id": jid}
+
+
 # ---- clips ---------------------------------------------------------------------------
 @app.get("/clips", dependencies=A)
 def clips(game_id: int | None = None, streamer_id: int | None = None, review_status: str | None = None,

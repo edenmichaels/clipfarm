@@ -10,12 +10,14 @@ import os
 import sys
 import threading
 import time
+from pathlib import Path
 
 import uvicorn
 
 from . import config, db, redact, secrets
 from .jobs import pipeline  # noqa: F401  (registers job handlers)
 from .jobs.engine import Engine, enqueue
+from . import proc
 
 log = logging.getLogger("clipfarm")
 
@@ -71,7 +73,6 @@ def self_test(out_path: str) -> int:
     Renders a short clip (layout, captions, hook, credit) with the bundled FFmpeg/font, round-trips a key
     through Credential Manager + vault, and runs the offline health checks. Exit code 0 = pass."""
     import json
-    import subprocess
     import tempfile
     from pathlib import Path
     from . import health
@@ -84,7 +85,7 @@ def self_test(out_path: str) -> int:
         res["steps"]["ffmpeg"] = ffmpeg_bin()
         work = Path(tempfile.mkdtemp(prefix="clipfarm self test "))
         src = work / "source clip.mp4"
-        subprocess.run([ffmpeg_bin(), "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=1280x720:r=30:d=8",
+        proc.run([ffmpeg_bin(), "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=1280x720:r=30:d=8",
                         "-f", "lavfi", "-i", "sine=f=330:d=8", "-shortest", "-c:v", "libx264", "-preset", "ultrafast",
                         "-c:a", "aac", str(src)], check=True, capture_output=True)
         words = [{"word": w, "start": 1 + i * 0.4, "end": 1.35 + i * 0.4} for i, w in enumerate("no way that worked".split())]
@@ -96,7 +97,7 @@ def self_test(out_path: str) -> int:
         # Captions centred in the real install (bundled FFmpeg + fonts): render with/without, measure.
         import numpy as np
         flat = work / "flat clip.mp4"
-        subprocess.run([ffmpeg_bin(), "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=0x404040:s=1920x1080:r=30:d=5",
+        proc.run([ffmpeg_bin(), "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=0x404040:s=1920x1080:r=30:d=5",
                         "-f", "lavfi", "-i", "sine=f=220:d=5", "-shortest", "-c:v", "libx264", "-preset", "ultrafast",
                         "-c:a", "aac", str(flat)], check=True, capture_output=True)
         cw = [{"word": w, "start": 1 + i * 0.4, "end": 1.35 + i * 0.4} for i, w in enumerate("WAIT FOR IT".split())]
@@ -104,7 +105,7 @@ def self_test(out_path: str) -> int:
         for name, ws in (("with", cw), ("without", [])):
             rr = render(RenderSpec(flat, 0, 4, work / f"cap {name}.mp4", layout="crop", words=ws, quality="fast",
                                    punch_zoom=False, progress_bar=False))
-            raw = subprocess.run([ffmpeg_bin(), "-v", "error", "-ss", "1.5", "-i", rr["path"], "-frames:v", "1",
+            raw = proc.run([ffmpeg_bin(), "-v", "error", "-ss", "1.5", "-i", rr["path"], "-frames:v", "1",
                                   "-f", "rawvideo", "-pix_fmt", "gray", "-"], capture_output=True, check=True).stdout
             frames.append(np.frombuffer(raw, np.uint8).reshape(1920, 1080).astype(int))
         ys, xs = np.nonzero(np.abs(frames[0] - frames[1]) > 30)
@@ -167,6 +168,40 @@ def _parent_alive(pid: int) -> bool:
         return False
 
 
+_lock_file = None
+
+
+def acquire_single_instance(path: Path | None = None, wait_sec: float = 15.0) -> bool:
+    """Only one engine (one job loop) may run per data folder. A second engine waits briefly (the old one may be
+    shutting down after an update or restart) and then gives up. The OS releases the lock if the engine dies."""
+    global _lock_file
+    path = path or (config.app_data_dir() / "engine.lock")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    f = open(path, "a+")
+    deadline = time.time() + wait_sec
+    while True:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError:
+            if time.time() >= deadline:
+                f.close()
+                return False
+            time.sleep(0.5)
+    f.seek(0)
+    f.truncate()
+    f.write(str(os.getpid()))
+    f.flush()
+    _lock_file = f
+    return True
+
+
 def _watch_parent() -> None:
     """Exit if the desktop shell dies (e.g. killed from Task Manager) so no orphan engine is left."""
     pid = int(os.environ.get("CLIPFARM_PARENT_PID", "0"))
@@ -177,6 +212,8 @@ def _watch_parent() -> None:
         while True:
             time.sleep(5)
             if not _parent_alive(pid):
+                from . import proc
+                proc.kill_all()
                 os._exit(0)
     threading.Thread(target=loop, daemon=True, name="parent-watch").start()
 
@@ -193,6 +230,12 @@ def main() -> None:
     _ensure_stdio()
     logging.basicConfig(level=logging.INFO, stream=sys.stderr)
     redact.install_logging_filter()
+    if not acquire_single_instance():
+        print("CLIPFARM_ALREADY_RUNNING another ClipFarm engine is using this data folder", flush=True)
+        sys.exit(3)
+    from . import proc
+    proc.install_guard()                    # no console windows for any child process (Windows)
+    proc.kill_children_when_engine_dies()   # Windows: ffmpeg etc. can't outlive the engine
     _watch_parent()
     db.init_db()
     _startup_jobs()

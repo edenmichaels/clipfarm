@@ -26,7 +26,7 @@ from ..highlights.chat_logger import ChatLogger, load_chat
 from ..highlights.transcribe import transcribe
 from ..providers import available_providers
 from . import media, storage
-from .engine import JobContext, emit, enqueue, handler
+from .engine import JobContext, emit, enqueue, handler, on_failure
 
 TICK_MINUTES = 10
 _chat_loggers: dict[str, threading.Event] = {}
@@ -125,6 +125,20 @@ def _ensure_chat_logger(s: dict) -> None:
     out = storage.media_dir() / "chat" / f"{key}-{datetime.now():%Y%m%d}.jsonl"
     ChatLogger(key, out, ev).start()
     _chat_loggers[key] = ev
+
+
+@on_failure("process_source")
+def process_source_failed(payload: dict, message: str, final: bool, retry_in: int | None) -> None:
+    """A source that keeps failing is retried 3 times (30 s, 2 min, 10 min), then shown as failed with a Retry
+    button, and the engine moves on to the next source."""
+    sid = payload.get("source_id")
+    if final:
+        db.ex("UPDATE sources SET status='error', error=?, retry_at=NULL, failed_at=datetime('now') WHERE id=?",
+              (message[:500], sid))
+        emit("source_failed", source_id=sid, message=message[:200])
+    else:
+        db.ex("UPDATE sources SET status='new', error=?, retry_at=datetime('now', ?) WHERE id=?",
+              (message[:500], f"+{int(retry_in or 0)} seconds", sid))
 
 
 @handler("process_source")

@@ -1,5 +1,36 @@
 # ClipFarm changelog
 
+## 0.7.1: no more flashing console windows, no retry loops, proper pause and quit
+
+### Fixed
+- **A console window kept flashing and stealing focus while the engine ran.** The engine is a windowless app, so
+  on Windows every program it starts (ffmpeg, ffprobe, the downloads yt-dlp runs) got its own new console
+  window. With Windows Terminal as the default terminal, that window popped up every time.
+  - Every external program now starts through one helper that hides its window (`CREATE_NO_WINDOW` plus a
+    hidden `STARTUPINFO`) and never uses a shell. Errors go to the app's log instead of a console.
+  - The same rule also covers programs that libraries start on their own.
+- **"process_source: setting an array element with a sequence … inhomogeneous shape".**
+  - Highlight detection crashed on any source shorter than about 9 seconds (short Twitch clips). One smoothing
+    step returned more values than it was given, so the signals no longer lined up.
+  - Every signal is now forced to the source's length, and short clips work.
+- **Failing sources no longer loop.** A source that fails is retried at most 3 times (after 30 s, 2 min and
+  10 min). It then shows as failed on Home, with its error and a **Retry** button, and the engine moves on.
+
+### Pause and quit
+- **Pause / Resume** button next to the engine status in the sidebar, and in the tray menu. Pausing stops
+  starting new work and stops the ffmpeg runs in progress. Those jobs go back in the queue without using up a
+  retry.
+- **Settings › General › When I close the window:** keep running in the tray (the default) or quit. The first
+  time it goes to the tray, a notification tells you where it went.
+- **Quit** (tray menu, Settings, or the close button when set to quit) stops the engine and every ffmpeg it
+  started. On Windows, child programs can't outlive the engine, even if it's killed.
+- The Campaigns browser only opens when you click something in the main window. It closes when ClipFarm goes
+  to the tray.
+- Only one copy of ClipFarm and one engine can run at a time.
+
+### Database
+- Migration v9 (additive): sources gain `error`, `retry_at` and `failed_at`.
+
 ## 0.7.0 (Stage 4): music and sound, hooks and titles, effects, brand templates, learning, variants
 
 ### Hooks, titles and hashtags

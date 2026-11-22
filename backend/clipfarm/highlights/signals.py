@@ -16,6 +16,7 @@ from pathlib import Path
 import numpy as np
 
 from ..editing.ffmpeg_util import ffmpeg_bin
+from .. import proc
 
 HYPE_TOKENS = {
     "lul", "lol", "lmao", "lmfao", "kekw", "omegalul", "pog", "pogchamp", "poggers", "pogu",
@@ -29,18 +30,18 @@ def audio_rms(media: Path, sample_rate: int = 8000) -> np.ndarray:
     """Per-second RMS loudness in dBFS, streamed so multi-hour VODs don't blow up memory."""
     cmd = [ffmpeg_bin(), "-v", "error", "-i", str(media), "-vn", "-ac", "1", "-ar", str(sample_rate),
            "-f", "s16le", "-"]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    child = proc.popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     out: list[float] = []
     chunk = sample_rate * 2  # one second of int16
-    assert proc.stdout
+    assert child.stdout
     while True:
-        buf = proc.stdout.read(chunk)
+        buf = child.stdout.read(chunk)
         if not buf:
             break
         x = np.frombuffer(buf, dtype=np.int16).astype(np.float32) / 32768.0
         rms = float(np.sqrt(np.mean(x * x))) if x.size else 0.0
         out.append(20 * np.log10(rms + 1e-6))
-    proc.wait()
+    child.wait()
     return np.array(out, dtype=np.float32)
 
 
@@ -131,6 +132,11 @@ def zscore(x: np.ndarray, window: int = 300) -> np.ndarray:
 
 
 def smooth(x: np.ndarray, sec: int = 3) -> np.ndarray:
+    """Moving average that always returns exactly len(x) values.
+    (np.convolve(mode="same") returns max(len(x), sec) values, so a source shorter than the window gave a longer
+    array than every other signal, and combining them crashed with "inhomogeneous shape".)"""
+    x = np.asarray(x, dtype=np.float32)
     if x.size == 0 or sec <= 1:
         return x
-    return np.convolve(x, np.ones(sec) / sec, mode="same")
+    start = (sec - 1) // 2                      # same centring as mode="same" for normal-length input
+    return np.convolve(x, np.ones(sec) / sec, mode="full")[start:start + x.size].astype(np.float32)

@@ -16,6 +16,7 @@ from pathlib import Path
 import numpy as np
 
 from ..editing.ffmpeg_util import ffmpeg_bin
+from .. import proc
 
 FW, FH, FPS = 96, 54, 4
 
@@ -23,15 +24,15 @@ FW, FH, FPS = 96, 54, 4
 def frames(media: Path):
     cmd = [ffmpeg_bin(), "-v", "error", "-i", str(media), "-an", "-vf",
            f"fps={FPS},scale={FW}:{FH}:flags=area", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    child = proc.popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     size = FW * FH * 3
-    assert proc.stdout
+    assert child.stdout
     while True:
-        buf = proc.stdout.read(size)
+        buf = child.stdout.read(size)
         if len(buf) < size:
             break
         yield np.frombuffer(buf, np.uint8).reshape(FH, FW, 3)
-    proc.wait()
+    child.wait()
 
 
 def analyse(media: Path) -> dict[str, np.ndarray]:

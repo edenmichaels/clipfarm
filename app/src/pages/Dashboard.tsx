@@ -16,7 +16,11 @@ export default function Dashboard({ go }: { go: (p: Page, tab?: string) => void 
   const [d, setD] = useState<any>(null);
   const [details, setDetails] = useState(false);
 
-  const load = () => api.get("/dashboard").then(setD).catch(() => {});
+  const [problems, setProblems] = useState<any[]>([]);
+  const load = () => {
+    api.get("/sources/problems").then(setProblems).catch(() => {});
+    return api.get("/dashboard").then(setD).catch(() => {});
+  };
   useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, []);
 
   const act = (id: number, a: string) => api.post(`/projects/${id}/${a}`).then(load);
@@ -33,6 +37,23 @@ export default function Dashboard({ go }: { go: (p: Page, tab?: string) => void 
         </div>
         <button className="btn-primary big" onClick={() => go("new")}>New Project</button>
       </header>
+
+      {problems.length > 0 && (
+        <section className="card stack tight">
+          <h2>Sources with problems</h2>
+          <span className="muted small-text">A source that fails is retried 3 times (after 30 s, 2 min and 10 min), then left here so ClipFarm can move on to the next one.</span>
+          {problems.slice(0, 8).map((p) => (
+            <div key={p.id} className="row between" style={{ gap: 10, flexWrap: "nowrap" }}>
+              <span className="stack tight" style={{ minWidth: 0 }}>
+                <b className="ellipsis">{p.streamer}: {p.title || p.kind.replace("_", " ")}</b>
+                <span className={p.status === "error" ? "warn-text small-text" : "muted small-text"}>
+                  {p.status === "error" ? "Failed" : `Retrying${p.retry_at ? ` at ${new Date(p.retry_at.replace(" ", "T") + "Z").toLocaleTimeString()}` : ""}`}: {p.error}</span>
+              </span>
+              {p.status === "error" && <button onClick={() => api.post(`/sources/${p.id}/retry`).then(load)}>Retry</button>}
+            </div>
+          ))}
+        </section>
+      )}
 
       <section className="tiles three">
         <button className="tile link" onClick={() => go("editor")}>

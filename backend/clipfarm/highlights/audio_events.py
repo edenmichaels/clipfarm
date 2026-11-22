@@ -19,6 +19,7 @@ from pathlib import Path
 import numpy as np
 
 from ..editing.ffmpeg_util import ffmpeg_bin
+from .. import proc
 
 log = logging.getLogger(__name__)
 
@@ -183,19 +184,19 @@ def decode(media: Path, start: float = 0.0, duration: float | None = None):
     if duration:
         cmd += ["-t", f"{duration:.3f}"]
     cmd += ["-vn", "-ac", "1", "-ar", str(SR), "-f", "f32le", "-"]
-    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    return proc.popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
 
 
 def analyse(media: Path, chunk_sec: int = 120) -> dict[str, np.ndarray] | None:
     """Per-second event scores for a whole file, in chunks (multi-hour VODs stay small in memory)."""
     if not available():
         return None
-    proc = decode(media)
-    assert proc.stdout
+    child = decode(media)
+    assert child.stdout
     parts: dict[str, list[np.ndarray]] = {}
     carry = np.zeros(0, np.float32)
     while True:
-        buf = proc.stdout.read(chunk_sec * SR * 4)
+        buf = child.stdout.read(chunk_sec * SR * 4)
         if not buf and not carry.size:
             break
         x = np.concatenate([carry, np.frombuffer(buf, np.float32)]) if buf else carry
@@ -209,5 +210,5 @@ def analyse(media: Path, chunk_sec: int = 120) -> dict[str, np.ndarray] | None:
         carry = x[secs * SR:] if buf else np.zeros(0, np.float32)
         if not buf:
             break
-    proc.wait()
+    child.wait()
     return {g: np.concatenate(v) for g, v in parts.items()} if parts else None

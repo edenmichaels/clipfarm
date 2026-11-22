@@ -42,6 +42,12 @@ def _rel(e: np.ndarray, window: int = 300) -> np.ndarray:
     return np.clip(e - 0.6 * base, 0, 1).astype(np.float32)
 
 
+def _maxr(arrs: list, n: int) -> np.ndarray:
+    """Element-wise max of several per-second signals, each first fitted to exactly n seconds."""
+    fitted = [_fit(np.broadcast_to(np.asarray(a, np.float32), (n,)) if np.ndim(a) == 0 else a, n) for a in arrs]
+    return np.maximum.reduce(fitted) if fitted else np.zeros(n, np.float32)
+
+
 def _shift(x: np.ndarray, sec: int) -> np.ndarray:
     return np.concatenate([x[sec:], np.zeros(sec, np.float32)]) if sec and x.size > sec else x
 
@@ -78,12 +84,12 @@ def components(s: Signals, focus: str = "balanced") -> tuple[dict[str, np.ndarra
         ev = {k: _fit(v, n) for k, v in s.events.items()}
         z = np.zeros(n, np.float32)
         laugh = _rel(ev.get("laughter", z))
-        action = _rel(np.maximum.reduce([ev.get("explosion", z), ev.get("gunshot", z), ev.get("crash", z),
-                                         0.7 * ev.get("vehicle", z)]))
+        action = _rel(_maxr([ev.get("explosion", z), ev.get("gunshot", z), ev.get("crash", z),
+                             0.7 * ev.get("vehicle", z)], n))
         react = _rel(np.maximum(ev.get("scream", z), ev.get("cheer", z)))
         parts.update(laugh=laugh, action=action, scream=_rel(ev.get("scream", z)), cheer=_rel(ev.get("cheer", z)),
                      speech=ev.get("speech", z), music=ev.get("music", z), silence=ev.get("silence", z))
-        a = np.clip(np.maximum.reduce([fw * laugh * 1.15, aw * action, 0.9 * react]), 0, 1)
+        a = np.clip(_maxr([fw * laugh * 1.15, aw * action, 0.9 * react], n), 0, 1)
         comp["audio_events"] = np.clip(smooth(a, 2) * loud_boost, 0, 1).astype(np.float32)
     if s.chat and s.chat.get("rate") is not None and s.chat["rate"].sum() > 0:
         ch = {k: _shift(smooth(_fit(v, n), 3), CHAT_DELAY) for k, v in s.chat.items()}
@@ -129,11 +135,11 @@ def penalty(parts: dict[str, np.ndarray], comp: dict[str, np.ndarray], n: int) -
     react = np.maximum(parts.get("laugh", z), np.maximum(parts.get("scream", z), parts.get("cheer", z)))
     action = parts.get("action", z)
     chat = comp.get("chat", z)
-    excited = np.clip(np.maximum.reduce([react * 1.5, action * 1.5, chat * 1.2]), 0, 1)
+    excited = np.clip(_maxr([react * 1.5, action * 1.5, chat * 1.2], n), 0, 1)
     pens = []
     if "static" in parts:
         # Menus, maps, inventory, loading, BRB/AFK, character creator: a still screen nobody's reacting to.
-        pens.append(np.maximum.reduce([parts["static"] * 0.9, parts["ui"], parts["dark"]]) * (1 - excited))
+        pens.append(_maxr([parts["static"] * 0.9, parts["ui"], parts["dark"]], n) * (1 - excited))
     if "music" in parts:
         # Music (intro/outro/ad break/loading music) with no talking and no events.
         pens.append(np.clip(parts["music"] - parts["speech"], 0, 1) * (1 - excited))
@@ -144,7 +150,7 @@ def penalty(parts: dict[str, np.ndarray], comp: dict[str, np.ndarray], n: int) -
         pens.append(parts["silence"] * 0.8)
     if not pens:
         return z
-    return np.clip(smooth(np.maximum.reduce(pens), 5), 0, 1).astype(np.float32)
+    return np.clip(smooth(_maxr(pens, n), 5), 0, 1).astype(np.float32)
 
 
 def curve(comp: dict[str, np.ndarray], parts: dict[str, np.ndarray], weights: dict[str, float] | None = None) -> np.ndarray:

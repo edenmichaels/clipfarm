@@ -8,6 +8,7 @@ import subprocess
 import sys
 from functools import lru_cache
 from pathlib import Path
+from .. import proc
 
 # Installed app: the shell passes its resource folder (CLIPFARM_RESOURCE_DIR = the install folder, which
 # holds bin/ffmpeg.exe and assets/fonts) and the engine exe sits in the same folder.
@@ -56,7 +57,7 @@ def detect_encoders() -> list[dict]:
         cmd = [ffmpeg_bin(), "-v", "error", "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1",
                "-frames:v", "1", "-c:v", codec, "-f", "null", "-"]
         try:
-            ok = subprocess.run(cmd, capture_output=True, timeout=20).returncode == 0
+            ok = proc.run(cmd, capture_output=True, timeout=20).returncode == 0
         except (subprocess.TimeoutExpired, OSError):
             ok = False
         out.append({"codec": codec, "label": label, "available": ok})
@@ -85,7 +86,7 @@ def encoder_args(codec: str, quality: str = "high") -> list[str]:
 def probe(path: Path) -> dict:
     """Width, height, duration, fps, has_audio."""
     cmd = [ffprobe_bin(), "-v", "error", "-print_format", "json", "-show_streams", "-show_format", str(path)]
-    info = json.loads(subprocess.run(cmd, capture_output=True, text=True, check=True).stdout)
+    info = json.loads(proc.run(cmd, capture_output=True, text=True, check=True).stdout)
     v = next((s for s in info["streams"] if s["codec_type"] == "video"), None)
     num, den = (v.get("r_frame_rate", "30/1").split("/") if v else ("30", "1"))
     return {"width": int(v["width"]) if v else 0, "height": int(v["height"]) if v else 0,

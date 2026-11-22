@@ -19,6 +19,7 @@ from typing import Callable
 import numpy as np
 
 from ..editing.layout import Box, detect_facecam
+from .. import proc
 
 LAYOUTS = ["split", "crop", "speaker", "pip", "blur_fill"]
 SAMPLE_FPS = 2.0
@@ -26,13 +27,12 @@ SAMPLE_FPS = 2.0
 
 def sample(path: Path, a: float, b: float, fps: float = SAMPLE_FPS, width: int = 320):
     """Frames at exact times via FFmpeg (OpenCV seeking snaps to keyframes and repeats frames)."""
-    import subprocess
     from ..editing.ffmpeg_util import ffmpeg_bin, probe
     info = probe(path)
     h = max(2, int(round(info["height"] * width / max(1, info["width"]) / 2)) * 2)
     cmd = [ffmpeg_bin(), "-v", "error", "-ss", f"{a:.3f}", "-t", f"{max(0.05, b - a):.3f}", "-i", str(path), "-an",
            "-vf", f"fps={fps},scale={width}:{h}", "-pix_fmt", "bgr24", "-f", "rawvideo", "-"]
-    raw = subprocess.run(cmd, capture_output=True).stdout
+    raw = proc.run(cmd, capture_output=True).stdout
     n = len(raw) // (width * h * 3)
     frames = np.frombuffer(raw[: n * width * h * 3], np.uint8).reshape(n, h, width, 3)
     return [(round(a + i / fps, 3), frames[i].copy()) for i in range(n)]

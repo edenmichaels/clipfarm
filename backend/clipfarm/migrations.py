@@ -320,8 +320,15 @@ def _v8(conn: sqlite3.Connection) -> None:
     _add(conn, "clips", "variant_label", "TEXT")
 
 
+# ---- v9: failed sources show their error + a Retry button ------------------------------------------------
+def _v9(conn: sqlite3.Connection) -> None:
+    _add(conn, "sources", "error", "TEXT")
+    _add(conn, "sources", "retry_at", "TEXT")
+    _add(conn, "sources", "failed_at", "TEXT")
+
+
 MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [(2, _v2), (3, _v3), (4, _v4), (5, _v5), (6, _v6),
-                                                                      (7, _v7), (8, _v8)]
+                                                                      (7, _v7), (8, _v8), (9, _v9)]
 LATEST = MIGRATIONS[-1][0]
 
 

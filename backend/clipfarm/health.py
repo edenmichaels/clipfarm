@@ -22,6 +22,7 @@ import requests
 from . import __version__, config, db, migrations, secrets, vault
 from .netcheck import Problem, explain_exception, explain_response
 from .redact import redact
+from . import proc
 
 TIMEOUT = 8
 CHECKS: list[tuple[str, str, Callable[[], dict]]] = []
@@ -104,7 +105,7 @@ def _ffmpeg() -> dict:
     except FileNotFoundError as e:
         return bad(f"{e} It should be in the ClipFarm install folder (bin\\ffmpeg.exe).", "reinstall")
     try:
-        out = subprocess.run([ff, "-hide_banner", "-filters"], capture_output=True, text=True, timeout=20).stdout
+        out = proc.run([ff, "-hide_banner", "-filters"], capture_output=True, text=True, timeout=20).stdout
     except (OSError, subprocess.TimeoutExpired) as e:
         return bad(f"FFmpeg is there but won't run ({e}).", "reinstall")
     if " ass " not in out and " subtitles " not in out:

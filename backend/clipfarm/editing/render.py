@@ -22,6 +22,7 @@ from pathlib import Path
 from . import layout as L
 from .captions import build_track, fonts_dir
 from .ffmpeg_util import encoder_args, ffmpeg_bin, pick_encoder, probe
+from .. import proc
 
 EMOJI_DIRS = ("assets/emoji",)
 
@@ -90,7 +91,7 @@ class RenderSpec:
 
 
 def _run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, text=True, cwd=cwd)
+    return proc.run(cmd, capture_output=True, text=True, cwd=cwd)
 
 
 # ---------------------------------------------------------------- pass 1

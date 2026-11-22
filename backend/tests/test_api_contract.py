@@ -10,6 +10,7 @@ pytest.importorskip("httpx")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from clipfarm import db  # noqa: E402
+from clipfarm.jobs import engine as eng  # noqa: E402
 
 TOKEN = "test-token-123456"
 H = {"X-ClipFarm-Token": TOKEN}
@@ -504,6 +505,35 @@ def test_v07_routes(client, tmp_path):
     assert abs(sum(w["virality_global"].values()) - 1) < 0.02
     w = call(client, "POST", "/virality/weights/reset", json={})
     assert w["virality_global"]["hook"] == 0.25
+
+
+def test_v071_engine_and_source_routes(client, tmp_path, monkeypatch):
+    import os
+    import time as _t
+    st = call(client, "GET", "/engine/status")
+    assert st["paused"] is False and "children" in st
+    assert call(client, "POST", "/engine/pause")["paused"] is True
+    assert call(client, "GET", "/engine/status")["paused"] is True
+    assert call(client, "POST", "/engine/resume")["paused"] is False
+    sid = _streamer()
+    src = db.ex("INSERT INTO sources(streamer_id, kind, platform_id, url, status, error) VALUES (?,?,?,?,?,?)",
+                (sid, "featured_clip", "x1", "https://clips.twitch.tv/x1", "error", "boom"))
+    probs = call(client, "GET", "/sources/problems")
+    assert probs[0]["id"] == src and probs[0]["error"] == "boom"
+    call(client, "POST", f"/sources/{src}/retry", route="/sources/{sid}/retry", expect=409)     # never processed
+    eng.enqueue("process_source", {"project_id": None, "source_id": src})
+    db.ex("UPDATE jobs SET status='failed' WHERE kind='process_source'")
+    r = call(client, "POST", f"/sources/{src}/retry", route="/sources/{sid}/retry")
+    assert r["job_id"] and db.q1("SELECT status, error FROM sources WHERE id=?", (src,))["status"] == "new"
+    call(client, "POST", "/sources/99999/retry", route="/sources/{sid}/retry", expect=404)
+    exits = []
+    monkeypatch.setattr(os, "_exit", lambda code: exits.append(code))
+    try:
+        assert call(client, "POST", "/engine/shutdown")["ok"]
+        _t.sleep(0.6)
+        assert exits == [0]
+    finally:
+        eng.PAUSED.clear()
 
 
 def test_every_route_is_covered():

@@ -6,19 +6,19 @@ energy fill in. You can always edit the tags in Settings › Music.
 """
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 import numpy as np
 
 from ..editing.ffmpeg_util import ffmpeg_bin, probe
+from .. import proc
 
 MOODS = ["funny", "hype", "tense", "epic", "chill", "sad"]
 SR = 22050
 
 
 def _pcm(path: Path, sr: int = SR, seconds: float = 180) -> np.ndarray:
-    out = subprocess.run([ffmpeg_bin(), "-v", "error", "-t", str(seconds), "-i", str(path), "-ac", "1", "-ar", str(sr),
+    out = proc.run([ffmpeg_bin(), "-v", "error", "-t", str(seconds), "-i", str(path), "-ac", "1", "-ar", str(sr),
                           "-f", "f32le", "-"], capture_output=True, check=True).stdout
     return np.frombuffer(out, np.float32)
 

@@ -1,6 +1,7 @@
 // Settings. v0.3: also home to Campaigns (edit fields, confirm flags), Rewards programs, Setup health
 // and Logs, which used to be separate menu items.
 import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { api, PLATFORM_LABEL } from "../api";
 import { applyAccent } from "../App";
@@ -58,6 +59,7 @@ export default function Settings({ initialTab, go }: { initialTab?: string; go: 
 
       {tab === "General" && (
         <div className="cards2">
+          <CloseBehaviour />
           <section className="card stack">
             <h2 className="accent">Storage</h2>
             <div className="row" style={{ flexWrap: "nowrap" }}>
@@ -229,5 +231,25 @@ function Backup() {
         {msg && <span className="muted">{msg}</span>}
       </section>
     </div>
+  );
+}
+
+
+/** What the window's close button does: keep running in the tray, or quit ClipFarm completely. */
+function CloseBehaviour() {
+  const [action, setAction] = useState("tray");
+  const [msg, setMsg] = useState("");
+  useEffect(() => { invoke<string>("get_close_action").then(setAction).catch(() => {}); }, []);
+  const set = (a: string) => invoke("set_close_action", { action: a }).then(() => { setAction(a); setMsg("Saved"); }).catch((e) => setMsg(String(e)));
+  return (
+    <section className="card stack">
+      <h2 className="accent">When I close the window</h2>
+      <label className="row" style={{ gap: 8 }}><input type="radio" name="close" checked={action === "tray"} onChange={() => set("tray")} />
+        Keep running in the system tray (projects carry on; right-click the tray icon to pause or quit)</label>
+      <label className="row" style={{ gap: 8 }}><input type="radio" name="close" checked={action === "quit"} onChange={() => set("quit")} />
+        Quit ClipFarm (stops the engine and all processing)</label>
+      <div><button className="btn-ghost btn-danger" onClick={() => invoke("quit_app")}>Quit ClipFarm now</button></div>
+      {msg && <span className="muted">{msg}</span>}
+    </section>
   );
 }

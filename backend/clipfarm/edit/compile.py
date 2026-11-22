@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import subprocess
 from pathlib import Path
 
 from .. import db
@@ -19,6 +18,7 @@ from ..editing import layout as L
 from ..editing.ffmpeg_util import encoder_args, ffmpeg_bin, pick_encoder
 from ..editing.render import RenderSpec, finish
 from . import timeline as T
+from .. import proc
 
 W, H = 1080, 1920
 
@@ -112,9 +112,9 @@ def render_base(edl: dict, cache: Path, quality: str = "export") -> tuple[Path, 
         cmd += ["-map", "[ac]", "-c:a", "aac", "-b:a", "256k", "-ar", "48000"]
     codec = "libx264" if quality == "proxy" else pick_encoder("auto")
     vargs = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "26"] if quality == "proxy" else encoder_args(codec, "high")
-    res = subprocess.run(cmd + [*vargs, "-pix_fmt", "yuv420p", str(out)], capture_output=True, text=True)
+    res = proc.run(cmd + [*vargs, "-pix_fmt", "yuv420p", str(out)], capture_output=True, text=True)
     if res.returncode != 0 and codec != "libx264":
-        res = subprocess.run(cmd + [*encoder_args("libx264", "high"), "-pix_fmt", "yuv420p", str(out)],
+        res = proc.run(cmd + [*encoder_args("libx264", "high"), "-pix_fmt", "yuv420p", str(out)],
                              capture_output=True, text=True)
     if res.returncode != 0:
         raise RuntimeError(f"FFmpeg failed (edit base): {res.stderr[-1500:]}")
