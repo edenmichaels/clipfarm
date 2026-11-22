@@ -38,7 +38,7 @@ jobs:
       - name: Convert YAMNet to ONNX
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
-          python -m pip install "tensorflow-cpu==2.15.1" "tf2onnx==1.16.1" "onnxruntime==1.17.3" "numpy<2" "onnx==1.15.0"
+          python -m pip install "tensorflow-cpu==2.15.1" "tf-keras==2.15.1" "tf2onnx==1.16.1" "onnxruntime==1.17.3" "numpy<2" "onnx==1.15.0"
           git clone -q --depth 1 --filter=blob:none --sparse https://github.com/tensorflow/models /tmp/tfm
           git -C /tmp/tfm sparse-checkout set research/audioset/yamnet
           curl -sSfL -o /tmp/yamnet.h5 https://storage.googleapis.com/audioset/yamnet.h5

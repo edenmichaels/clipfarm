@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 import tensorflow as tf  # noqa: E402
 import tf2onnx  # noqa: E402
+import tf_keras  # noqa: E402  (the YAMNet code builds with tf_keras)
 import onnxruntime as ort  # noqa: E402
 
 import params as yparams  # noqa: E402
@@ -33,14 +34,19 @@ ref = ymodel.yamnet_frames_model(p)
 ref.load_weights(str(h5))
 
 # Patches-in model with the same weights.
-inp = tf.keras.layers.Input(shape=(96, 64), name="patches")
+inp = tf_keras.layers.Input(shape=(96, 64), name="patches")
 preds, _emb = ymodel.yamnet(inp, p)
-patch_model = tf.keras.Model(inp, preds)
+patch_model = tf_keras.Model(inp, preds)
 patch_model.set_weights(ref.get_weights())
 
 out.mkdir(parents=True, exist_ok=True)
 spec = (tf.TensorSpec((None, 96, 64), tf.float32, name="patches"),)
-tf2onnx.convert.from_keras(patch_model, input_signature=spec, opset=17, output_path=str(out / "yamnet.onnx"))
+try:
+    tf2onnx.convert.from_keras(patch_model, input_signature=spec, opset=17, output_path=str(out / "yamnet.onnx"))
+except Exception as e:      # tf_keras models sometimes need the plain-function route
+    print("from_keras failed, converting as a tf.function:", e)
+    fn = tf.function(lambda x: patch_model(x, training=False), input_signature=spec)
+    tf2onnx.convert.from_function(fn, input_signature=spec, opset=17, output_path=str(out / "yamnet.onnx"))
 shutil.copy2(yam_dir / "yamnet_class_map.csv", out / "yamnet_class_map.csv")
 
 # ---- check: official TF (waveform) vs ClipFarm numpy features + ONNX ----
