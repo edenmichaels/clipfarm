@@ -111,7 +111,8 @@ fn engine_post(port: u16, token: &str, path: &str) -> Option<String> {
 fn update_pause_item(app: &AppHandle) {
     let st = app.state::<Backend>();
     let paused = st.paused.load(Ordering::SeqCst);
-    if let Some(item) = st.pause_item.lock().unwrap().as_ref() {
+    let item = st.pause_item.lock().unwrap().clone();
+    if let Some(item) = item {
         let _ = item.set_text(if paused { "Resume engine" } else { "Pause engine" });
     }
 }
