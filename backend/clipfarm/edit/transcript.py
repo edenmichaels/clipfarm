@@ -71,9 +71,17 @@ def silences(edl: dict, min_gap: float = SILENCE) -> list[list[float]]:
     ws = [w for w in edl["captions"]["words"] if not w.get("deleted") and float(w["end"]) > a and float(w["start"]) < b]
     pts = [(a, a)] + [(float(w["start"]), float(w["end"])) for w in ws] + [(b, b)]
     out = []
+    cuts = _merge(list(edl.get("cuts", [])))
     for (_, e1), (s2, _) in zip(pts, pts[1:]):
         if s2 - e1 > min_gap:
-            out.append([round(e1 + KEEP_GAP / 2, 3), round(s2 - KEEP_GAP / 2, 3)])
+            g0, g1 = round(e1 + KEEP_GAP / 2, 3), round(s2 - KEEP_GAP / 2, 3)
+            # only the part that isn't cut already
+            for c0, c1 in cuts:
+                if c0 <= g0 + 0.01 and c1 >= g1 - 0.01:
+                    g0 = g1
+                    break
+            if g1 - g0 > 0.05:
+                out.append([g0, g1])
     return out
 
 

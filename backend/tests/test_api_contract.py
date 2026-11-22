@@ -403,6 +403,50 @@ def test_v05_edit_routes(client, tmp_path):
     call(client, "DELETE", f"/caption-templates/{mine['id']}", route="/caption-templates/{tid}")
 
 
+def test_v06_editor_routes(client, tmp_path):
+    import subprocess
+    src = tmp_path / "src.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=1920x1080:r=30:d=30", "-f", "lavfi",
+                    "-i", "sine=f=300:d=30", "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac",
+                    str(src)], check=True)
+    _, prog, cid, _ = _linked_clip(tmp_path)
+    db.ex("UPDATE clips SET source_path=?, words=? WHERE id=?", (str(src), json.dumps(
+        [{"word": w, "start": 4 + i * 0.6, "end": 4.4 + i * 0.6} for i, w in enumerate("um so we um did it no way".split())]),
+        cid))
+    v = call(client, "GET", f"/edit/{cid}", route="/edit/{cid}")
+    s = call(client, "POST", f"/edit/{cid}/score", route="/edit/{cid}/score")
+    assert 0 <= s["virality"]["score"] <= 100 and s["virality"]["reason"] and isinstance(s["flags"], list)
+    rows = call(client, "GET", "/editor/clips")
+    assert rows and rows[0]["id"] == cid and rows[0]["virality"] is not None and rows[0]["status"] in ("new", "edited", "ready")
+    assert call(client, "GET", "/editor/clips?sort=virality&min_score=101") == []
+    call(client, "GET", "/editor/clips?sort=random", expect=400)
+    e = v["edl"]
+    e["texts"] = {"tiktok": {"title": "t", "description": "d", "hashtags": ["gta6"]}}
+    call(client, "PUT", f"/edit/{cid}", route="/edit/{cid}", json={"edl": e})
+    flags = call(client, "POST", f"/edit/{cid}/score", route="/edit/{cid}/score")["flags"]
+    assert any(f["id"] == "hashtags:tiktok" for f in flags)
+    v = call(client, "POST", f"/edit/{cid}/fix", route="/edit/{cid}/fix", json={"id": "hashtags:tiktok"})
+    assert "#DylanPage" in v["edl"]["texts"]["tiktok"]["hashtags"]
+    call(client, "POST", f"/edit/{cid}/fix", route="/edit/{cid}/fix", json={"all": True})
+    call(client, "POST", f"/edit/{cid}/fix", route="/edit/{cid}/fix", json={}, expect=400)
+    f = call(client, "POST", f"/edit/{cid}/fix-my-clip", route="/edit/{cid}/fix-my-clip")
+    assert "removed filler words" in f["changes"]
+    a = call(client, "POST", f"/edit/{cid}/auto-edit", route="/edit/{cid}/auto-edit")
+    assert a["edl"]["captions"]["words"] and "changes" in a
+    call(client, "POST", f"/edit/{cid}/signal", route="/edit/{cid}/signal", json={"kind": "keep"})
+    call(client, "POST", f"/edit/{cid}/signal", route="/edit/{cid}/signal", json={"kind": "nope"}, expect=400)
+    b = call(client, "POST", "/editor/batch", json={"ids": [cid], "action": "template", "template": "hype_yellow"})
+    assert b["done"] == [cid]
+    assert call(client, "GET", f"/edit/{cid}", route="/edit/{cid}")["edl"]["captions"]["template"] == "hype_yellow"
+    assert call(client, "POST", "/editor/batch", json={"ids": [cid], "action": "export", "preset": "shorts"})["jobs"]
+    call(client, "POST", "/editor/batch", json={"ids": [cid], "action": "melt"}, expect=400)
+    t = call(client, "POST", "/trends", json={"text": "#heist\nnew map\n"})
+    assert t["added"] == 2 and {x["topic"] for x in call(client, "GET", "/trends")} == {"heist", "new map"}
+    call(client, "DELETE", f"/trends/{t['topics'][0]['id']}", route="/trends/{tid}")
+    call(client, "POST", "/editor/batch", json={"ids": [cid], "action": "delete"})
+    assert call(client, "GET", "/editor/clips") == []
+
+
 def test_every_route_is_covered():
     from clipfarm import api
     routes = set()

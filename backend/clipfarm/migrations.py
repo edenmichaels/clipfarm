@@ -289,7 +289,27 @@ def _v6(conn: sqlite3.Connection) -> None:
     _add(conn, "clips", "source_path", "TEXT")    # kept source section, so the clip stays editable
 
 
-MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [(2, _v2), (3, _v3), (4, _v4), (5, _v5), (6, _v6)]
+# ---- v7: virality + projected earnings per clip, rule flags, trend topics, view predictions -------------
+def _v7(conn: sqlite3.Connection) -> None:
+    for col, decl in (("virality", "INTEGER"), ("virality_reason", "TEXT"), ("virality_parts", "TEXT"),
+                      ("profit_low", "REAL"), ("profit_likely", "REAL"), ("profit_high", "REAL"),
+                      ("profit_platform", "TEXT"), ("expected_views", "INTEGER"), ("rule_flags", "TEXT"),
+                      ("scored_at", "TEXT"), ("deleted_at", "TEXT")):
+        _add(conn, "clips", col, decl)
+    _script(conn, """
+    CREATE TABLE IF NOT EXISTS trend_topics(
+        id INTEGER PRIMARY KEY, topic TEXT NOT NULL UNIQUE COLLATE NOCASE, active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')));
+    CREATE TABLE IF NOT EXISTS clip_signals(           -- implicit learning signals: keep/delete/edit/export
+        id INTEGER PRIMARY KEY, clip_id INTEGER NOT NULL, kind TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')));
+    CREATE INDEX IF NOT EXISTS clip_signals_clip ON clip_signals(clip_id);
+    CREATE INDEX IF NOT EXISTS clips_virality ON clips(virality);
+    """)
+
+
+MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [(2, _v2), (3, _v3), (4, _v4), (5, _v5), (6, _v6),
+                                                                      (7, _v7)]
 LATEST = MIGRATIONS[-1][0]
 
 

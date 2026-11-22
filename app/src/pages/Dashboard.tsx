@@ -35,8 +35,8 @@ export default function Dashboard({ go }: { go: (p: Page, tab?: string) => void 
       </header>
 
       <section className="tiles three">
-        <button className="tile link" onClick={() => go("clips", "To review")}>
-          <b>{toReview}</b><span>{toReview === 1 ? "clip" : "clips"} waiting for review</span>
+        <button className="tile link" onClick={() => go("editor")}>
+          <b>{toReview}</b><span>{toReview === 1 ? "clip" : "clips"} to check in the Editor</span>
         </button>
         <button className="tile link" onClick={() => go("clips", "Post & Submit")}>
           <b>{toSubmit}</b><span>{toSubmit === 1 ? "clip" : "clips"} to submit to a campaign</span>

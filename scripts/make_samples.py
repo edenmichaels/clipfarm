@@ -9,7 +9,6 @@ Words come from faster-whisper (tiny) so both versions caption the same transcri
 """
 import dataclasses
 import json
-import shutil
 import sys
 from pathlib import Path
 
@@ -31,8 +30,15 @@ wm = WhisperModel("tiny", device="cpu", compute_type="int8")
 
 
 def words(a, b):
-    segs, _ = wm.transcribe(str(vod), word_timestamps=True, clip_timestamps=[a, b])
-    return [{"word": w.word.strip(), "start": float(w.start), "end": float(w.end)} for s in segs for w in s.words or []]
+    # Decode with ffmpeg ourselves (faster-whisper's PyAV call can clash with the installed PyAV version).
+    import subprocess
+
+    import numpy as np
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-ss", str(a), "-t", str(b - a), "-i", str(vod), "-ac", "1",
+                          "-ar", "16000", "-f", "f32le", "-"], capture_output=True, check=True).stdout
+    segs, _ = wm.transcribe(np.frombuffer(raw, np.float32), word_timestamps=True)
+    return [{"word": w.word.strip(), "start": a + float(w.start), "end": a + float(w.end)}
+            for s in segs for w in s.words or []]
 
 
 def spec(start, end, name, **kw):

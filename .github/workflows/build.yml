@@ -242,6 +242,7 @@ jobs:
 
       - name: Install engine, UI tools and a headless browser
         run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg > /dev/null
           python -m pip install -r backend/requirements.txt playwright
           python -m playwright install --with-deps chromium
 

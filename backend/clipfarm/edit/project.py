@@ -6,10 +6,12 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 
 from .. import db
 
 SCHEMA = 1
+log = logging.getLogger("clipfarm.edit")
 MAX_VERSIONS = 200
 
 
@@ -53,7 +55,17 @@ def get(clip_id: int) -> dict | None:
 def create(clip_id: int, edl: dict, label: str = "Auto-edit") -> dict:
     pid = db.ex("INSERT INTO edit_projects(clip_id, data, head, status) VALUES (?,?,1,'new')", (clip_id, json.dumps(edl)))
     db.ex("INSERT INTO edit_versions(project_id, version, data, label) VALUES (?,?,?,?)", (pid, 1, json.dumps(edl), label))
+    _rescore(clip_id, edl)
     return get(clip_id)
+
+
+def _rescore(clip_id: int, edl: dict) -> None:
+    """Virality, projected earnings and rule flags follow every edit. Never blocks saving."""
+    try:
+        from ..scoring import clipscore
+        clipscore.score_clip(clip_id, edl)
+    except Exception as e:                              # noqa: BLE001
+        log.warning("scoring clip %s failed: %s", clip_id, e)
 
 
 def save(clip_id: int, edl: dict, label: str = "Edit") -> dict:
@@ -68,6 +80,7 @@ def save(clip_id: int, edl: dict, label: str = "Edit") -> dict:
     db.ex("UPDATE edit_projects SET data=?, head=?, status=CASE WHEN status='new' THEN 'edited' ELSE status END, "
           "updated_at=datetime('now') WHERE id=?", (json.dumps(edl), v, pid))
     db.ex("DELETE FROM edit_versions WHERE project_id=? AND version<=?", (pid, v - MAX_VERSIONS))
+    _rescore(clip_id, edl)
     return get(clip_id)
 
 
@@ -79,6 +92,7 @@ def _move(clip_id: int, step: int) -> dict:
     if not r:
         return cur
     db.ex("UPDATE edit_projects SET data=?, head=?, updated_at=datetime('now') WHERE id=?", (r["data"], r["version"], cur["id"]))
+    _rescore(clip_id, json.loads(r["data"]))
     return get(clip_id)
 
 

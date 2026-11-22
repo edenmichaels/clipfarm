@@ -27,7 +27,7 @@ export function CaptionSettings() {
   return (
     <section className="card stack" style={{ maxWidth: 720 }}>
       <h2>Captions</h2>
-      <span className="muted">1–3 words at a time, the spoken word highlighted, centred and kept clear of the TikTok / Reels / Shorts buttons. Change any clip in Review.</span>
+      <span className="muted">1–3 words at a time, the spoken word highlighted, centred and kept clear of the TikTok / Reels / Shorts buttons. Change any clip in the Editor.</span>
       <div className="field">Default style
         <div className="cards2" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
           {presets.map((p) => (
@@ -95,7 +95,26 @@ export function HighlightSettings() {
               <button className="btn-quiet" onClick={() => api.post("/highlights/weights/reset", { scope }).then(load)}>Reset to default</button>
             </div>))}
       </section>
+      <TrendTopics />
     </div>
+  );
+}
+
+/** Topics you're watching (game updates, memes, events). Clips that mention them score higher for relevance. */
+function TrendTopics() {
+  const [topics, setTopics] = useState<any[]>([]);
+  const [text, setText] = useState("");
+  const load = () => api.get("/trends").then(setTopics).catch(() => {});
+  useEffect(() => { load(); }, []);
+  return (
+    <section className="card stack tight">
+      <h2>Trending topics</h2>
+      <span className="muted small-text">Things people are talking about right now (a new map, a meme, an event). Clips that mention them get a higher virality score. One per line.</span>
+      <textarea rows={3} value={text} onChange={(e) => setText(e.target.value)} placeholder={"bank heist\nnew Vice City map"} />
+      <div><button onClick={() => api.post("/trends", { text }).then(() => { setText(""); load(); })} disabled={!text.trim()}>Add</button></div>
+      <div className="row wrap" style={{ gap: 6 }}>{topics.map((t) => (
+        <span key={t.id} className="pill">{t.topic} <button className="btn-quiet" aria-label={`Remove ${t.topic}`} onClick={() => api.del(`/trends/${t.id}`).then(load)}>✕</button></span>))}</div>
+    </section>
   );
 }
 
@@ -159,7 +178,7 @@ export function MusicSettings() {
       </section>
       <section className="card stack tight">
         <h3>Trending sounds</h3>
-        <span className="muted small-text">Names only. ClipFarm never puts a trending song in your video. It suggests one in Review and Post & Submit, and you add it inside TikTok/Instagram when you post (use "Export for trending sound"). Paste one per line: <code>Name - Artist | funny, hype | tiktok</code></span>
+        <span className="muted small-text">Names only. ClipFarm never puts a trending song in your video. It suggests one in the Editor (Music & Audio) and Post & Submit, and you add it inside TikTok/Instagram when you post (use "Export for trending sound"). Paste one per line: <code>Name - Artist | funny, hype | tiktok</code></span>
         <textarea rows={3} value={paste} onChange={(e) => setPaste(e.target.value)} placeholder="Sound name - Artist | funny | tiktok" />
         <div><button disabled={!paste.trim()} onClick={() => api.post("/trending/import", { text: paste }).then((r) => { setMsg(`${r.added} added, ${r.updated} updated`); setPaste(""); load(); }).catch((e) => setMsg(e.message))}>Add to list</button></div>
         {trend.filter((x) => x.active).map((x) => (

@@ -94,8 +94,14 @@ def _projected(clip_id: int, account_platform: str) -> float | None:
     if not c["program_id"] or not c["streamer_id"]:
         return None
     plat = {"youtube": "youtube_shorts", "instagram": "instagram_reels"}.get(account_platform, account_platform)
+    # v0.6: this clip's own projection (from its virality score) when we have one
+    if c.get("profit_likely") is not None and c.get("profit_platform") == plat:
+        return c["profit_likely"]
     r = db.q1("SELECT per_clip_likely FROM projections WHERE streamer_id=? AND program_id=? AND platform=?",
               (c["streamer_id"], c["program_id"], plat))
+    if r and c.get("virality") is not None:
+        from ..scoring.profit import view_multiplier
+        return round(r["per_clip_likely"] * view_multiplier(int(c["virality"])), 2)
     return r["per_clip_likely"] if r else None
 
 

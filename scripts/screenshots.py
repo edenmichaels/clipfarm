@@ -1,4 +1,5 @@
-"""Before/after screenshots (CI only): Home, the menu, every New Project step and the streamer list.
+"""Before/after screenshots (CI only): Home, the menu, every New Project step, the streamer list and (v0.6+)
+the Editor in simple and advanced mode.
 
 Usage: python scripts/screenshots.py <out_dir>   (UI on http://localhost:1420, engine on 47821)
 Works with the v0.2 UI (4 steps) and the v0.3 UI (3 steps). Each shot is best-effort.
@@ -73,4 +74,21 @@ with sync_playwright() as p:
             page.wait_for_timeout(1200)
             shot(page, "5-new-project-step3-details")
     attempt("steps 3+", later_steps)
+
+    def editor():
+        page.locator("nav.side").get_by_role("button", name="Editor").click()
+        page.wait_for_selector(".ed-card", timeout=15000)
+        page.wait_for_timeout(3500)
+        shot(page, "6-editor-simple", full=False)
+        page.get_by_role("button", name="Show more").click()
+        page.wait_for_timeout(2500)
+        shot(page, "7-editor-advanced", full=False)
+        for tab, name in (("Captions", "8-editor-captions"), ("Layout", "8b-editor-layout"),
+                          ("Campaign rules", "9-editor-rules")):
+            page.get_by_role("tab", name=tab, exact=False).first.click()
+            page.wait_for_timeout(1200)
+            shot(page, name, full=False)
+        page.get_by_role("button", name="Show less").click()
+    if page.locator("nav.side").get_by_role("button", name="Editor").count():
+        attempt("editor", editor)
     b.close()

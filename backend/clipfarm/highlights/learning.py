@@ -16,7 +16,7 @@ from .detect import DEFAULT_WEIGHTS
 
 MIN_RATINGS = 50
 TAGS = ["not funny", "too slow", "cut too early", "cut too late", "boring game part", "wrong moment",
-        "great moment", "great timing"]
+        "bad captions", "wrong music", "bad framing", "great moment", "great timing"]
 KEYS = list(DEFAULT_WEIGHTS)
 
 

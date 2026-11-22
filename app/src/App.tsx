@@ -7,22 +7,24 @@ import Setup from "./pages/Setup";
 import Dashboard from "./pages/Dashboard";
 import NewProject from "./pages/NewProject";
 import MyClips from "./pages/MyClips";
+import Editor from "./pages/Editor";
 import Settings from "./pages/Settings";
 import Earnings from "./pages/Earnings";
 import { listenForImports } from "./lib/campaignBrowser";
 
-/** The five screens in the menu. */
-export type MainPage = "dashboard" | "new" | "clips" | "earnings" | "settings";
+/** The six screens in the menu. */
+export type MainPage = "dashboard" | "new" | "editor" | "clips" | "earnings" | "settings";
 /** Older screen names still work and open where that screen lives now. */
 export type Page = MainPage | "review" | "submissions" | "campaigns" | "programs" | "health" | "logs";
 
 const NAV: [MainPage, string][] = [
-  ["dashboard", "Home"], ["new", "New Project"], ["clips", "My Clips"], ["earnings", "Earnings"], ["settings", "Settings"],
+  ["dashboard", "Home"], ["new", "New Project"], ["editor", "Editor"], ["clips", "My Clips"], ["earnings", "Earnings"],
+  ["settings", "Settings"],
 ];
 
-/** Where each v0.2 screen moved to in v0.3. */
+/** Where older screens moved to (v0.3 menu; v0.6: Review became the Editor). */
 const MOVED: Record<string, [MainPage, string]> = {
-  review: ["clips", "To review"], submissions: ["clips", "Post & Submit"],
+  review: ["editor", ""], submissions: ["clips", "Post & Submit"],
   campaigns: ["settings", "Campaigns"], programs: ["settings", "Rewards programs"],
   health: ["settings", "Setup health"], logs: ["settings", "Logs"],
 };
@@ -168,7 +170,8 @@ export default function App() {
         )}
         {page === "dashboard" && <Dashboard go={go} />}
         {page === "new" && <NewProject done={() => go("dashboard")} go={go} />}
-        {page === "clips" && <MyClips initialTab={tab} />}
+        {page === "editor" && <Editor go={go} initialClip={tab?.startsWith("clip:") ? Number(tab.slice(5)) : undefined} />}
+        {page === "clips" && <MyClips initialTab={tab} go={go} />}
         {page === "earnings" && <Earnings />}
         {page === "settings" && <Settings initialTab={tab} go={go} />}
         {toast && <div className="toast" role="status">{toast}</div>}

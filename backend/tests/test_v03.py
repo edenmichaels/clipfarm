@@ -244,14 +244,15 @@ def test_new_accounts_are_picked_up_and_last_project_remembered(fresh_db):
 
 
 # ---- 5. Menu --------------------------------------------------------------------------------------
-def test_menu_has_at_most_five_items_and_old_screens_reachable():
+def test_menu_has_at_most_six_items_and_old_screens_reachable():
     app = (ROOT / "app" / "src" / "App.tsx").read_text(encoding="utf-8")
     nav = re.search(r"const NAV[^=]*=\s*\[(.*?)\];", app, re.S).group(1)
     items = re.findall(r'\[\s*"(\w+)"\s*,\s*"([^"]+)"', nav)
-    assert [label for _, label in items] == ["Home", "New Project", "My Clips", "Earnings", "Settings"]
-    # Every v0.2 screen still exists and is mounted somewhere.
+    assert [label for _, label in items] == ["Home", "New Project", "Editor", "My Clips", "Earnings", "Settings"]
+    # Every v0.2 screen still exists and is mounted somewhere (v0.6: the Editor replaced Review).
     src = "\n".join(p.read_text(encoding="utf-8") for p in (ROOT / "app" / "src").rglob("*.tsx"))
-    for comp in ("Review", "Submissions", "Campaigns", "Health", "Logs", "Programs", "Earnings", "Setup"):
+    assert 'review: ["editor"' in app
+    for comp in ("Editor", "Submissions", "Campaigns", "Health", "Logs", "Programs", "Earnings", "Setup"):
         assert re.search(rf"<{comp}\b", src), f"{comp} is no longer reachable"
 
 

@@ -1,5 +1,67 @@
 # ClipFarm changelog
 
+## 0.6.0 (Stage 3): virality score, earnings per clip, and the Editor
+
+### The Editor (replaces Review)
+- New **Editor** in the menu, which is now six items: Home, New Project, Editor, My Clips, Earnings, Settings.
+  My Clips keeps "All clips" (click one to open it in the Editor) and Post & Submit.
+- Left: your clips, ranked by projected earnings (or by score, or newest), each with its score, projected A$,
+  campaign, moment type and status (new / edited / ready / posted). Filter by campaign, streamer, moment type and
+  status, or press **Post the 90+ first**.
+- Centre: a 9:16 preview with live captions. Caption changes show instantly, with no render needed. Toggle the
+  TikTok, Reels or Shorts safe zone to see where the app's buttons and text will sit.
+- Simple mode (the default) has three big buttons: **Auto-edit**, **Fix my clip** and **Export**, plus the score
+  card and any rule problems with their fix buttons. **Show more** opens the full editor:
+  - Right-hand tabs: Transcript, Captions, Layout, Hook & Title, Music & Audio, Effects, Campaign rules.
+  - Bottom: a timeline with video, captions, music, SFX and B-roll tracks. Drag the ends to trim, press S to
+    split, select a part and press Delete to cut it out, and drag layout ◆ and zoom ● keyframes to move them.
+- Top bar: undo/redo, preview quality, apply template, 👍/👎 with "why?" tags, export preset, Export, and
+  **Send to Post & Submit**.
+- Keyboard shortcuts: Space play/pause, J/K/L, S split, Delete, ←/→ one frame, Ctrl+Z / Ctrl+Y.
+- Batch: tick several clips to apply a caption template, regenerate captions, fix them, export them all, or delete
+  them.
+- The trending-sound suggestion and "Export for trending sound" moved into Music & Audio.
+
+### Virality score (0–100)
+- Every clip gets a score from six parts: hook (does something happen or get said in the first 1–3 s), pacing
+  (dead air, speech rate, cuts), retention (build-up, then the payoff, then a short ending), relevance (trending
+  topics you add in Settings › Highlights), edit quality (captions, layout follows the rules, ducked music, right
+  length for the platform) and the moment itself.
+- Each score comes with a plain-English reason, e.g. "Strong hook, payoff at 0:12, ends 8 s after the payoff: cut
+  the ending".
+- The score updates after every edit, undo and redo.
+
+### Earnings per clip
+- Each clip shows projected A$ (low / likely / high) for its campaign. Expected views come from the clip's score
+  (a 50 is a typical clip; a 90+ gets about 3.5× the views) on top of the platform's history. They go through the
+  existing forecast, with the campaign's rate, minimum views, caps and fees.
+- Clips are ranked for posting by projected earnings, and clips that break a campaign rule go last.
+- Post & Submit uses the clip's own projection.
+
+### Campaign rules in the Editor
+- Red flags with one-click fixes for:
+  - the overlay or streamer being cropped out (switches to a layout that keeps it in frame);
+  - music on an original-audio-only campaign (removes it);
+  - a platform the campaign doesn't pay for (switches the export);
+  - a clip that's over the platform's length limit (trims it but keeps the payoff);
+  - missing campaign hashtags or disclosure in the post text (adds them);
+  - a hidden credit (shows it).
+- A required watermark is flagged until a brand template supplies it (Stage 4).
+
+### Fixes
+- Highlights: chat during sub trains, gifted subs, raids, follows, bits and giveaways no longer counts as a
+  reaction. The evaluation set now includes these traps, plus streamers shouting at chat and loud intermission
+  music with chat vibing to it. Top-10 precision: **40% before → 100% after**.
+- Rating a clip that has no streamer or game no longer fails.
+- Saving only some highlight weights now keeps all of them adding up to 100%.
+- "Remove silences" no longer reports gaps that were already cut.
+
+### Database
+- Migration v7 (additive): clips gain `virality`, `virality_reason`, `virality_parts`, `profit_low`,
+  `profit_likely`, `profit_high`, `profit_platform`, `expected_views`, `rule_flags`, `scored_at` and `deleted_at`.
+  There are also new tables `trend_topics` and `clip_signals` (keep / delete / edit / export, for learning in
+  Stage 4).
+
 ## 0.5.0 (Stage 2): every clip is an editable project
 
 ### Edit projects

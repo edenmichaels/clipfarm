@@ -10,6 +10,7 @@ import asyncio
 import base64
 import html
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -30,6 +31,8 @@ from .jobs import engine as eng
 from .jobs import pipeline, storage
 from .posting import platforms as posting
 from .providers import available_providers
+
+log = logging.getLogger("clipfarm.api")
 
 TOKEN = os.environ.get("CLIPFARM_TOKEN", "")
 app = FastAPI(title="ClipFarm", version=__version__)
@@ -323,7 +326,7 @@ def retry_job(jid: int):
 @app.get("/clips", dependencies=A)
 def clips(game_id: int | None = None, streamer_id: int | None = None, review_status: str | None = None,
           posted: bool | None = None, project_id: int | None = None, limit: int = 200):
-    cond, params = [], []
+    cond, params = ["c.deleted_at IS NULL"], []
     for col, val in (("c.game_id", game_id), ("c.streamer_id", streamer_id),
                      ("c.review_status", review_status), ("c.project_id", project_id)):
         if val is not None:
@@ -551,7 +554,9 @@ def highlight_weights():
 @app.put("/highlights/weights", dependencies=A)
 def highlight_weights_set(body: dict):
     if "weights" in body:
-        w = {k: max(0.0, float(v)) for k, v in body["weights"].items() if k in learning.KEYS}
+        from .highlights.detect import DEFAULT_WEIGHTS
+        cur = {**DEFAULT_WEIGHTS, **(db.get_setting("highlight_weights") or {})}
+        w = {k: max(0.0, float(body["weights"].get(k, cur[k]))) for k in DEFAULT_WEIGHTS}
         tot = sum(w.values()) or 1.0
         db.set_setting("highlight_weights", {k: round(v / tot, 3) for k, v in w.items()})
     if "focus" in body:
@@ -810,6 +815,212 @@ def edit_export(cid: int, body: dict):
     c = db.q1("SELECT project_id FROM clips WHERE id=?", (cid,))
     return {"job_id": eng.enqueue("export_edit", {"clip_id": cid, "preset": preset, "music": body.get("music", True)},
                                   c["project_id"], priority=1)}
+
+
+# ---- v0.6: Editor list, scores, rule fixes, fix my clip, batch, trends --------------------------------
+EDITOR_SORT = {"profit": "c.profit_likely DESC NULLS LAST, c.virality DESC", "virality": "c.virality DESC NULLS LAST",
+               "newest": "c.id DESC"}
+
+
+@app.get("/edit/{cid}/canvas", dependencies=A)
+def edit_canvas(cid: int):
+    """What the Editor's live preview needs: the cut + reframed base video with no captions (if built), and the
+    caption layout for the current edit, so caption changes show instantly without a render."""
+    import tempfile
+    from .editing import captions as capmod
+    p = _ep(cid)
+    e = p["edl"]
+    try:
+        key = edit_compile.base_key(e)
+    except Exception:                                   # noqa: BLE001
+        key = None
+    base = None
+    m = db.q1("SELECT moment_id FROM clips WHERE id=?", (cid,))
+    dirs = [storage.media_dir() / "edit_cache" / f"c{cid}"] + (
+        [storage.media_dir() / "edit_cache" / f"m{m['moment_id']}"] if m and m["moment_id"] else [])
+    for d in dirs:
+        for suffix in ("p", ""):
+            f = d / f"base_{key}{suffix}.mp4"
+            if key and f.exists():
+                base = f
+                break
+        if base:
+            break
+    meta = json.loads(base.with_suffix(".json").read_text(encoding="utf-8")) if base and base.with_suffix(".json").exists() \
+        else {"layout": next((("crop" if lay in ("speaker", "pip") else lay) for _, lay in edit_compile.layout_segments(e)),
+                             "blur_fill"),
+              "src_w": e["source"].get("width", 1920), "src_h": e["source"].get("height", 1080)}
+    spec = edit_compile.spec_for(e, Path(tempfile.mkdtemp()) / "o.mp4", base or Path("base.mp4"), "proxy")
+    tmpl = spec.template or spec.caption_style
+    events = []
+    if spec.captions_enabled:
+        try:
+            tr = capmod.build_track(spec.words, Path(tempfile.mkdtemp()) / "c.ass", tmpl, spec.words_per_chunk,
+                                    layout_segments=spec.layout_segments, offset=0.0, layout=meta.get("layout", "blur_fill"),
+                                    src_w=meta.get("src_w", 1920), src_h=meta.get("src_h", 1080),
+                                    keep_clear=tuple(spec.keep_clear), nudge=spec.caption_nudge, uppercase=spec.uppercase,
+                                    profanity=spec.profanity, fillers=spec.fillers, emoji=spec.emoji, hook=spec.hook,
+                                    hook_sec=spec.hook_sec, credit=spec.credit, duration=edit_tl.duration(e))
+            events = tr.events
+        except Exception as ex:                         # noqa: BLE001
+            log.warning("caption layout for clip %s failed: %s", cid, ex)
+    style = capmod.template_from(tmpl).as_dict()
+    return {"base": str(base) if base else None, "events": events, "style": style, "duration": edit_tl.duration(e),
+            "head": p["head"]}
+
+
+@app.get("/editor/clips", dependencies=A)
+def editor_clips(sort: str = "profit", min_score: int | None = None, program_id: int | None = None,
+                 streamer_id: int | None = None, moment_type: str | None = None, status: str | None = None,
+                 project_id: int | None = None, limit: int = 300):
+    if sort not in EDITOR_SORT:
+        raise HTTPException(400, "sort is profit, virality or newest")
+    cond, params = ["c.deleted_at IS NULL", "c.review_status != 'rejected'"], []
+    for col, val in (("c.program_id", program_id), ("c.streamer_id", streamer_id), ("c.project_id", project_id),
+                     ("m.type", moment_type)):
+        if val is not None:
+            cond.append(f"{col}=?")
+            params.append(val)
+    if min_score is not None:
+        cond.append("c.virality >= ?")
+        params.append(min_score)
+    rows = db.q(f"""SELECT c.id, c.title, c.file_path, c.thumb_path, c.virality, c.virality_reason, c.virality_parts,
+        c.profit_low, c.profit_likely, c.profit_high, c.profit_platform, c.expected_views, c.rule_flags, c.review_status,
+        c.streamer_id, c.program_id, c.project_id, c.duration_sec, s.display_name streamer, pr.name program,
+        m.type moment_type, m.reason moment_reason, ep.status edit_status, ep.updated_at edited_at,
+        EXISTS (SELECT 1 FROM posts p WHERE p.clip_id=c.id AND p.status='posted') posted
+        FROM clips c LEFT JOIN streamers s ON s.id=c.streamer_id LEFT JOIN programs pr ON pr.id=c.program_id
+        LEFT JOIN moments m ON m.id=c.moment_id LEFT JOIN edit_projects ep ON ep.clip_id=c.id
+        WHERE {" AND ".join(cond)} ORDER BY {EDITOR_SORT[sort]} LIMIT ?""", (*params, limit))
+    out = []
+    for r in rows:
+        st = "posted" if r["posted"] else (r["edit_status"] or "new")
+        if status and st != status:
+            continue
+        flags = json.loads(r["rule_flags"] or "[]")
+        out.append({**r, "status": st, "rule_flags": flags, "virality_parts": json.loads(r["virality_parts"] or "{}"),
+                    "rules_ok": not any(f.get("severity") == "error" for f in flags)})
+    if sort == "profit":
+        from .scoring import clipscore
+        out = clipscore.rank_for_posting(out)
+    return out
+
+
+@app.post("/edit/{cid}/score", dependencies=A)
+def edit_score(cid: int):
+    from .scoring import clipscore
+    p = _ep(cid)
+    return clipscore.score_clip(cid, p["edl"])
+
+
+@app.post("/edit/{cid}/fix", dependencies=A)
+def edit_fix(cid: int, body: dict):
+    """One-click fix for one campaign-rule flag ({"id": ...}) or all of them ({"all": true})."""
+    from .scoring import rules_check
+    _ep(cid)
+    if body.get("all"):
+        return _view(edit_project.update(cid, lambda e: rules_check.fix_all(e)[0], "Fix campaign rules"))
+    fid = body.get("id")
+    if not fid:
+        raise HTTPException(400, "id or all is required")
+    return _view(edit_project.update(cid, lambda e: rules_check.fix(e, fid), f"Fix: {fid}"))
+
+
+@app.post("/edit/{cid}/fix-my-clip", dependencies=A)
+def edit_fix_my_clip(cid: int):
+    from .scoring import fixclip
+    p = _ep(cid)
+    e, done = fixclip.fix_my_clip(p["edl"])
+    v = _view(edit_project.save(cid, e, "Fix my clip: " + ", ".join(done)) if done else p)
+    return {**v, "changes": done}
+
+
+@app.post("/edit/{cid}/auto-edit", dependencies=A)
+def edit_auto(cid: int):
+    """Back to the automatic edit (first version), then the one-click clean-up."""
+    from .scoring import fixclip
+    p = _ep(cid)
+    first = db.q1("SELECT data FROM edit_versions WHERE project_id=? ORDER BY version LIMIT 1", (p["id"],))
+    e = json.loads(first["data"]) if first else p["edl"]
+    e, done = fixclip.fix_my_clip(e)
+    return {**_view(edit_project.save(cid, e, "Auto-edit")), "changes": done}
+
+
+@app.post("/edit/{cid}/signal", dependencies=A)
+def edit_signal(cid: int, body: dict):
+    """Implicit learning signals from the Editor: keep, delete, edit, export."""
+    kind = body.get("kind")
+    if kind not in ("keep", "delete", "edit", "export"):
+        raise HTTPException(400, "kind is keep, delete, edit or export")
+    _clip(cid)
+    db.ex("INSERT INTO clip_signals(clip_id, kind) VALUES (?,?)", (cid, kind))
+    if kind == "delete":
+        db.ex("UPDATE clips SET deleted_at=datetime('now') WHERE id=?", (cid,))
+    elif kind == "keep":
+        db.ex("UPDATE clips SET review_status='approved' WHERE id=? AND review_status='pending'", (cid,))
+    return {"ok": True}
+
+
+@app.post("/editor/batch", dependencies=A)
+def editor_batch(body: dict):
+    """Apply one action to many clips: template, captions (regenerate), fix, export, delete."""
+    ids = [int(i) for i in body.get("ids") or []]
+    action = body.get("action")
+    if not ids or action not in ("template", "captions", "fix", "export", "delete", "keep"):
+        raise HTTPException(400, "ids and action (template, captions, fix, export, delete, keep) are required")
+    from .scoring import fixclip
+    done, failed, jobs = [], [], []
+    for cid in ids:
+        try:
+            if action == "template":
+                t = body.get("template")
+                if not t or not edit_templates.get(t):
+                    raise HTTPException(400, "unknown template")
+                _ep(cid)
+                edit_project.update(cid,
+                                    lambda e: {**e, "captions": {**e["captions"], "template": t}}, f"Template: {t}")
+            elif action == "captions":
+                _ep(cid)
+                edit_project.update(cid, lambda e: {**e, "captions": {**e["captions"], "enabled": True, "nudge": 0.0,
+                                                                         "translate_to": None}}, "Regenerate captions")
+            elif action == "fix":
+                p = _ep(cid)
+                e, ch = fixclip.fix_my_clip(p["edl"])
+                if ch:
+                    edit_project.save(cid, e, "Fix my clip: " + ", ".join(ch))
+            elif action == "export":
+                jobs.append(edit_export(cid, {"preset": body.get("preset") or "tiktok", "music": body.get("music", True)})["job_id"])
+            else:
+                edit_signal(cid, {"kind": action})
+            done.append(cid)
+        except HTTPException as e:
+            if e.status_code == 400:
+                raise
+            failed.append({"id": cid, "error": e.detail})
+    return {"done": done, "failed": failed, "jobs": jobs}
+
+
+@app.get("/trends", dependencies=A)
+def trends():
+    return db.q("SELECT * FROM trend_topics ORDER BY active DESC, id DESC")
+
+
+@app.post("/trends", dependencies=A)
+def trends_add(body: dict):
+    """Topics you're watching (game updates, memes, events): one per line. Used by the virality score."""
+    n = 0
+    for line in str(body.get("text") or "").splitlines():
+        t = line.strip().lstrip("#").strip()
+        if 1 < len(t) <= 60:
+            db.ex("INSERT OR IGNORE INTO trend_topics(topic) VALUES (?)", (t,))
+            n += 1
+    return {"added": n, "topics": trends()}
+
+
+@app.delete("/trends/{tid}", dependencies=A)
+def trends_delete(tid: int):
+    db.ex("DELETE FROM trend_topics WHERE id=?", (tid,))
+    return {"ok": True}
 
 
 @app.get("/export-presets", dependencies=A)
