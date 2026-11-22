@@ -1,5 +1,87 @@
 # ClipFarm changelog
 
+## 0.7.0 (Stage 4): music and sound, hooks and titles, effects, brand templates, learning, variants
+
+### Hooks, titles and hashtags
+- **Write hooks, titles and hashtags** (Hook & Title tab, and automatically in auto-pilot):
+  - 3–5 hook options from the transcript and moment type, each a different angle (question, shock, stakes, a
+    quote from the clip).
+  - A title, description and hashtags written for each platform: TikTok, YouTube Shorts (#shorts),
+    Instagram Reels and X.
+  - The campaign's hashtags are always included, spelled the way the campaign spells them, plus the credit and
+    disclosure.
+- Works without an AI model too: hooks then come from the moment type and the best quote in the clip.
+- When you export, Post & Submit gets the title, description and hashtags written for that platform.
+
+### Zooms, effects, sound effects and B-roll
+- **Auto zooms, effects and sounds** (Effects tab, and automatically in auto-pilot):
+  - A punch-in on the payoff and small punch-ins on reactions ("NO WAY", "bro", "what"). These land on the beat
+    when there's music.
+  - Action adds a flash, shake, 💥, a boom and a whoosh before the payoff.
+  - Funny adds 😂 and a pop. A fail adds 💀 and a bonk. A clutch adds 🏆, a riser and a ding.
+  - Running it again only replaces the automatic ones; anything you added by hand stays.
+- **Sound-effects pack:** 10 original sounds (whoosh, boom, impact, pop, ding, riser, bonk, rewind, shutter,
+  sad horn), synthesised by ClipFarm and released CC0. Add any of them at the playhead from the Effects tab.
+- **Your own SFX and B-roll folders** (Settings › Music). You confirm you have the rights. B-roll is added
+  automatically when a word in the clip matches a file name (e.g. "cops" → `cops.mp4`), shown as a cut-away in
+  the upper middle.
+- Only the bundled pack and your folders are ever used: anything else is refused at render time.
+- Reaction emoji buttons in the Effects tab (all bundled Noto images).
+
+### Music
+- **Pick a track for this moment** re-plans the music: a track matched to the moment type, with the drop on
+  the payoff, beat markers and beat-aligned zooms. Choosing a track yourself re-plans it the same way.
+- Music & Audio tab:
+  - music volume, ducking (12–18 dB) and start point;
+  - voice volume, speech enhancement and noise reduction;
+  - a -14 LUFS final mix;
+  - the trending-sound suggestion and "Export for trending sound".
+
+### Brand templates (Settings › Brand)
+- One template per account, covering:
+  - caption style;
+  - logo or watermark (corner, size, opacity);
+  - intro card (first 0.8 s) and outro card (last 1.6 s) with your colours;
+  - progress bar on/off and its colour;
+  - campaign credit at the top or bottom.
+- Auto-pilot applies the template of the account a clip is made for. In the Editor, pick a brand from the top
+  bar.
+- A brand logo also clears the "campaign needs a watermark" flag.
+
+### Variants for A/B tests
+- **Make variants** (Editor top bar) makes up to 3 extra versions of a clip. Each is its own clip with its own
+  score and projected A$, labelled [B] [C] [D] and linked to the original:
+  - **B:** shorter, starting closer to the payoff, with a different hook;
+  - **C:** a different layout and a different hook;
+  - **D:** a longer build-up.
+
+### Learning (one system)
+- ClipFarm now learns from:
+  - 👍/👎 and the "why?" tags (new: bad captions, wrong music, bad framing);
+  - what you keep, export and delete in the Editor;
+  - real views compared with the prediction.
+- After about 50 clips with feedback for a streamer or game, it reweights both the **highlight signals** and the
+  **virality score** for them. The learned weights are blended with the defaults and trusted more as feedback
+  grows.
+- Settings › Highlights shows:
+  - the virality weights, with "Reset to default";
+  - what has been learned per streamer/game;
+  - **predicted vs actual views**: the median ratio, how well the score tracks real views, and a per-clip table.
+
+### Auto-pilot, still fully hands-off
+- Detect → auto-edit → hooks and titles → brand → effects → Fix my clip → score → export → Post & Submit.
+
+### Deliverables
+- `docs/LICENCES.md` lists every bundled font, model, music track and sound effect with its licence. No B-roll is
+  bundled.
+- CI before/after samples now also include `reframe.mp4` (centre crop vs AI reframe) and `full_edit.mp4` (the
+  full automatic edit).
+- CI screenshots include the Editor in simple and advanced mode and its Captions, Layout and Campaign rules tabs.
+
+### Database
+- Migration v8 (additive): a `brand_templates` table, `accounts.brand_template_id`, and `clips.variant_of` /
+  `clips.variant_label`.
+
 ## 0.6.0 (Stage 3): virality score, earnings per clip, and the Editor
 
 ### The Editor (replaces Review)

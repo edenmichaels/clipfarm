@@ -118,6 +118,19 @@ def ensure_project(clip_id: int) -> dict | None:
                            "loudness": spec.get("music_track_lufs"), "track_id": c.get("music_track_id")})
     else:
         e["music"]["enabled"] = False
-    e["rules"]["credit"] = spec.get("credit")
-    e["rules"]["onscreen"] = list(spec.get("keep_clear") or [])
+    # the campaign's rules (hashtags, disclosure, platforms, original audio only) come from the clip's program
+    prog = db.q1("SELECT * FROM programs WHERE id=?", (c["program_id"],)) if c.get("program_id") else None
+    if prog:
+        from ..campaigns import rules as camp_rules
+        req = camp_rules.requirements(prog)
+        e["rules"].update({"program_id": prog["id"], "program": prog["name"], "tags": req["tags"],
+                           "disclosure": req["disclosure"], "no_music": bool(prog.get("no_music")),
+                           "platforms": json.loads(prog["allowed_platforms"] or "[]") if prog.get("allowed_platforms") else []})
+        if not spec.get("keep_clear"):
+            e["rules"]["onscreen"] = list(req["onscreen"])
+    e["rules"]["credit"] = spec.get("credit") or e["rules"].get("credit")
+    if spec.get("keep_clear"):
+        e["rules"]["onscreen"] = list(spec["keep_clear"])
+    if e["rules"].get("no_music"):
+        e["music"]["enabled"] = False
     return project.create(clip_id, e, "Imported from an older clip")

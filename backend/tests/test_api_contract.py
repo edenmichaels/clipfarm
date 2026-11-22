@@ -414,6 +414,9 @@ def test_v06_editor_routes(client, tmp_path):
         [{"word": w, "start": 4 + i * 0.6, "end": 4.4 + i * 0.6} for i, w in enumerate("um so we um did it no way".split())]),
         cid))
     v = call(client, "GET", f"/edit/{cid}", route="/edit/{cid}")
+    assert "#DylanPage" in v["edl"]["rules"]["tags"]
+    cv = call(client, "GET", f"/edit/{cid}/canvas", route="/edit/{cid}/canvas")
+    assert cv["events"] and cv["style"]["family"] and cv["duration"] > 20
     s = call(client, "POST", f"/edit/{cid}/score", route="/edit/{cid}/score")
     assert 0 <= s["virality"]["score"] <= 100 and s["virality"]["reason"] and isinstance(s["flags"], list)
     rows = call(client, "GET", "/editor/clips")
@@ -445,6 +448,62 @@ def test_v06_editor_routes(client, tmp_path):
     call(client, "DELETE", f"/trends/{t['topics'][0]['id']}", route="/trends/{tid}")
     call(client, "POST", "/editor/batch", json={"ids": [cid], "action": "delete"})
     assert call(client, "GET", "/editor/clips") == []
+
+
+def test_v07_routes(client, tmp_path):
+    import subprocess
+    src = tmp_path / "src.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=1920x1080:r=30:d=30", "-f", "lavfi",
+                    "-i", "sine=f=300:d=30", "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac",
+                    str(src)], check=True)
+    _, prog, cid, _ = _linked_clip(tmp_path)
+    db.ex("UPDATE clips SET source_path=?, words=? WHERE id=?", (str(src), json.dumps(
+        [{"word": w, "start": 4 + i * 0.6, "end": 4.4 + i * 0.6} for i, w in enumerate("no way the cops are here bro".split())]),
+        cid))
+    v = call(client, "POST", f"/edit/{cid}/hooks", route="/edit/{cid}/hooks")
+    assert len(v["edl"]["hook"]["options"]) >= 3 and "dylanpage" in v["edl"]["texts"]["tiktok"]["hashtags"]
+    v = call(client, "POST", f"/edit/{cid}/effects", route="/edit/{cid}/effects", json={})
+    assert any(z.get("auto") for z in v["edl"]["zooms"])
+    v = call(client, "POST", f"/edit/{cid}/effects", route="/edit/{cid}/effects", json={"clear": True})
+    assert not any(z.get("auto") for z in v["edl"]["zooms"])
+    fx = call(client, "GET", "/sfx")
+    assert any(x["id"] == "boom" for x in fx)
+    v = call(client, "POST", f"/edit/{cid}/sfx", route="/edit/{cid}/sfx", json={"id": "boom", "t_out": 1.0})
+    assert v["edl"]["sfx"][-1]["id"] == "boom"
+    call(client, "POST", f"/edit/{cid}/sfx", route="/edit/{cid}/sfx", json={"id": "nope"}, expect=404)
+    lib = tmp_path / "broll"
+    lib.mkdir()
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=red:s=64x64:d=1", "-frames:v", "1",
+                    str(lib / "cops.png")], check=True)
+    call(client, "PUT", "/library-folders", json={"broll_dir": str(lib)}, expect=400)
+    call(client, "PUT", "/library-folders", json={"broll_dir": str(tmp_path / "missing"), "confirm_rights": True}, expect=400)
+    assert call(client, "PUT", "/library-folders", json={"broll_dir": str(lib), "confirm_rights": True})["broll_dir"]
+    assert call(client, "GET", "/broll")["items"][0]["name"] == "cops"
+    v = call(client, "POST", f"/edit/{cid}/broll", route="/edit/{cid}/broll", json={"path": str(lib / "cops.png"), "t_out": 2})
+    assert v["edl"]["broll"]
+    call(client, "POST", f"/edit/{cid}/broll", route="/edit/{cid}/broll", json={"path": str(src)}, expect=400)
+    r = call(client, "POST", f"/edit/{cid}/music", route="/edit/{cid}/music", json={})
+    assert r["edl"]["music"]["enabled"] and r["edl"]["music"]["licence"]
+    call(client, "POST", f"/edit/{cid}/music", route="/edit/{cid}/music", json={"track_id": 99999}, expect=404)
+    var = call(client, "POST", f"/edit/{cid}/variants", route="/edit/{cid}/variants", json={"n": 2})["variants"]
+    assert [x["label"] for x in var] == ["B", "C"]
+    call(client, "POST", f"/edit/{cid}/variants", route="/edit/{cid}/variants", json={"n": 9}, expect=400)
+    aid = db.ex("INSERT INTO accounts(platform, handle) VALUES ('tiktok','@brand')")
+    b = call(client, "POST", "/brand-templates", json={"name": "Mine", "data": {"progress_color": "00ff00"}, "account_ids": [aid]})
+    assert b["progress_color"] == "00FF00" and b["accounts"] == [aid]
+    call(client, "POST", "/brand-templates", json={"name": "", "data": {}}, expect=400)
+    assert call(client, "GET", "/brand-templates")["templates"][0]["name"] == "Mine"
+    call(client, "PUT", f"/accounts/{aid}/brand", route="/accounts/{aid}/brand", json={"brand_template_id": None})
+    call(client, "PUT", f"/accounts/{aid}/brand", route="/accounts/{aid}/brand", json={"brand_template_id": 999}, expect=404)
+    v = call(client, "POST", f"/edit/{cid}/brand", route="/edit/{cid}/brand", json={"brand_template_id": b["id"]})
+    assert v["edl"]["brand"]["name"] == "Mine"
+    call(client, "DELETE", f"/brand-templates/{b['id']}", route="/brand-templates/{bid}")
+    ls = call(client, "GET", "/learning")
+    assert "virality_default" in ls and "predicted_vs_actual" in ls
+    w = call(client, "PUT", "/virality/weights", json={"weights": {"hook": 1}})
+    assert abs(sum(w["virality_global"].values()) - 1) < 0.02
+    w = call(client, "POST", "/virality/weights/reset", json={})
+    assert w["virality_global"]["hook"] == 0.25
 
 
 def test_every_route_is_covered():

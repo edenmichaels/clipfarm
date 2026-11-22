@@ -1,7 +1,7 @@
 // Editor building blocks: live 9:16 preview with caption overlay + safe zones, the multi-track timeline,
 // and the right-hand panels (Transcript, Captions, Layout, Hook & Title, Music & Audio, Effects, Campaign rules).
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, MOMENT_EMOJI, waitForJob } from "../api";
+import { api, waitForJob } from "../api";
 
 export type View = any;
 export type Edl = any;
@@ -26,6 +26,8 @@ export function toSrc(kept: [number, number][], out: number): number {
   return kept.length ? kept[kept.length - 1][1] : 0;
 }
 export const fmt = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+// Reaction emojis we bundle images for (Noto Emoji, Apache 2.0).
+const REACTION_EMOJI = ["😂", "💥", "😱", "🏆", "💀", "❤️", "🔥", "😭", "🤯", "💰", "🚨", "👀"];
 const hex = (c?: string) => (!c ? "#fff" : c.startsWith("#") ? c : `#${c}`);
 
 // ---- fonts ---------------------------------------------------------------------------------------------
@@ -360,7 +362,7 @@ export function LayoutPanel({ v, onEdl, post, t }: { v: View; onEdl: (fn: (e: Ed
   );
 }
 
-export function HookPanel({ v, onEdl }: { v: View; onEdl: (fn: (e: Edl) => Edl, l: string) => void }) {
+export function HookPanel({ v, onEdl, post }: { v: View; onEdl: (fn: (e: Edl) => Edl, l: string) => void; post: (path: string, b?: any) => void }) {
   const h = v.edl.hook;
   const [text, setText] = useState(h.text || "");
   useEffect(() => setText(h.text || ""), [h.text]);
@@ -371,6 +373,7 @@ export function HookPanel({ v, onEdl }: { v: View; onEdl: (fn: (e: Edl) => Edl, 
   const setTx = (k: string, val: any) => onEdl((e) => { e.texts = { ...(e.texts || {}), [plat]: { ...tx, [k]: val } }; return e; }, `Edit ${plat} ${k}`);
   return (
     <div className="stack tight">
+      <div><button className="btn-primary" onClick={() => post(`/edit/${v.clip_id}/hooks`)}>✨ Write hooks, titles and hashtags</button></div>
       <label className="field">Hook (top of the screen, first {h.sec || 2.2}s)
         <input value={text} onChange={(e) => setText(e.target.value)} onBlur={() => text !== (h.text || "") && onEdl((e) => { e.hook.text = text || null; return e; }, "Edit hook")} /></label>
       {(h.options || []).length > 0 && (
@@ -388,7 +391,7 @@ export function HookPanel({ v, onEdl }: { v: View; onEdl: (fn: (e: Edl) => Edl, 
   );
 }
 
-export function MusicPanel({ v, onEdl, tracks }: { v: View; onEdl: (fn: (e: Edl) => Edl, l: string) => void; tracks: any[] }) {
+export function MusicPanel({ v, onEdl, tracks, post }: { v: View; onEdl: (fn: (e: Edl) => Edl, l: string) => void; tracks: any[]; post: (path: string, b?: any) => void }) {
   const [trend, setTrend] = useState<any>({ trending: [] });
   const [tmsg, setTmsg] = useState("");
   useEffect(() => { api.get(`/clips/${v.clip_id}/edit`).then(setTrend).catch(() => {}); }, [v.clip_id]);
@@ -410,14 +413,14 @@ export function MusicPanel({ v, onEdl, tracks }: { v: View; onEdl: (fn: (e: Edl)
       <label className="row" style={{ gap: 8 }}><input type="checkbox" disabled={blocked} checked={!!m.enabled && !blocked}
         onChange={(e) => onEdl((x) => { x.music.enabled = e.target.checked; return x; }, e.target.checked ? "Music on" : "Original audio only")} /> Music (off = original audio only)</label>
       <label className="field">Track
-        <select disabled={blocked || !m.enabled} value={m.track_id || ""} onChange={(e) => {
-          const tr = tracks.find((x) => String(x.id) === e.target.value);
-          onEdl((x) => { x.music = { ...x.music, track_id: tr?.id ?? null, path: tr?.path ?? null, loudness: tr?.loudness ?? null, title: tr?.title, licence: tr?.licence, beats: [], offset: 0 }; return x; }, `Music: ${tr?.title || "none"}`);
-        }}>
+        <select disabled={blocked} value={m.track_id || ""} onChange={(e) => e.target.value
+          ? post(`/edit/${v.clip_id}/music`, { track_id: Number(e.target.value) })
+          : onEdl((x) => { x.music.enabled = false; return x; }, "No music")}>
           <option value="">(none)</option>
           {tracks.filter((x) => x.enabled !== 0).map((x) => <option key={x.id} value={x.id}>{x.title} · {(x.moods || []).join("/")} · {Math.round(x.bpm || 0)} BPM</option>)}
         </select></label>
-      {m.licence && <span className="muted tiny">Licence: {m.licence}</span>}
+      <div><button disabled={blocked} onClick={() => post(`/edit/${v.clip_id}/music`, {})}>🎲 Pick a track for this moment</button></div>
+      {m.licence && <span className="muted tiny">Licence: {m.licence}{m.mode ? ` · drop ${m.mode === "drop" ? "lands on the payoff" : m.mode}` : ""}</span>}
       <label className="field">Music volume ({(m.volume_db || 0).toFixed(0)} dB)<input type="range" min={-18} max={6} step={1} value={m.volume_db || 0} disabled={!m.enabled}
         onChange={(e) => onEdl((x) => { x.music.volume_db = +e.target.value; return x; }, "Music volume")} /></label>
       <label className="field">Duck under speech ({(m.duck_db ?? 15).toFixed(0)} dB)<input type="range" min={12} max={18} step={1} value={m.duck_db ?? 15} disabled={!m.enabled}
@@ -442,18 +445,35 @@ export function MusicPanel({ v, onEdl, tracks }: { v: View; onEdl: (fn: (e: Edl)
   );
 }
 
-export function EffectsPanel({ v, onEdl, t }: { v: View; onEdl: (fn: (e: Edl) => Edl, l: string) => void; t: number }) {
+export function EffectsPanel({ v, onEdl, t, post }: { v: View; onEdl: (fn: (e: Edl) => Edl, l: string) => void; t: number; post: (path: string, b?: any) => void }) {
   const e = v.edl;
   const kept = keptOf(v);
+  const [sfx, setSfx] = useState<any[]>([]);
+  const [broll, setBroll] = useState<any>({ items: [] });
+  useEffect(() => { api.get("/sfx").then(setSfx).catch(() => {}); api.get("/broll").then(setBroll).catch(() => {}); }, []);
   const at = () => +toSrc(kept, t).toFixed(3);
   const add = (list: string, item: any, label: string) => onEdl((x) => { x[list] = [...(x[list] || []), item]; return x; }, label);
   return (
     <div className="stack tight">
       <div className="row wrap" style={{ gap: 6 }}>
+        <button className="btn-primary" onClick={() => post(`/edit/${v.clip_id}/effects`, {})}>✨ Auto zooms, effects and sounds</button>
+        <button onClick={() => post(`/edit/${v.clip_id}/effects`, { clear: true })}>Remove automatic ones</button>
+      </div>
+      <div className="row wrap" style={{ gap: 6 }}>
+        <select defaultValue="" aria-label="Add sound effect" onChange={(x) => { const id = x.target.value; x.target.value = ""; id && post(`/edit/${v.clip_id}/sfx`, { id, t_out: t }); }}>
+          <option value="">+ Sound effect at {fmt(t)}…</option>
+          {sfx.map((x) => <option key={x.id} value={x.id}>{x.title}{x.source === "local" ? " (your folder)" : ""}</option>)}
+        </select>
+        <select defaultValue="" aria-label="Add B-roll" disabled={!broll.items.length} onChange={(x) => { const p = x.target.value; x.target.value = ""; p && post(`/edit/${v.clip_id}/broll`, { path: p, t_out: t }); }}>
+          <option value="">{broll.items.length ? `+ B-roll at ${fmt(t)}…` : "B-roll: set your folder in Settings › Music"}</option>
+          {broll.items.map((x: any) => <option key={x.path} value={x.path}>{x.name}</option>)}
+        </select>
+      </div>
+      <div className="row wrap" style={{ gap: 6 }}>
         <button onClick={() => add("zooms", { t: at(), kind: "punch", amount: 1.18, dur: 0.6 }, "Add zoom")}>+ Punch-in zoom at {fmt(t)}</button>
         <button onClick={() => add("overlays", { kind: "flash", t: at(), dur: 0.15 }, "Add flash")}>+ Flash</button>
         <button onClick={() => add("overlays", { kind: "shake", t: at(), dur: 0.5 }, "Add shake")}>+ Shake</button>
-        {Object.entries(MOMENT_EMOJI).map(([k, em]) => <button key={k} title={`${k} emoji`} onClick={() => add("overlays", { kind: "emoji", t: at(), dur: 1.2, emoji: em }, "Add emoji")}>{em}</button>)}
+        {REACTION_EMOJI.map((em) => <button key={em} title="Reaction emoji" onClick={() => add("overlays", { kind: "emoji", t: at(), dur: 1.2, emoji: em }, "Add emoji")}>{em}</button>)}
       </div>
       <label className="row" style={{ gap: 8 }}><input type="checkbox" checked={e.progress_bar !== false} onChange={(x) => onEdl((y) => { y.progress_bar = x.target.checked; return y; }, "Progress bar")} /> Progress bar</label>
       {[["zooms", "Zoom"], ["overlays", "Effect"], ["sfx", "Sound effect"], ["broll", "B-roll"]].map(([list, label]) => (e[list] || []).map((it: any, i: number) => (

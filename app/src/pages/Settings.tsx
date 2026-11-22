@@ -12,12 +12,13 @@ import Programs from "./Programs";
 import Health from "./Health";
 import Logs from "./Logs";
 import { CaptionSettings, HighlightSettings, MusicSettings } from "../components/QualitySettings";
+import { BrandSettings, LearningSettings, LibrarySettings } from "../components/StudioSettings";
 
-export const TABS = ["General", "Accounts", "Connections", "Campaigns", "Captions", "Highlights", "Music", "Posting",
+export const TABS = ["General", "Accounts", "Connections", "Campaigns", "Captions", "Highlights", "Music", "Brand", "Posting",
   "Rewards programs", "Backup", "Setup health", "Logs", "Rules"];
 // Tabs that save themselves (no "Save settings" button).
 const SELF_SAVING = ["Connections", "Accounts", "Backup", "Campaigns", "Rewards programs", "Setup health", "Logs",
-  "Captions", "Highlights", "Music"];
+  "Captions", "Highlights", "Music", "Brand"];
 const ACCENTS = ["#ffd400", "#3ccf7a", "#4da3ff", "#ff5a7a"];
 
 export default function Settings({ initialTab, go }: { initialTab?: string; go: (p: Page, tab?: string) => void }) {
@@ -150,8 +151,9 @@ export default function Settings({ initialTab, go }: { initialTab?: string; go: 
       {tab === "Setup health" && <div className="embedded"><Health go={go} /></div>}
       {tab === "Logs" && <div className="embedded"><Logs /></div>}
       {tab === "Captions" && <CaptionSettings />}
-      {tab === "Highlights" && <HighlightSettings />}
-      {tab === "Music" && <MusicSettings />}
+      {tab === "Highlights" && <div className="stack" style={{ maxWidth: 760 }}><HighlightSettings /><LearningSettings /></div>}
+      {tab === "Music" && <div className="stack" style={{ maxWidth: 760 }}><MusicSettings /><LibrarySettings /></div>}
+      {tab === "Brand" && <BrandSettings />}
     </div>
   );
 }

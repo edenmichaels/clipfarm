@@ -16,10 +16,11 @@ import numpy as np
 from .. import compliance, db
 from ..campaigns import autopilot, matching, rules
 from ..discovery.service import rank_game
-from ..editing.hooks import generate_package
+from ..editing.hooks import generate_options, generate_package
 from ..editing.render import RenderSpec, render
 from ..music import pick as music_pick
-from ..edit import build as edit_build, compile as edit_compile, project as edit_project, templates as edit_templates
+from ..edit import brand as edit_brand, build as edit_build, compile as edit_compile, effects as edit_effects
+from ..edit import project as edit_project, templates as edit_templates
 from ..highlights import dedupe, detect, learning, rate, run, visual
 from ..highlights.chat_logger import ChatLogger, load_chat
 from ..highlights.transcribe import transcribe
@@ -310,6 +311,8 @@ def render_moment(payload: dict, ctx: JobContext) -> None:
         hook=pkg["hook"], credit=credit, account_ids=acct_ids, payoff=payoff)
     if why_off := edl["music"].get("why_off"):
         rule_notes.append(why_off)
+    edl = finish_auto_edit(edl, transcript, streamer["display_name"], game["name"], mtype, req["tags"],
+                           reqs["disclosure"], credit, acct_ids)
     ctx.progress(0.5)
     tmpl = edit_templates.get(edl["captions"]["template"])
     result = edit_compile.render(edl, out, storage.media_dir() / "edit_cache" / f"m{mid}", "export",
@@ -346,6 +349,7 @@ def render_moment(payload: dict, ctx: JobContext) -> None:
                      result.get("base"), None))
     db.ex("UPDATE clips SET source_path=? WHERE id=?", (str(keep), clip_id))
     edit_project.create(clip_id, edl, "Auto-edit")
+    apply_texts(clip_id, edl, edl["export"].get("preset"))
     edit_project.set_status(clip_id, "ready")
     if track:
         music_pick.record_use(track["id"], clip_id, acct_ids)
@@ -417,6 +421,56 @@ def spec_from_clip(c: dict, changes: dict | None = None) -> RenderSpec:
     return spec
 
 
+def finish_auto_edit(edl: dict, transcript: str, streamer: str, game: str, mtype: str | None, tags: list[str],
+                     disclosure: str | None, credit: str | None, account_ids: list[int] | None) -> dict:
+    """The hands-off part of auto-pilot after the cut: 3-5 hook options and per-platform texts, the account's
+    brand template, automatic zooms/effects/SFX/B-roll, then 'Fix my clip'. Each step is best-effort."""
+    from ..scoring import fixclip
+    try:
+        opts = generate_options(transcript, streamer, game, mtype, tags, disclosure, credit)
+        edl["hook"]["options"] = opts["hooks"]
+        if not edl["hook"].get("text") and opts["hooks"]:
+            edl["hook"]["text"] = opts["hooks"][0]
+        edl["texts"] = opts["texts"]
+    except Exception as e:                                # noqa: BLE001
+        db.log("warn", "pipeline", f"Hook options failed: {e}")
+    try:
+        edl = edit_brand.apply(edl, edit_brand.for_accounts(account_ids))
+    except Exception as e:                                # noqa: BLE001
+        db.log("warn", "pipeline", f"Brand template failed: {e}")
+    fx = db.get_setting("effects", {}) or {}
+    if fx.get("auto", True):
+        try:
+            edl = edit_effects.auto_effects(edl, emoji=fx.get("emoji", True), sfx=fx.get("sfx", True),
+                                            broll=fx.get("broll", True))
+        except Exception as e:                            # noqa: BLE001
+            db.log("warn", "pipeline", f"Auto effects failed: {e}")
+    try:
+        edl, _ = fixclip.fix_my_clip(edl)
+    except Exception as e:                                # noqa: BLE001
+        db.log("warn", "pipeline", f"Fix my clip failed: {e}")
+    return edl
+
+
+PRESET_TEXT = {"tiktok": "tiktok", "shorts": "youtube_shorts", "reels": "instagram_reels", "x": "x", "srt": "tiktok"}
+
+
+def apply_texts(clip_id: int, edl: dict, preset: str | None) -> None:
+    """Post & Submit gets the title, description and hashtags written for the platform you exported for
+    (campaign hashtags, credit and disclosure always included)."""
+    plat = PRESET_TEXT.get(preset or edl["export"].get("preset") or "tiktok", "tiktok")
+    tx = (edl.get("texts") or {}).get(plat) or (edl.get("texts") or {}).get("tiktok")
+    if not tx:
+        return
+    r = edl["rules"]
+    tags = [h.lstrip("#") for h in tx.get("hashtags") or []]
+    desc = tx.get("description") or ""
+    caption = rules.caption_text(tx.get("title") or "", desc, tags, r.get("credit"), r.get("disclosure"),
+                                 [t if t.startswith("#") else "#" + t for t in r.get("tags") or []])
+    db.ex("UPDATE clips SET title=COALESCE(NULLIF(?,''), title), description=?, hashtags=?, caption_text=? WHERE id=?",
+          (tx.get("title"), desc, json.dumps(tags), caption, clip_id))
+
+
 def export_edit(clip_id: int, *, preset: str | None = None, music: bool = True, out: Path | None = None,
                 quality: str = "export") -> dict:
     """Render a clip's edit project and update the clip (file, thumbnail, hash, status)."""
@@ -437,6 +491,7 @@ def export_edit(clip_id: int, *, preset: str | None = None, music: bool = True, 
               (res["path"], res["thumb"], res["sha256"], T.duration(edl), edl["hook"].get("text"),
                json.dumps(edl["captions"]["words"]), edl["captions"]["template"] if isinstance(edl["captions"]["template"], str) else "custom",
                edl["captions"].get("nudge", 0), int(not edl["music"].get("enabled")), clip_id))
+        apply_texts(clip_id, edl, preset)
         edit_project.set_status(clip_id, "ready")
     return res
 

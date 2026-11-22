@@ -60,7 +60,7 @@ def check(edl: dict) -> list[dict]:
     if r.get("credit") and edl.get("credit_hidden"):
         flags.append({"id": "credit", "severity": "error", "fix": "Show the credit",
                       "message": f"The campaign requires the credit \"{r['credit']}\" on screen."})
-    if "watermark" in (r.get("onscreen") or []) and not (edl.get("brand") or {}).get("logo"):
+    if "watermark" in (r.get("onscreen") or []) and not (edl.get("brand") or {}).get("logo_path"):
         flags.append({"id": "watermark", "severity": "warn", "fix": None,
                       "message": "This campaign needs its watermark: add it in Brand templates."})
     return flags

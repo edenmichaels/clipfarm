@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -78,6 +79,13 @@ class RenderSpec:
     base: Path | None = None             # reuse an existing base render
     encoder: str = "auto"
     quality: str = "high"
+    # v0.7 effects + brand (all clip time)
+    emojis: list[dict] = field(default_factory=list)       # [{emoji, t, dur, size}] reaction emojis
+    broll: list[dict] = field(default_factory=list)        # [{path, t, dur}] image or video cut-aways
+    logo: dict | None = None             # {path, pos: tl|tr|bl|br, opacity, size}
+    cards: list[dict] = field(default_factory=list)        # [{text, start, end, bg, fg}] intro/outro cards
+    progress_color: str = "FFE500"
+    credit_pos: str | None = None        # top | bottom (None = automatic)
     fps: int = 30
 
 
@@ -274,7 +282,8 @@ def _zoom_expr(spec: RenderSpec) -> str | None:
 
 
 def finish(spec: RenderSpec, base: Path, meta: dict, out: Path | None = None, music: bool = True) -> dict:
-    out = out or spec.out
+    out = Path(out or spec.out).resolve()       # FFmpeg runs in a temp folder, so paths must be absolute
+    base = Path(base).resolve()
     dur = meta["duration"]
     work = Path(tempfile.mkdtemp(prefix="cff_"))
     try:
@@ -287,7 +296,7 @@ def finish(spec: RenderSpec, base: Path, meta: dict, out: Path | None = None, mu
                             src_h=meta.get("src_h", 1080), keep_clear=tuple(spec.keep_clear),
                             nudge=spec.caption_nudge, uppercase=spec.uppercase, profanity=spec.profanity,
                             fillers=spec.fillers, emoji=spec.emoji, hook=spec.hook, hook_sec=spec.hook_sec,
-                            credit=spec.credit, duration=dur)
+                            credit=spec.credit, duration=dur, credit_pos=spec.credit_pos)
         shutil.copy2(track.path, out.with_suffix(".ass"))
         shutil.copy2(track.path.with_suffix(".events.json"), out.with_suffix(".events.json"))
         mspec = spec if music else RenderSpec(**{**spec.__dict__, "music": None})
@@ -319,8 +328,54 @@ def finish(spec: RenderSpec, base: Path, meta: dict, out: Path | None = None, mu
             chain.append(f"color=c=white:s=1080x1920:r={spec.fps}:d={dur:.3f},format=rgba,"
                          f"colorchannelmixer=aa=0.75[fl{k}]")
             add(f"[fl{k}]overlay=0:0:enable='between(t,{a:.3f},{b:.3f})'")
+        for k, b in enumerate(spec.broll[:6]):
+            bp = Path(b["path"])
+            if not bp.exists():
+                continue
+            t0, t1 = float(b["t"]), float(b["t"]) + float(b.get("dur", 2.0))
+            if bp.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp", ".gif"):
+                cmd += ["-loop", "1", "-t", f"{dur:.3f}", "-i", str(bp)]
+                chain.append(f"[{n_in}:v]scale=900:-2,format=rgba[br{k}]")
+            else:
+                cmd += ["-t", f"{t1 - t0 + 0.1:.3f}", "-i", str(bp)]
+                chain.append(f"[{n_in}:v]scale=900:-2,format=rgba,setpts=PTS-STARTPTS+{t0:.3f}/TB[br{k}]")
+            add(f"[br{k}]overlay=x=(W-w)/2:y=330:eof_action=pass:enable='between(t,{t0:.3f},{t1:.3f})'")
+            n_in += 1
+        for k, e in enumerate(spec.emojis[:10] if edir else []):
+            code = "_".join(f"{ord(c):x}" for c in e["emoji"] if ord(c) != 0xFE0F)
+            png = edir / f"emoji_u{code}.png"
+            if not png.exists():
+                continue
+            size = int(e.get("size", 220))
+            cmd += ["-loop", "1", "-t", f"{dur:.3f}", "-i", str(png)]
+            t0, t1 = float(e["t"]), float(e["t"]) + float(e.get("dur", 1.2))
+            chain.append(f"[{n_in}:v]scale={size}:{size},format=rgba[ex{k}]")
+            add(f"[ex{k}]overlay=x={int(e.get('x', 540)) - size // 2}:y={int(e.get('y', 560)) - size // 2}:"
+                f"enable='between(t,{t0:.3f},{t1:.3f})'")
+            n_in += 1
+        if spec.logo and Path(spec.logo.get("path", "")).exists():
+            lg = spec.logo
+            size = int(lg.get("size", 150))
+            op = max(0.1, min(1.0, float(lg.get("opacity", 0.85))))
+            pos = {"tl": ("70", "230"), "tr": ("W-w-160", "230"), "bl": ("70", "1420-h-20"),
+                   "br": ("W-w-160", "1420-h-20")}.get(lg.get("pos", "tr"), ("W-w-160", "230"))
+            cmd += ["-loop", "1", "-t", f"{dur:.3f}", "-i", str(lg["path"])]
+            chain.append(f"[{n_in}:v]scale={size}:-2,format=rgba,colorchannelmixer=aa={op:.2f}[logo]")
+            add(f"[logo]overlay=x={pos[0]}:y={pos[1]}")
+            n_in += 1
+        for k, c in enumerate(spec.cards[:2]):
+            png = work / f"card{k}.png"
+            if not _card_png(c, png):
+                continue
+            cmd += ["-loop", "1", "-t", f"{dur:.3f}", "-i", str(png)]
+            t0, t1 = float(c["start"]), float(c["end"])
+            chain.append(f"[{n_in}:v]format=rgba,fade=t=in:st={t0:.3f}:d=0.15:alpha=1,"
+                         f"fade=t=out:st={max(t0, t1 - 0.15):.3f}:d=0.15:alpha=1[cd{k}]")
+            add(f"[cd{k}]overlay=0:0:enable='between(t,{t0:.3f},{t1:.3f})'")
+            n_in += 1
         if spec.progress_bar:
-            chain.append(f"color=c=0xFFE500:s=1080x14:r={spec.fps}:d={dur:.3f}[pbar]")
+            pc = re.sub(r"[^0-9A-Fa-f]", "", spec.progress_color or "FFE500")[:6] or "FFE500"
+            chain.append(f"color=c=0x{pc}:s=1080x14:r={spec.fps}:d={dur:.3f}[pbar]")
             add(f"[pbar]overlay=x='-w+w*t/{dur:.3f}':y=H-h:eof_action=pass")
         if spec.scale_to:
             add(f"scale={spec.scale_to[0]}:{spec.scale_to[1]}")
@@ -377,6 +432,42 @@ def write_srt(events: list[dict], out: Path) -> Path:
     out.write_text("\n".join(f"{i + 1}\n{ts(a)} --> {ts(b)}\n{t}\n" for i, (a, b, t) in enumerate(blocks)),
                    encoding="utf-8")
     return out
+
+
+def _card_png(card: dict, out: Path) -> bool:
+    """A full-frame intro/outro card: brand background and big centred text, drawn with a bundled font."""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+
+        from .captions import FONTS, fonts_dir
+    except ImportError:
+        return False
+
+    def rgb(h: str, d: str) -> tuple[int, int, int]:
+        h = re.sub(r"[^0-9A-Fa-f]", "", h or d)[:6] or d
+        return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))  # type: ignore[return-value]
+    img = Image.new("RGBA", (1080, 1920), (*rgb(card.get("bg", ""), "111111"), 240))
+    fd = fonts_dir()
+    text = str(card.get("text") or "").strip()[:80]
+    if text:
+        size = 96
+        font = ImageFont.truetype(str(fd / FONTS["Montserrat Black"]), size) if fd else ImageFont.load_default()
+        words, lines, cur = text.split(), [], ""
+        for w in words:
+            nxt = (cur + " " + w).strip()
+            if font.getlength(nxt) > 800 and cur:
+                lines.append(cur)
+                cur = w
+            else:
+                cur = nxt
+        lines.append(cur)
+        d = ImageDraw.Draw(img)
+        y = 960 - len(lines) * size * 0.6
+        for ln in lines:
+            d.text((540, y), ln, font=font, fill=(*rgb(card.get("fg", ""), "FFFFFF"), 255), anchor="ma")
+            y += size * 1.2
+    img.save(out)
+    return True
 
 
 def _emoji_dir() -> Path | None:

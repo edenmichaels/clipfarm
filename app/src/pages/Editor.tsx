@@ -112,6 +112,7 @@ export default function Editor({ go, initialClip }: { go: (p: Page, tab?: string
                 <div className="thumb">{c.thumb_path && <img src={api.mediaUrl(c.thumb_path)} alt="" />}</div>
                 <div className="stack tight grow" style={{ minWidth: 0 }}>
                   <b className="ellipsis">{c.moment_type ? `${MOMENT_EMOJI[c.moment_type] || ""} ` : ""}{c.title}</b>
+                  {c.variant_label && <span className="muted tiny">Variant {c.variant_label} of clip #{c.variant_of}</span>}
                   <span className="muted tiny ellipsis">{c.streamer}{c.program ? ` · ${c.program}` : ""}</span>
                   <div className="row" style={{ gap: 6 }}>
                     <span className={`score ${scoreClass(c.virality)}`} title={c.virality_reason || ""}>{c.virality ?? "–"}</span>
@@ -148,6 +149,7 @@ function Workspace({ clip, simple, onChanged, go, setMsg }: { clip: any; simple:
   const [tracks, setTracks] = useState<any[]>([]);
   const [rated, setRated] = useState<number | null>(null);
   const [tags, setTags] = useState<string[]>([]);
+  const [brands, setBrands] = useState<any[]>([]);
   const fonts = useCaptionFonts();
   const vid = useRef<HTMLVideoElement>(null);
   const building = useRef(false);
@@ -170,6 +172,7 @@ function Workspace({ clip, simple, onChanged, go, setMsg }: { clip: any; simple:
     rescore();
     api.get("/caption-templates").then(setTemplates).catch(() => {});
     api.get("/music/tracks").then((r) => setTracks(r.tracks || [])).catch(() => {});
+    api.get("/brand-templates").then((r) => setBrands(r.templates || [])).catch(() => {});
   }, [cid]);
   useEffect(() => writePref("ed.zone", zone || ""), [zone]);
 
@@ -253,6 +256,13 @@ function Workspace({ clip, simple, onChanged, go, setMsg }: { clip: any; simple:
           <option value="fast">Preview: fast (live captions)</option><option value="final">Preview: final render</option></select>}
         {!simple && <select defaultValue="" onChange={(e) => { const k = e.target.value; e.target.value = ""; k && onEdl((x) => { x.captions.template = k; return x; }, `Template: ${k}`); }} aria-label="Apply template">
           <option value="">Apply template…</option>{(templates?.templates || []).map((x: any) => <option key={x.key} value={x.key}>{x.label}</option>)}</select>}
+        {!simple && brands.length > 0 && <select value={v.edl.brand?.id ?? ""} onChange={(e) => post(`/edit/${cid}/brand`, { brand_template_id: e.target.value ? Number(e.target.value) : null })} aria-label="Brand template">
+          <option value="">No brand template</option>{brands.map((b) => <option key={b.id} value={b.id}>Brand: {b.name}</option>)}</select>}
+        <button disabled={!!busy} onClick={async () => {
+          setBusy("Making variants");
+          try { const r = await api.post(`/edit/${cid}/variants`, { n: 2 }); setMsg(`Made ${r.variants.map((x: any) => `[${x.label}] ${x.what}`).join(" · ")}`); onChanged(); }
+          catch (e: any) { setMsg(e.message); } finally { setBusy(""); }
+        }} title="2 versions with a different hook, length and layout, for A/B tests">Make variants</button>
         <span className="grow" />
         <div className="row" style={{ gap: 4 }}>
           <button className={rated === 1 ? "pill-btn on" : "pill-btn"} onClick={() => rate(1)} aria-label="Thumbs up">👍</button>
@@ -324,9 +334,9 @@ function Workspace({ clip, simple, onChanged, go, setMsg }: { clip: any; simple:
                 {tab === "Captions" && <CaptionsPanel v={v} onEdl={onEdl} templates={templates} fonts={fonts}
                   reload={() => { api.get(`/edit/${cid}`).then(show); api.get("/caption-templates").then(setTemplates); }} />}
                 {tab === "Layout" && <LayoutPanel v={v} onEdl={onEdl} post={post} t={t} />}
-                {tab === "Hook & Title" && <HookPanel v={v} onEdl={onEdl} />}
-                {tab === "Music & Audio" && <MusicPanel v={v} onEdl={onEdl} tracks={tracks} />}
-                {tab === "Effects" && <EffectsPanel v={v} onEdl={onEdl} t={t} />}
+                {tab === "Hook & Title" && <HookPanel v={v} onEdl={onEdl} post={post} />}
+                {tab === "Music & Audio" && <MusicPanel v={v} onEdl={onEdl} tracks={tracks} post={post} />}
+                {tab === "Effects" && <EffectsPanel v={v} onEdl={onEdl} t={t} post={post} />}
                 {tab === "Campaign rules" && <RulesPanel v={v} flags={flags} fix={fixFlag} />}
               </div>
             </div>

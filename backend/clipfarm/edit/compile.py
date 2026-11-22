@@ -14,6 +14,7 @@ import json
 import subprocess
 from pathlib import Path
 
+from .. import db
 from ..editing import layout as L
 from ..editing.ffmpeg_util import encoder_args, ffmpeg_bin, pick_encoder
 from ..editing.render import RenderSpec, finish
@@ -141,6 +142,15 @@ def layout_segments(edl: dict) -> list[tuple[float, str]]:
     return segs
 
 
+def broll_licensed(path: str | Path) -> bool:
+    """B-roll only from your own library folder (Settings › Music & B-roll); nothing is downloaded."""
+    if not path:
+        return False
+    p = Path(path).resolve()
+    lib = (db.get_setting("music", {}) or {}).get("broll_dir")
+    return bool(lib) and (Path(lib).resolve() == p.parent or Path(lib).resolve() in p.parents) and p.exists()
+
+
 def spec_for(edl: dict, out: Path, base: Path, quality: str = "export", music: bool = True,
              template: dict | None = None) -> RenderSpec:
     dur = T.duration(edl)
@@ -158,11 +168,34 @@ def spec_for(edl: dict, out: Path, base: Path, quality: str = "export", music: b
             zooms.append({**z, "t": t})
     fl = T.intervals_out(edl, [(o["t"], o["t"] + o.get("dur", 0.15)) for o in edl.get("overlays", []) if o["kind"] == "flash"])
     sh = T.intervals_out(edl, [(o["t"], o["t"] + o.get("dur", 0.4)) for o in edl.get("overlays", []) if o["kind"] == "shake"])
+    from ..music import sfx as sfxlib
     sfx = []
     for fx in edl.get("sfx", []):
         t = T.to_out(edl, float(fx["t"]))
-        if t is not None:
-            sfx.append({**fx, "t": t})
+        if t is not None and fx.get("path") and sfxlib.licensed(fx["path"]):     # bundled pack or your own folder
+            sfx.append({**fx, "t": t, "gain_db": float(fx.get("gain_db", -8))})
+    emojis = []
+    for o in edl.get("overlays", []):
+        t = T.to_out(edl, float(o["t"])) if o.get("kind") == "emoji" else None
+        if t is not None and o.get("emoji"):
+            emojis.append({"emoji": o["emoji"], "t": t, "dur": float(o.get("dur", 1.2)), "size": o.get("size", 220),
+                           "x": o.get("x", 540), "y": o.get("y", 560)})
+    broll = []
+    for b in edl.get("broll", []):
+        t = T.to_out(edl, float(b["t"]))
+        if t is not None and broll_licensed(b.get("path", "")):
+            broll.append({"path": b["path"], "t": t, "dur": float(b.get("dur", 2.0))})
+    brand = edl.get("brand") or {}
+    dur_out = T.duration(edl)
+    cards = []
+    if brand.get("intro_text"):
+        cards.append({"text": brand["intro_text"], "start": 0.0, "end": min(0.8, dur_out / 4),
+                      "bg": brand.get("card_bg"), "fg": brand.get("card_fg")})
+    if brand.get("outro_text"):
+        cards.append({"text": brand["outro_text"], "start": max(0.0, dur_out - 1.6), "end": dur_out,
+                      "bg": brand.get("card_bg"), "fg": brand.get("card_fg")})
+    logo = {"path": brand["logo_path"], "pos": brand.get("logo_pos", "tr"), "opacity": brand.get("logo_opacity", 0.85),
+            "size": brand.get("logo_size", 150)} if brand.get("logo_path") else None
     speech = [(w["start"], w["end"]) for w in T.words_out(edl)]
     peak = edl["moment"].get("peak")
     peak_out = T.to_out(edl, peak) if peak is not None else None
@@ -174,7 +207,8 @@ def spec_for(edl: dict, out: Path, base: Path, quality: str = "export", music: b
         captions_enabled=cap.get("enabled", True) and edl["export"].get("captions", "burned") == "burned",
         caption_nudge=float(cap.get("nudge", 0)), keep_clear=tuple(rules.get("onscreen") or ()),
         hook=edl["hook"].get("text"), hook_sec=float(edl["hook"].get("sec", 2.2)),
-        credit=rules.get("credit"), progress_bar=edl.get("progress_bar", True), punch_zoom=False,
+        credit=None if edl.get("credit_hidden") else rules.get("credit"),
+        progress_bar=edl.get("progress_bar", True), punch_zoom=False,
         layout_segments=layout_segments(edl), zooms=zooms, flashes=fl, shakes=sh, sfx=sfx,
         music=Path(m["path"]) if use_music else None, music_offset=float(m.get("offset", 0)),
         music_entry=float(m.get("entry", 0)), music_delay=float(m.get("delay", 0)), music_track_lufs=m.get("loudness"),
@@ -183,7 +217,11 @@ def spec_for(edl: dict, out: Path, base: Path, quality: str = "export", music: b
         speech_gain_db=float(edl["audio"].get("speech_gain_db", 0)), enhance=bool(edl["audio"].get("enhance")),
         denoise=bool(edl["audio"].get("denoise")), target_lufs=float(edl["audio"].get("target_lufs", -14)),
         scale_to=(540, 960) if quality == "proxy" else None, quality="fast" if quality == "proxy" else "high",
-        encoder="libx264" if quality == "proxy" else "auto")
+        encoder="libx264" if quality == "proxy" else "auto",
+        emojis=emojis, broll=broll, logo=logo, cards=cards,
+        progress_color=brand.get("progress_color") or "FFE500",
+        credit_pos=brand.get("credit_pos"),
+        )
 
 
 def render(edl: dict, out: Path, cache: Path, quality: str = "export", music: bool = True,

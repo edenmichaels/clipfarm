@@ -308,8 +308,20 @@ def _v7(conn: sqlite3.Connection) -> None:
     """)
 
 
+# ---- v8: brand templates per account, clip variants (A/B) ------------------------------------------------
+def _v8(conn: sqlite3.Connection) -> None:
+    _script(conn, """
+    CREATE TABLE IF NOT EXISTS brand_templates(
+        id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, data TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')));
+    """)
+    _add(conn, "accounts", "brand_template_id", "INTEGER")
+    _add(conn, "clips", "variant_of", "INTEGER")
+    _add(conn, "clips", "variant_label", "TEXT")
+
+
 MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [(2, _v2), (3, _v3), (4, _v4), (5, _v5), (6, _v6),
-                                                                      (7, _v7)]
+                                                                      (7, _v7), (8, _v8)]
 LATEST = MIGRATIONS[-1][0]
 
 

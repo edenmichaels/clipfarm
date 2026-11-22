@@ -542,7 +542,7 @@ def highlight_weights():
     w = learning.all_weights()
     hs = db.get_setting("highlights", {}) or {}
     names = {}
-    for scope in w["learned"]:
+    for scope in {**w["learned"], **w.get("virality_learned", {})}:
         kind, sid = scope.split(":", 1)
         row = db.q1("SELECT display_name n FROM streamers WHERE id=?", (sid,)) if kind == "streamer" else \
             db.q1("SELECT name n FROM games WHERE id=?", (sid,))
@@ -886,7 +886,8 @@ def editor_clips(sort: str = "profit", min_score: int | None = None, program_id:
         params.append(min_score)
     rows = db.q(f"""SELECT c.id, c.title, c.file_path, c.thumb_path, c.virality, c.virality_reason, c.virality_parts,
         c.profit_low, c.profit_likely, c.profit_high, c.profit_platform, c.expected_views, c.rule_flags, c.review_status,
-        c.streamer_id, c.program_id, c.project_id, c.duration_sec, s.display_name streamer, pr.name program,
+        c.streamer_id, c.program_id, c.project_id, c.duration_sec, c.variant_of, c.variant_label,
+        s.display_name streamer, pr.name program,
         m.type moment_type, m.reason moment_reason, ep.status edit_status, ep.updated_at edited_at,
         EXISTS (SELECT 1 FROM posts p WHERE p.clip_id=c.id AND p.status='posted') posted
         FROM clips c LEFT JOIN streamers s ON s.id=c.streamer_id LEFT JOIN programs pr ON pr.id=c.program_id
@@ -954,6 +955,11 @@ def edit_signal(cid: int, body: dict):
         raise HTTPException(400, "kind is keep, delete, edit or export")
     _clip(cid)
     db.ex("INSERT INTO clip_signals(clip_id, kind) VALUES (?,?)", (cid, kind))
+    if kind in ("keep", "delete", "export"):
+        try:
+            learning.refit_for_clip(cid)
+        except Exception as e:                          # noqa: BLE001
+            log.warning("learning refit failed: %s", e)
     if kind == "delete":
         db.ex("UPDATE clips SET deleted_at=datetime('now') WHERE id=?", (cid,))
     elif kind == "keep":
@@ -998,6 +1004,209 @@ def editor_batch(body: dict):
                 raise
             failed.append({"id": cid, "error": e.detail})
     return {"done": done, "failed": failed, "jobs": jobs}
+
+
+# ---- v0.7: hooks, effects, variants, music re-plan, SFX/B-roll libraries, brand templates, learning ------
+def _clip_context(cid: int) -> tuple[dict, dict | None, dict | None]:
+    c = _clip(cid)
+    st = db.q1("SELECT * FROM streamers WHERE id=?", (c["streamer_id"],)) if c.get("streamer_id") else None
+    g = db.q1("SELECT * FROM games WHERE id=?", (c["game_id"],)) if c.get("game_id") else None
+    return c, st, g
+
+
+@app.post("/edit/{cid}/hooks", dependencies=A)
+def edit_hooks(cid: int):
+    """3-5 hook options + title, description and hashtags per platform (campaign hashtags always included)."""
+    from .editing.hooks import generate_options
+    p = _ep(cid)
+    _, st, g = _clip_context(cid)
+    e = p["edl"]
+    words = [w["word"] for w in edit_tl.words_out(e)]
+    o = generate_options(" ".join(words), (st or {}).get("display_name") or "the streamer", (g or {}).get("name") or "the game",
+                         e["moment"].get("type"), e["rules"].get("tags") or [], e["rules"].get("disclosure"),
+                         e["rules"].get("credit"))
+    def upd(x):
+        x["hook"]["options"] = o["hooks"]
+        x["hook"]["text"] = x["hook"].get("text") or (o["hooks"][0] if o["hooks"] else None)
+        x["texts"] = o["texts"]
+        return x
+    return {**_view(edit_project.update(cid, upd, "AI hooks and titles")), "llm": o["llm"]}
+
+
+@app.post("/edit/{cid}/effects", dependencies=A)
+def edit_auto_effects(cid: int, body: dict):
+    """Automatic zooms, punch-ins, flashes, shake, emojis, SFX and B-roll (replaces only the automatic ones)."""
+    from .edit import effects as edit_fx
+    _ep(cid)
+    if body.get("clear"):
+        return _view(edit_project.update(cid, lambda e: {**e, **{k: [x for x in e.get(k, []) if not x.get("auto")]
+                                                               for k in ("zooms", "overlays", "sfx", "broll")}},
+                                         "Remove automatic effects"))
+    return _view(edit_project.update(cid, lambda e: edit_fx.auto_effects(
+        e, emoji=body.get("emoji", True), sfx=body.get("sfx", True), broll=body.get("broll", True)), "Auto effects"))
+
+
+@app.post("/edit/{cid}/music", dependencies=A)
+def edit_music(cid: int, body: dict):
+    """Pick a track (or let ClipFarm pick) and re-plan the drop on the payoff, beats and zooms."""
+    p = _ep(cid)
+    c = _clip(cid)
+    prog = db.q1("SELECT * FROM programs WHERE id=?", (c["program_id"],)) if c.get("program_id") else None
+    try:
+        musiclib.ensure_bundled()
+    except Exception as e:                              # noqa: BLE001
+        log.warning("bundled music unavailable: %s", e)
+    track = None
+    if body.get("track_id"):
+        from .music import library as ml
+        track = next((t for t in ml.tracks(True) if t["id"] == int(body["track_id"])), None)
+        if not track:
+            raise HTTPException(404, "Track not found (or switched off).")
+    settings = {**(db.get_setting("music", {}) or {}), "enabled": True}
+    e = edit_build.plan_music(json.loads(json.dumps(p["edl"])), [], settings, prog, track=track)
+    if not e["music"].get("enabled"):
+        raise HTTPException(409, e["music"].get("why_off") or "Music isn't allowed for this clip.")
+    return _view(edit_project.save(cid, e, f"Music: {e['music'].get('title')}"))
+
+
+@app.post("/edit/{cid}/variants", dependencies=A)
+def edit_variants(cid: int, body: dict):
+    """2-3 versions of this moment (different hook, length, layout) as new clips, for A/B tests."""
+    from .edit import variants
+    _ep(cid)
+    n = int(body.get("n", 2))
+    if not 1 <= n <= 3:
+        raise HTTPException(400, "n is 1, 2 or 3")
+    made = variants.make(cid, n)
+    return {"variants": made}
+
+
+@app.get("/sfx", dependencies=A)
+def sfx_list():
+    from .music import sfx as sfxlib
+    return sfxlib.listing()
+
+
+@app.post("/edit/{cid}/sfx", dependencies=A)
+def edit_add_sfx(cid: int, body: dict):
+    from .music import sfx as sfxlib
+    p = _ep(cid)
+    s = sfxlib.get(str(body.get("id")))
+    if not s:
+        raise HTTPException(404, "Unknown sound effect.")
+    t = edit_tl.to_src(p["edl"], float(body.get("t_out", 0)))
+    item = {"id": s["id"], "path": s["path"], "t": round(t, 3), "gain_db": float(body.get("gain_db", -8)),
+            "licence": s["licence"]}
+    return _view(edit_project.update(cid, lambda e: {**e, "sfx": [*e.get("sfx", []), item]}, f"Add {s['title']}"))
+
+
+@app.get("/broll", dependencies=A)
+def broll_list():
+    from .edit import effects as edit_fx
+    return {"dir": (db.get_setting("music", {}) or {}).get("broll_dir"), "items": edit_fx.broll_library()}
+
+
+@app.post("/edit/{cid}/broll", dependencies=A)
+def edit_add_broll(cid: int, body: dict):
+    p = _ep(cid)
+    path = str(body.get("path") or "")
+    if not edit_compile.broll_licensed(path):
+        raise HTTPException(400, "B-roll must come from your B-roll folder (Settings › Music).")
+    t = edit_tl.to_src(p["edl"], float(body.get("t_out", 0)))
+    item = {"path": path, "t": round(t, 3), "dur": max(0.5, min(6.0, float(body.get("dur", 1.6)))),
+            "licence": "Your own B-roll library: you confirmed you have the rights"}
+    return _view(edit_project.update(cid, lambda e: {**e, "broll": [*e.get("broll", []), item]}, "Add B-roll"))
+
+
+@app.put("/library-folders", dependencies=A)
+def library_folders(body: dict):
+    """Your own SFX and B-roll folders. You confirm you have the rights to everything in them."""
+    cur = db.get_setting("music", {}) or {}
+    for k in ("sfx_dir", "broll_dir"):
+        if k in body:
+            v = body[k]
+            if v and not Path(str(v)).is_dir():
+                raise HTTPException(400, f"{v} isn't a folder.")
+            if v and not body.get("confirm_rights"):
+                raise HTTPException(400, "Confirm you have the rights to use everything in this folder.")
+            cur[k] = str(v) if v else None
+    db.set_setting("music", cur)
+    return {"sfx_dir": cur.get("sfx_dir"), "broll_dir": cur.get("broll_dir")}
+
+
+@app.get("/brand-templates", dependencies=A)
+def brand_templates():
+    from .edit import brand
+    return {"templates": brand.all_templates(), "accounts": db.q("SELECT id, platform, handle, brand_template_id FROM accounts")}
+
+
+@app.post("/brand-templates", dependencies=A)
+def brand_template_save(body: dict):
+    from .edit import brand
+    try:
+        t = brand.save(body.get("name"), body.get("data") or {}, body.get("id"))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    for aid in body.get("account_ids") or []:
+        brand.assign(int(aid), t["id"])
+    return brand.get(t["id"])
+
+
+@app.delete("/brand-templates/{bid}", dependencies=A)
+def brand_template_delete(bid: int):
+    from .edit import brand
+    brand.delete(bid)
+    return {"ok": True}
+
+
+@app.put("/accounts/{aid}/brand", dependencies=A)
+def account_brand(aid: int, body: dict):
+    from .edit import brand
+    bid = body.get("brand_template_id")
+    if bid is not None and not brand.get(int(bid)):
+        raise HTTPException(404, "Brand template not found.")
+    if not db.q1("SELECT id FROM accounts WHERE id=?", (aid,)):
+        raise HTTPException(404, "Account not found.")
+    brand.assign(aid, int(bid) if bid is not None else None)
+    return {"ok": True}
+
+
+@app.post("/edit/{cid}/brand", dependencies=A)
+def edit_apply_brand(cid: int, body: dict):
+    from .edit import brand
+    _ep(cid)
+    bid = body.get("brand_template_id")
+    t = brand.get(int(bid)) if bid else None
+    if bid and not t:
+        raise HTTPException(404, "Brand template not found.")
+    return _view(edit_project.update(cid, lambda e: brand.apply(e, t), f"Brand: {t['name']}" if t else "No brand"))
+
+
+@app.get("/learning", dependencies=A)
+def learning_stats():
+    """Weights in use (highlights + virality), learned per streamer/game, and predicted vs actual views."""
+    return {**highlight_weights(), "predicted_vs_actual": learning.predicted_vs_actual(),
+            "signals": db.q("SELECT kind, COUNT(*) n FROM clip_signals GROUP BY kind")}
+
+
+@app.put("/virality/weights", dependencies=A)
+def virality_weights_set(body: dict):
+    from .scoring.virality import DEFAULT_WEIGHTS as VW
+    cur = {**VW, **(db.get_setting("virality_weights") or {})}
+    w = {k: max(0.0, float((body.get("weights") or {}).get(k, cur[k]))) for k in VW}
+    tot = sum(w.values()) or 1.0
+    db.set_setting("virality_weights", {k: round(v / tot, 3) for k, v in w.items()})
+    return learning_stats()
+
+
+@app.post("/virality/weights/reset", dependencies=A)
+def virality_weights_reset(body: dict):
+    scope = body.get("scope")
+    if scope:
+        db.ex("DELETE FROM settings WHERE key=?", (f"virality_weights:{scope}",))
+    else:
+        db.ex("DELETE FROM settings WHERE key LIKE 'virality_weights%'")
+    return learning_stats()
 
 
 @app.get("/trends", dependencies=A)

@@ -5,6 +5,8 @@ Usage (from <checkout>/backend): python <this> <eval dir> <out dir> <label: befo
   moment.mp4    each version's own top pick from the same VOD (no music)
   music.mp4     the same action moment with music: v0.3 = one fixed track mixed at a constant level;
                 v0.4 = track picked for the moment type, dropped on the payoff, ducked under speech
+  reframe.mp4   the same moment: v0.3 = centre crop; new = AI reframe (scene type, facecam, tracking keyframes)
+  full_edit.mp4 the same moment fully auto-edited: new = reframe + matched music + auto zooms/effects/SFX
 Words come from faster-whisper (tiny) so both versions caption the same transcript.
 """
 import dataclasses
@@ -16,7 +18,7 @@ sys.path.insert(0, ".")
 from clipfarm.editing import render as R  # noqa: E402
 from clipfarm.highlights import signals  # noqa: E402
 
-ev_dir, out, label, music = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3], Path(sys.argv[4])
+ev_dir, out, label, music = Path(sys.argv[1]).resolve(), Path(sys.argv[2]).resolve(), sys.argv[3], Path(sys.argv[4]).resolve()
 out.mkdir(parents=True, exist_ok=True)
 vod = ev_dir / "vod1.mp4"
 labels = json.loads((ev_dir / "labels.json").read_text())["vod1"]
@@ -94,7 +96,42 @@ if NEW:
 else:
     R.render(spec(a, b, "music.mp4", words=ws, music=music, music_volume=0.12))
     music_note = f"{music.name} at a constant level (v0.3 behaviour)"
+# reframe + full auto-edit (v0.5+ edit engine; older versions use their default layout and no effects)
+try:
+    from clipfarm.edit import compile as ec, effects as fx, project as ep, reframe  # noqa: E402
+    EDL = True
+except ImportError:
+    EDL = False
+a, b = funny["start"] - 4, funny["end"] + 2
+ws = words(a, b)
+if EDL:
+    from clipfarm import db
+    db.init_db()
+    from clipfarm.edit import build as eb
+    e = ep.blank({**eb.source_info(vod), "url": None}, ws, a, b)
+    lay = reframe.analyse(vod, a, b, speech=[(w["start"], w["end"]) for w in ws], detect_cam=True)
+    e["layout"].update(lay)
+    e["music"]["enabled"] = False
+    e["hook"]["text"] = "Wait for it"
+    ec.render(e, out / "reframe.mp4", out / "cache", "export")
+    e["moment"].update(type="Funny", peak=funny["start"] + 2)
+    try:
+        from clipfarm.music import library
+        library.ensure_bundled()
+        e = eb.plan_music(e, [1], {"enabled": True}, None, seed=3)
+    except Exception as ex:      # noqa: BLE001
+        print("music plan skipped:", ex)
+    e = fx.auto_effects(e) if hasattr(fx, "auto_effects") else e
+    ec.render(e, out / "full_edit.mp4", out / "cache", "export")
+    reframe_note = {"layouts": [k["layout"] for k in e["layout"]["keyframes"]],
+                    "effects": {k: len(e.get(k, [])) for k in ("zooms", "overlays", "sfx")}}
+else:
+    R.render(spec(a, b, "reframe.mp4", words=ws, layout="crop"))
+    R.render(spec(a, b, "full_edit.mp4", words=ws, music=music, music_volume=0.12))
+    reframe_note = {"layouts": ["crop (centre)"], "effects": {}}
+import shutil  # noqa: E402
+shutil.rmtree(out / "cache", ignore_errors=True)
 clean()
 (out / "NOTES.json").write_text(json.dumps({"label": label, "captions_window": [funny["start"] - 4, funny["end"] + 2],
-                                            "moment_pick": pick, "music": music_note}, indent=1))
+                                            "moment_pick": pick, "music": music_note, "reframe": reframe_note}, indent=1))
 print("samples ready", out)

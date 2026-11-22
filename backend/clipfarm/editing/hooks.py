@@ -58,3 +58,91 @@ def _fallback_hook(transcript: str) -> str:
         best = max(sentences, key=lambda s: transcript.count(s) + s.count("!") + len(s) / 50)
         return f'"{best}"'
     return "Wait for it..."
+
+
+# ---- v0.7: 3-5 hook options + title/description/hashtags per platform ---------------------------------
+OPTIONS_SYSTEM = """You write short-form video packaging for gaming stream clips.
+Return JSON only:
+{"hooks": [str, str, str, str], "tiktok": {"title": str, "hashtags": [str]},
+ "youtube_shorts": {"title": str, "description": str, "hashtags": [str]},
+ "instagram_reels": {"caption": str, "hashtags": [str]}, "x": {"text": str}}
+Rules:
+- hooks: 4 different on-screen hooks for the first 2 seconds, each max 7 words, each a different angle
+  (question, shock, stakes, quote from the clip, "wait for it"). Accurate: never invent events.
+- tiktok title: max 80 chars, casual. 3-5 hashtags.
+- youtube_shorts title: max 90 chars, searchable (game + streamer + what happens). description 1-2 sentences.
+- instagram_reels caption: 1 short sentence + an emoji at most. 3-5 hashtags.
+- x text: max 200 chars, no hashtags spam (max 2 inline).
+- hashtags lowercase, no '#'. No slurs, no personal attacks."""
+
+TYPE_HOOKS = {
+    "Funny": ["I can't believe he said that 😂", "This is why we watch {streamer}", "Wait for the end 😂"],
+    "Action/Explosion": ["This went from 0 to 100", "Nobody expected this explosion", "Watch the timing on this"],
+    "Rage/Reaction": ["He was NOT ready for this", "His reaction says it all", "This made {streamer} lose it"],
+    "Clutch/Skill": ["The cleanest play you'll see today", "How did he pull this off?", "1 in a million clutch"],
+    "Fail": ["This went horribly wrong", "He really thought this would work", "Instant regret"],
+    "Wholesome": ["This made our day", "{streamer} is too wholesome", "Chat loved this moment"],
+}
+PLATFORM_TAGS = {"youtube_shorts": ["shorts"], "tiktok": ["fyp"], "instagram_reels": ["reels"], "x": []}
+
+
+def _tags(xs, required: list[str], extra: list[str], limit: int = 6) -> list[str]:
+    out: list[str] = []
+    for t in [*(r.strip("# ").lower() for r in required), *(str(x).strip("# ").lower() for x in xs or []), *extra]:
+        t = re.sub(r"[^\w]", "", t)
+        if t and t not in out:
+            out.append(t)
+    req = [re.sub(r"[^\w]", "", r.strip("# ").lower()) for r in required]
+    keep = [t for t in out if t in req]
+    rest = [t for t in out if t not in req]
+    return keep + rest[: max(0, limit - len(keep))]
+
+
+def generate_options(transcript: str, streamer: str, game: str, moment_type: str | None = None,
+                     required_tags: list[str] | None = None, disclosure: str | None = None,
+                     credit: str | None = None) -> dict:
+    """-> {"hooks": [3-5 strings], "texts": {platform: {title, description, hashtags}}, "llm": bool}.
+    Campaign hashtags are always included (spelled as the campaign spells them) and the disclosure is added."""
+    req = list(required_tags or [])
+    user = (f"Streamer: {streamer}\nGame: {game}\nMoment type: {moment_type or 'unknown'}\n"
+            f"Transcript of the clip:\n{transcript[:4000] or '(no speech)'}")
+    hooks: list[str] = []
+    data: dict = {}
+    llm = False
+    try:
+        data = complete_json(OPTIONS_SYSTEM, user)
+        hooks = [_clean(h)[:60] for h in data.get("hooks", []) if _clean(h)]
+        llm = bool(hooks)
+    except (LLMUnavailable, ValueError, KeyError, TypeError, AttributeError):
+        data = {}
+    fb = [h.format(streamer=streamer) for h in TYPE_HOOKS.get(moment_type or "", ["Wait for it...", "You have to see this"])]
+    quote = _fallback_hook(transcript)
+    for h in [*hooks, quote, *fb]:
+        if h and h.lower() not in (x.lower() for x in hooks) and len(h.split()) <= 9:
+            hooks.append(h)
+    hooks = [h for h in hooks if h != "Wait for it..." or len(hooks) < 4][:5]
+    gtag, stag = _tag(game), _tag(streamer)
+    base_tags = [gtag, stag, "gaming"]
+
+    def pick(plat: str, key: str, default: str) -> str:
+        v = (data.get(plat) or {}).get(key) if isinstance(data.get(plat), dict) else None
+        return _clean(v) if v else default
+
+    def tags(plat: str) -> list[str]:
+        got = (data.get(plat) or {}).get("hashtags") if isinstance(data.get(plat), dict) else None
+        return _tags(got or base_tags, req, PLATFORM_TAGS[plat])
+
+    tail = "\n\n".join(x for x in (f"Credit: {credit}" if credit else "", disclosure or "") if x)
+    first = hooks[0].strip('"') if hooks else f"{streamer} in {game}"
+    texts = {
+        "tiktok": {"title": pick("tiktok", "title", first)[:80], "description": tail,
+                   "hashtags": tags("tiktok")},
+        "youtube_shorts": {"title": pick("youtube_shorts", "title", f"{streamer} {first} | {game}")[:90],
+                           "description": "\n\n".join(x for x in (pick("youtube_shorts", "description",
+                                                                         f"{streamer} playing {game}."), tail) if x),
+                           "hashtags": tags("youtube_shorts")},
+        "instagram_reels": {"title": pick("instagram_reels", "caption", first)[:120], "description": tail,
+                            "hashtags": tags("instagram_reels")},
+        "x": {"title": pick("x", "text", first)[:200], "description": tail, "hashtags": _tags([], req, [], 3)},
+    }
+    return {"hooks": hooks, "texts": texts, "llm": llm}

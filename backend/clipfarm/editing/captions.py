@@ -363,7 +363,8 @@ def build_track(words: list[dict], out: Path, style_name: str = DEFAULT, words_p
                 keep_clear: tuple[str, ...] = (), nudge: float = 0.0, uppercase: bool | None = None,
                 profanity: str = "keep", fillers: str = "remove", emoji: bool = False, hook: str | None = None,
                 hook_sec: float = 2.2, credit: str | None = None, duration: float | None = None,
-                cam_h: int = 640, layout_segments: list[tuple[float, str]] | None = None) -> CaptionTrack:
+                cam_h: int = 640, layout_segments: list[tuple[float, str]] | None = None,
+                credit_pos: str | None = None) -> CaptionTrack:
     """words: [{"word","start","end"}] in source time; `offset` is subtracted so they line up with the clip.
     style_name: a preset key or a template dict. layout_segments: [(clip time, layout)] when the layout
     changes mid-clip -- each caption uses the placement of the layout on screen when it appears."""
@@ -487,7 +488,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                          f"\\fs{hfs:.1f}\\blur1.5\\q2\\fscx118\\fscy118\\t(0,140,\\fscx100\\fscy100)\\fad(0,180)}}{txt}")
     if credit:
         end = duration if duration else 3600
-        lines.append(f"Dialogue: 2,{_ts(0)},{_ts(end)},Credit,,0,0,0,,{{\\an5\\pos(540,{pl.credit_y:.0f})\\q2}}"
+        cy = {"top": SAFE["top"] + 26, "bottom": SAFE["bottom"] - 30}.get(credit_pos or "", pl.credit_y)
+        lines.append(f"Dialogue: 2,{_ts(0)},{_ts(end)},Credit,,0,0,0,,{{\\an5\\pos(540,{cy:.0f})\\q2}}"
                      f"{_esc(credit)}")
     out.write_text(header + "\n".join(lines) + "\n", encoding="utf-8")
     out.with_suffix(".events.json").write_text(json.dumps(events), encoding="utf-8")
