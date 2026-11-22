@@ -69,10 +69,13 @@ type_acc = sum(r["type"] == r["label"] for r in typed) / max(1, len(typed))
 n_pos = sum(len(v) for k, v in labels.items() if not k.endswith("_plan"))
 lines = [
     "# Highlight detection: evaluation report", "",
-    f"Labelled set: 3 synthetic VODs (~8 min each), {n_pos} labelled funny/action/reaction moments, plus menus, "
-    "loading and BRB screens, calm talking, constantly loud talking, loud music and a sub-train chat spam as "
-    "deliberate traps. Real CC0 recordings for laughter, explosions, gunfire, cheering and screaming "
-    "(see SOURCES.md); speech from espeak-ng; video and chat generated.", "",
+    f"Labelled set: 3 synthetic VODs (~8 min each), {n_pos} labelled funny/action/reaction moments. Real CC0 "
+    "recordings for laughter, explosions, gunfire, cheering and screaming (see SOURCES.md); speech from "
+    "espeak-ng; video and chat generated.", "",
+    "Traps (the mundane moments that fooled loudness-based picking): menu/inventory screens with loud music; "
+    "loading and BRB screens; calm talking; the streamer shouting at chat with chat spamming caps; loud "
+    "intermission music with chat vibing to it (catJAM, 🔥); and sub trains with loud thank-yous and a flood "
+    "of PogChamp / W / gifted-sub messages. Positive moments get realistic chat (about 2 messages a second).", "",
     f"Sound-event model: {'YAMNet (ONNX)' if audio_events.available() else 'NOT AVAILABLE'}. LLM rating: not used.", "",
     "| | Top-10 precision |", "|---|---|",
     f"| Before (v0.3: loudness + chat rate) | **{pb:.0%}** |", f"| After (v0.4) | **{pa:.0%}** |", "",

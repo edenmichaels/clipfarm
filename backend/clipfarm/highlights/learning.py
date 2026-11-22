@@ -27,7 +27,10 @@ def record(clip_id: int, rating: int, tags: list[str] | None = None) -> dict:
              updated_at=datetime('now')""", (clip_id, int(np.sign(rating)), json.dumps(tags)))
     c = db.q1("SELECT streamer_id, game_id FROM clips WHERE id=?", (clip_id,))
     out = {"refit": []}
-    for scope in (f"streamer:{c['streamer_id']}", f"game:{c['game_id']}"):
+    for kind, sid in (("streamer", c and c["streamer_id"]), ("game", c and c["game_id"])):
+        if not sid:
+            continue
+        scope = f"{kind}:{sid}"
         res = refit(scope)
         if res.get("fitted"):
             out["refit"].append(scope)

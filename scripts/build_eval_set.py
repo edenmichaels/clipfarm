@@ -86,7 +86,8 @@ LINES = ["okay so we need to grab the car first and then head over to the bank, 
          "chat what do you guys think, should we do the heist now or wait for the others",
          "alright alright I'm reading chat, thanks for the follow, appreciate you",
          "WHAT ARE YOU DOING BRO GET IN THE CAR GET IN THE CAR WE HAVE TO GO RIGHT NOW",
-         "NO NO NO THAT IS NOT WHERE WE PARKED I AM SO CONFUSED RIGHT NOW HONESTLY"]
+         "NO NO NO THAT IS NOT WHERE WE PARKED I AM SO CONFUSED RIGHT NOW HONESTLY",
+         "THANK YOU SO MUCH FOR THE SUBS GUYS THANK YOU THANK YOU WELCOME TO THE CREW"]
 for i, line in enumerate(LINES):
     loud = line.isupper()
     subprocess.run(["espeak-ng", "-s", "175" if loud else "150", "-a", "200" if loud else "90", "-w",
@@ -151,7 +152,13 @@ def chat_burst(t0: float, dur: float, tokens: list[str], rate: float, msgs: list
 NORMAL = ["hi", "lol", "nice", "gg", "what game is this", "o7", "true", "monkaS", "hello chat", "W", "based"]
 LAUGH = ["KEKW", "LUL", "OMEGALUL", "LMAO", "😂", "💀", "KEKW KEKW", "ICANT", "hahaha"]
 HYPE = ["POGGERS", "PogChamp", "W", "NO WAY", "CLIP IT", "insane", "holy", "🔥", "clip that", "WWW"]
-SUBS = ["PogChamp", "W sub", "hype", "PogChamp PogChamp", "sub hype", "W", "thanks for the sub"]
+# Realistic sub train: system-style sub messages mixed with lots of hype emotes and caps spam.
+SUBS = ["xUser gifted 5 Tier 1 subs!", "PogChamp", "W", "POGGERS POGGERS", "subscribed for 3 months!", "W SUB",
+        "HYPE TRAIN!!", "PogChamp PogChamp", "WWWW", "gifted a sub to someone"]
+# Intermission / loading music: chat vibing to the song, not reacting to gameplay.
+VIBE = ["catJAM", "🔥", "this song slaps", "song name?", "🔥🔥", "vibing", "BOP", "catJAM catJAM", "W song"]
+# Streamer shouting at chat about nothing: caps spam and "!!" (what loudness + caps detectors love).
+CAPS = ["CHAT LOOK", "WHAT!!", "LMAO WHAT", "HE'S SO LOUD", "BRO CALM DOWN!!", "o7", "monkaS", "WHY ARE YOU YELLING"]
 
 PLANS = [   # (kind, seconds, label) ; label: pos / neg / filler
     [("gameplay", 40, "filler"), ("menu", 45, "neg"), ("gameplay", 30, "filler"), ("funny", 25, "pos"),
@@ -181,31 +188,36 @@ for vi, plan in enumerate(PLANS, start=1):
         if kind == "funny":
             f = snd / f"{rng.choice(kinds['laughter'])}.mp3"
             parts += [(snd / "speech2.wav", t + 2, 0.8), (f, t + 8, 1.6)]
-            chat_burst(t + 10, 10, LAUGH, 4.0, msgs)
+            chat_burst(t + 10, 10, LAUGH, 2.0, msgs)
             labels.setdefault(f"vod{vi}", []).append({"start": t + 6, "end": t + 22, "type": "Funny"})
         elif kind == "action":
             for k in range(4):
                 parts.append((snd / f"{rng.choice(kinds['explosion'])}.mp3", t + 4 + k * 4.5, 1.2))
             if kinds["gunshot"]:
                 parts += [(snd / f"{kinds['gunshot'][0]}.mp3", t + 6 + k * 3, 1.0) for k in range(3)]
-            chat_burst(t + 8, 12, HYPE, 3.5, msgs)
+            chat_burst(t + 8, 12, HYPE, 2.0, msgs)
             labels.setdefault(f"vod{vi}", []).append({"start": t + 3, "end": t + 24, "type": "Action/Explosion"})
         elif kind == "reaction":
             pool = kinds["scream"] + kinds["cheer"]
             parts += [(snd / "speech4.wav", t + 2, 1.2), (snd / f"{rng.choice(pool)}.mp3", t + 8, 1.4)]
-            chat_burst(t + 10, 10, HYPE, 3.0, msgs)
+            chat_burst(t + 10, 10, HYPE, 1.8, msgs)
             labels.setdefault(f"vod{vi}", []).append({"start": t + 6, "end": t + 22, "type": "Rage/Reaction"})
         elif kind in ("talk",):
             for k in range(int(dur // 9)):
                 parts.append((snd / f"speech{k % 4}.wav", t + k * 9, 0.6))
         elif kind == "loudtalk":
             for k in range(int(dur // 7)):
-                parts.append((snd / f"speech{4 + k % 2}.wav", t + k * 7, 1.6))
+                parts.append((snd / f"speech{4 + k % 2}.wav", t + k * 7, 1.9))
+            chat_burst(t + 2, dur - 4, CAPS, 2.5, msgs)
         elif kind in ("menu", "loudmusic", "loading"):
             tr = rng.choice(music)
-            parts.append((snd / "music" / tr["file"], t, 1.3 if kind != "loading" else 0.6))
+            parts.append((snd / "music" / tr["file"], t, 1.9 if kind == "loudmusic" else 1.3 if kind == "menu" else 0.6))
+            if kind == "loudmusic":
+                chat_burst(t + 3, dur - 6, VIBE, 2.5, msgs)
         elif kind == "subtrain":
-            chat_burst(t + 5, 25, SUBS, 4.0, msgs)
+            chat_burst(t + 3, dur - 6, SUBS, 6.0, msgs)
+            for k in range(int(dur // 8)):
+                parts.append((snd / "speech6.wav", t + 2 + k * 8, 1.8))
         t += dur
     lst = out / f"_list{vi}.txt"
     lst.write_text("".join(f"file '{p.name}'\n" for p in segs))

@@ -91,6 +91,15 @@ def components(s: Signals, focus: str = "balanced") -> tuple[dict[str, np.ndarra
         per_msg = (fw * ch["laugh"] + aw * ch["hype"] + 2.0 * ch["clip"] + 0.8 * ch["fail"]) / (ch["rate"] + 1.0)
         react_z = zscore(fw * ch["laugh"] + aw * ch["hype"] + 2.0 * ch["clip"] + 0.8 * ch["fail"], 600)
         c = 0.35 * _sig(rate_z, 1.0) + 0.65 * _sig(react_z, 1.0) * np.clip(per_msg * 2.5, 0, 1)
+        if "announce" in ch:
+            # Sub trains, raids, giveaways: if a good share of chat is about the event, chat says nothing
+            # about the gameplay right now.
+            share = smooth(ch["announce"], 5) / (smooth(ch["rate"], 5) + 1e-6)
+            k = 12                                  # the event's chat spills over its edges
+            padded = np.pad(share, (k, k), mode="edge")
+            share = np.max(np.lib.stride_tricks.sliding_window_view(padded, 2 * k + 1), axis=1)[: share.size]
+            c = c * (1 - np.clip((share - 0.08) * 4, 0, 1))
+            parts["announce"] = share.astype(np.float32)
         comp["chat"] = np.clip(c, 0, 1).astype(np.float32)
         tot = ch["laugh"] + ch["hype"] + ch["clip"] + ch["fail"] + 1e-6
         parts.update(chat_laugh=ch["laugh"] / tot, chat_hype=ch["hype"] / tot, chat_fail=ch["fail"] / tot,

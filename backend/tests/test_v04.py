@@ -398,3 +398,21 @@ def test_v5_migration_keeps_data(tmp_path, monkeypatch):
         assert db.q1("SELECT name FROM sqlite_master WHERE name=?", (t,))
     cols = {c["name"] for c in db.q("PRAGMA table_info(clips)")}
     assert {"words", "moment_type", "music_track_id", "base_path", "render_spec"} <= cols
+
+
+def test_sub_train_chat_is_not_a_highlight():
+    from clipfarm.highlights import detect, signals
+    msgs = [(t * 0.5, "hi chat") for t in range(1200)]
+    msgs += [(300 + t * 0.15, "KEKW LUL") for t in range(60)]                          # real laugh reaction
+    msgs += [(450 + t * 0.17, "x gifted 5 Tier 1 subs!" if t % 3 == 0 else "PogChamp W") for t in range(120)]
+    ch = signals.chat_reactions(msgs, 600)
+    assert ch["announce"][450:470].sum() > 10
+    comp, _ = detect.components(detect.Signals(600, chat=ch))
+    assert comp["chat"][300:312].max() > 0.8
+    assert comp["chat"][440:480].max() < 0.35
+
+
+def test_feedback_on_clip_without_streamer_or_game(fresh_db):
+    from clipfarm.highlights import learning
+    cid = db.ex("INSERT INTO clips(title) VALUES ('orphan')")
+    assert learning.record(cid, 1, ["great timing"]) == {"refit": []}

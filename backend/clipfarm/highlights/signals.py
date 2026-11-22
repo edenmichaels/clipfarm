@@ -68,17 +68,23 @@ HYPE_TOKENS2 = {"pog", "pogchamp", "poggers", "pogu", "w", "ww", "www", "insane"
                 "🔥", "clutch", "goated", "sheesh", "monkaw", "monkas", "pogcrazy", "ez", "gg", "letsgo", "lets"}
 CLIP_TOKENS = {"clip", "clipit", "clipped", "clipthat"}
 FAIL_TOKENS = {"l", "ll", "rip", "fail", "noo", "nooo", "sadge", "f", "omegalul", "classic", "bruh", "throw", "throwing"}
+# Chat during subs, gifted subs, raids, follows, bits and giveaways is about the event, not the gameplay.
+ANNOUNCE = re.compile(r"\b(sub(s|bed|scribed|scriber|scribing)?|gift(ed|ing|s)?|raid(ed|ers?)?|follow(ed|s)?|"
+                      r"prime|bits|cheer\d+|donat\w*|tier ?[123]|giveaway|hype ?train|resub)\b", re.I)
 _PHRASES = {"no way": "hype", "clip it": "clip", "clip that": "clip", "lets go": "hype", "let's go": "hype"}
 
 
 def chat_reactions(messages: list[tuple[float, str]], duration_sec: int) -> dict[str, np.ndarray]:
     """Per-second counts of laugh / hype / clip / fail reactions plus messages per second."""
-    out = {k: np.zeros(duration_sec, dtype=np.float32) for k in ("rate", "laugh", "hype", "clip", "fail")}
+    out = {k: np.zeros(duration_sec, dtype=np.float32) for k in ("rate", "laugh", "hype", "clip", "fail", "announce")}
     for t, text in messages:
         i = int(t)
         if not 0 <= i < duration_sec:
             continue
         out["rate"][i] += 1
+        if ANNOUNCE.search(text):
+            out["announce"][i] += 1
+            continue                    # its emotes are for the sub/raid, not a reaction to the game
         low = text.lower()
         toks = _word.findall(low)
         kinds = set()
