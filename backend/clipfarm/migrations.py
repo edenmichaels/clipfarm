@@ -177,7 +177,88 @@ def _v4(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE programs SET import_source=COALESCE(import_source, source)")
 
 
-MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [(2, _v2), (3, _v3), (4, _v4)]
+# ---- v5: captions, highlight types + feedback, music library, trending sounds ------------------
+def _v5(conn: sqlite3.Connection) -> None:
+    for col, decl in [
+        ("words", "TEXT"),                 # JSON transcript words (editable in Review)
+        ("caption_preset", "TEXT"),
+        ("caption_nudge", "REAL DEFAULT 0"),
+        ("moment_type", "TEXT"),           # Funny | Action/Explosion | Rage/Reaction | Clutch/Skill | Fail | Wholesome
+        ("moment_reason", "TEXT"),
+        ("music_track_id", "INTEGER"),
+        ("music_plan", "TEXT"),            # JSON {offset, entry, beats, mode}
+        ("original_audio_only", "INTEGER DEFAULT 0"),
+        ("base_path", "TEXT"),             # pass-1 render, for fast re-renders
+        ("nomusic_path", "TEXT"),          # "for trending sound" export
+        ("render_spec", "TEXT"),           # JSON of what was rendered (to re-render the same way)
+    ]:
+        _add(conn, "clips", col, decl)
+    for col, decl in [("type", "TEXT"), ("reason", "TEXT"), ("words", "TEXT"), ("components", "TEXT"),
+                      ("detector", "TEXT")]:
+        _add(conn, "moments", col, decl)
+    _add(conn, "programs", "no_music", "INTEGER")      # 1 = "original audio only" / "no music" campaign
+    _script(conn, """
+    CREATE TABLE IF NOT EXISTS clip_feedback (
+        clip_id    INTEGER PRIMARY KEY REFERENCES clips(id) ON DELETE CASCADE,
+        rating     INTEGER NOT NULL CHECK (rating IN (-1, 1)),
+        tags       TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS music_tracks (
+        id           INTEGER PRIMARY KEY,
+        path         TEXT NOT NULL UNIQUE,
+        title        TEXT NOT NULL,
+        artist       TEXT,
+        source       TEXT NOT NULL CHECK (source IN ('bundled','local','library')),
+        licence      TEXT NOT NULL,
+        licence_url  TEXT,
+        attribution  TEXT,                 -- text to put in the description, if the licence needs it
+        moods        TEXT NOT NULL DEFAULT '[]',
+        mood_scores  TEXT,
+        bpm          REAL,
+        beats        TEXT,                 -- JSON beat times (s)
+        drop_at      REAL,                 -- strongest downbeat after the build (s)
+        loudness     REAL,                 -- integrated LUFS
+        energy       REAL,                 -- 0..1
+        instrumental INTEGER,
+        duration     REAL,
+        tags_edited  INTEGER NOT NULL DEFAULT 0,
+        enabled      INTEGER NOT NULL DEFAULT 1,
+        sha256       TEXT,
+        added_at     TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS music_usage (
+        id         INTEGER PRIMARY KEY,
+        track_id   INTEGER NOT NULL REFERENCES music_tracks(id) ON DELETE CASCADE,
+        clip_id    INTEGER REFERENCES clips(id) ON DELETE CASCADE,
+        account_id INTEGER,
+        used_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS ix_music_usage_account ON music_usage(account_id, used_at);
+    -- Trending sound NAMES only (from your list or an official API). Never audio: you add the sound
+    -- inside TikTok/Instagram's own editor when posting.
+    CREATE TABLE IF NOT EXISTS trending_sounds (
+        id        INTEGER PRIMARY KEY,
+        name      TEXT NOT NULL,
+        artist    TEXT,
+        platform  TEXT NOT NULL DEFAULT 'tiktok',
+        moods     TEXT NOT NULL DEFAULT '[]',
+        url       TEXT,
+        active    INTEGER NOT NULL DEFAULT 1,
+        added_at  TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE (name, platform)
+    )
+    """)
+    # Campaigns whose rules say original audio only / no music.
+    conn.execute("""UPDATE programs SET no_music=1 WHERE no_music IS NULL AND (
+        lower(COALESCE(rules,'')) LIKE '%original audio%' OR lower(COALESCE(rules,'')) LIKE '%no music%'
+        OR lower(COALESCE(rules,'')) LIKE '%no background music%' OR lower(COALESCE(rules,'')) LIKE '%without music%'
+        OR lower(COALESCE(rules,'')) LIKE '%don''t add music%' OR lower(COALESCE(rules,'')) LIKE '%do not add music%')""")
+    conn.execute("UPDATE moments SET detector=COALESCE(detector,'v1')")
+
+
+MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [(2, _v2), (3, _v3), (4, _v4), (5, _v5)]
 LATEST = MIGRATIONS[-1][0]
 
 

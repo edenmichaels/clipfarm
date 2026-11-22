@@ -1,5 +1,52 @@
 # ClipFarm changelog
 
+## 0.4.0 (Stage 1 of the editor rebuild): better captions, better highlights, better music
+
+### Captions
+- **Fixed:** captions ran off both edges of the screen when a line was long. Line wrapping was turned off, so
+  a 3-word line could be wider than the video. Every caption now has an exact centre point and is measured
+  with the real font before it's placed. A Windows check in the installer's self-test measures the result.
+- New default look: big heavy text (bundled free fonts: Montserrat, Anton, Archivo Black), 1–3 words at a
+  time, the spoken word highlighted with a quick pop, thick outline and soft shadow, never more than 2 lines,
+  nothing on screen during silences.
+- Kept clear of the TikTok / Reels / Shorts buttons and caption area. In split layouts the captions sit on
+  the line between facecam and gameplay; if a campaign needs its overlay visible, captions go under the picture.
+- Styles: Bold Pop, Hype Yellow, Clean White, Minimal (Settings › Captions). Options for capitals, swear words
+  (keep / mask / mask + bleep), filler words, and emoji on keywords (off by default).
+- The hook text uses the same style at the top of the screen.
+- Review: see the captions on the clip, move them up or down, fix a wrong word, switch style, and re-render in
+  seconds (clips now keep an unfinished copy, so only the captions are redone).
+
+### Highlights
+- Finds funny and exciting moments, not just loud ones. ClipFarm now listens for laughter, screams, cheering,
+  explosions, gunfire, crashes and sirens (Google's YAMNet sound model, free for commercial use). It also
+  reads chat reactions compared with that channel's usual chat, motion, flashes and screen shake, community
+  clips, and an AI rating of what was said.
+- Scores down menus, loading screens, maps, BRB screens, calm chatting and music on its own. A constantly
+  loud streamer no longer counts as a highlight.
+- Every clip gets a type: Funny, Action/Explosion, Rage/Reaction, Clutch/Skill, Fail or Wholesome.
+- Clips start a moment before the build-up and end after the reaction settles.
+- Settings › Highlights: Moment focus (Balanced / Funny first / Action first), adjustable weights.
+- 👍 / 👎 plus quick "why?" tags in Review. After about 50 ratings for a streamer or game, ClipFarm reweights
+  its signals to match your taste and real view counts ("Reset to default" any time).
+
+### Music
+- Only licensed music: 8 original ClipFarm tracks (yours to use, can't be claimed by anyone), your own music
+  folder (with a reminder that you're responsible for its rights), and room for a licensed library later.
+- Picked to fit the moment (funny → playful, action → hype, fails → ironic). It drops on the payoff, gets
+  quieter while anyone talks (12–18 dB, your choice), lifts on reactions, and every clip is levelled to
+  −14 LUFS. The same track isn't used twice in a row on an account.
+- Campaigns that say "original audio only" or "no music" never get music. You can also switch music off per clip.
+- Trending sounds: keep a list of names (Settings › Music). ClipFarm suggests one in Review and Post & Submit
+  and makes a "for trending sound" export without its own music, so you add the sound in TikTok/Instagram.
+  It never puts a trending song in the video.
+
+### Under the hood
+- Database update 5 (automatic, keeps everything): editable caption data, moment types, ratings, music
+  library, trending list, "no music" campaigns.
+- New tests for caption centring in every layout and source size, safe zones, word sync, scoring, ducking,
+  loudness and licensing, plus a labelled evaluation set (top-10 precision, old vs new).
+
 ## 0.3.0 — 20 Nov 2026
 
 The app is simpler: five menu items, a three-step New Project, and campaigns that set themselves up.

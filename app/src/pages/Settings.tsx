@@ -11,11 +11,13 @@ import Campaigns from "./Campaigns";
 import Programs from "./Programs";
 import Health from "./Health";
 import Logs from "./Logs";
+import { CaptionSettings, HighlightSettings, MusicSettings } from "../components/QualitySettings";
 
-export const TABS = ["General", "Accounts", "Connections", "Campaigns", "Posting", "Rewards programs", "Backup",
-  "Setup health", "Logs", "Rules"];
+export const TABS = ["General", "Accounts", "Connections", "Campaigns", "Captions", "Highlights", "Music", "Posting",
+  "Rewards programs", "Backup", "Setup health", "Logs", "Rules"];
 // Tabs that save themselves (no "Save settings" button).
-const SELF_SAVING = ["Connections", "Accounts", "Backup", "Campaigns", "Rewards programs", "Setup health", "Logs"];
+const SELF_SAVING = ["Connections", "Accounts", "Backup", "Campaigns", "Rewards programs", "Setup health", "Logs",
+  "Captions", "Highlights", "Music"];
 const ACCENTS = ["#ffd400", "#3ccf7a", "#4da3ff", "#ff5a7a"];
 
 export default function Settings({ initialTab, go }: { initialTab?: string; go: (p: Page, tab?: string) => void }) {
@@ -85,11 +87,9 @@ export default function Settings({ initialTab, go }: { initialTab?: string; go: 
             <label className="line">Clip length (seconds) <span>{num("clip", "min_sec", 1, 60)} – {num("clip", "max_sec", 1, 60)}</span></label>
             <label className="line">Highlights per stream hour {num("clip", "top_n_per_hour", 1, 60)}</label>
             <label className="line">Lead-in / tail padding (s) <span>{num("clip", "pad_before", 0.5, 60)} / {num("clip", "pad_after", 0.5, 60)}</span></label>
-            <label className="field">How picky (higher = fewer, better clips): {Math.round(s.clip.score_threshold * 100)}
-              <input type="range" min={30} max={90} value={Math.round(s.clip.score_threshold * 100)} onChange={(e) => setIn("clip", "score_threshold", +e.target.value / 100)} /></label>
-            <label className="line">Caption theme
-              <select value={s.captions.style} onChange={(e) => setIn("captions", "style", e.target.value)}>
-                <option value="bold_pop">Bold pop</option><option value="clean">Clean</option><option value="neon">Neon</option></select></label>
+            <label className="field">How picky (higher = fewer, better clips): {Math.round((s.clip.highlight_threshold ?? 0.42) * 100)}
+              <input type="range" min={25} max={70} value={Math.round((s.clip.highlight_threshold ?? 0.42) * 100)} onChange={(e) => setIn("clip", "highlight_threshold", +e.target.value / 100)} /></label>
+            <span className="muted small-text">Caption style, music and what counts as a highlight are in the Captions, Music and Highlights tabs.</span>
             <button className="check" style={{ background: "none", border: "none", padding: 0 }} onClick={() => setIn("transcription", "enabled", !s.transcription.enabled)}>
               <span className={s.transcription.enabled ? "tick on" : "tick"} aria-hidden="true">{s.transcription.enabled ? "✓" : ""}</span>Transcribe speech for captions</button>
             <label className="line">Speech model
@@ -149,6 +149,9 @@ export default function Settings({ initialTab, go }: { initialTab?: string; go: 
       {tab === "Rewards programs" && <div className="embedded"><Programs /></div>}
       {tab === "Setup health" && <div className="embedded"><Health go={go} /></div>}
       {tab === "Logs" && <div className="embedded"><Logs /></div>}
+      {tab === "Captions" && <CaptionSettings />}
+      {tab === "Highlights" && <HighlightSettings />}
+      {tab === "Music" && <MusicSettings />}
     </div>
   );
 }

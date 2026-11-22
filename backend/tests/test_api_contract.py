@@ -299,6 +299,57 @@ def test_v03_routes(client):
     assert f["streamers"][0]["campaign"]["id"] == kreek
 
 
+# ---- v0.4: captions, Review editing, feedback, weights, music, trending --------------------------------
+def test_v04_routes(client, tmp_path):
+    pres = call(client, "GET", "/captions/presets")
+    assert {p["key"] for p in pres["presets"]} >= {"bold_pop", "hype_yellow", "clean_white", "minimal"}
+    r = client.get("/fonts/Anton-Regular.ttf")
+    cover("GET", "/fonts/{name}")
+    assert r.status_code == 200 and len(r.content) > 10000
+    assert client.get("/fonts/..%2Fsecrets.py").status_code == 404
+    _, _, cid, _ = _linked_clip(tmp_path)
+    db.ex("UPDATE clips SET words=? WHERE id=?", (json.dumps([{"word": "hey", "start": 1, "end": 1.4}]), cid))
+    info = call(client, "GET", f"/clips/{cid}/edit", route="/clips/{cid}/edit")
+    assert info["editable"] is False and "feedback_tags" in info and isinstance(info["trending"], list)
+    call(client, "GET", "/clips/99999/edit", route="/clips/{cid}/edit", expect=404)
+    call(client, "POST", f"/clips/{cid}/rerender", route="/clips/{cid}/rerender", json={"caption_nudge": -40}, expect=409)
+    pv = call(client, "POST", f"/clips/{cid}/caption-preview", route="/clips/{cid}/caption-preview",
+              json={"caption_nudge": -40, "caption_style": "minimal"})
+    assert pv["events"] and pv["preset"] == "minimal"
+    fb = call(client, "POST", f"/clips/{cid}/feedback", route="/clips/{cid}/feedback",
+              json={"rating": 1, "tags": ["great timing"]})
+    assert fb["ratings"] == 1 and fb["needed"] == 50
+    call(client, "POST", f"/clips/{cid}/feedback", route="/clips/{cid}/feedback", json={"rating": 5}, expect=400)
+    assert call(client, "POST", f"/clips/{cid}/export-for-trending", route="/clips/{cid}/export-for-trending")["job_id"]
+    w = call(client, "GET", "/highlights/weights")
+    assert w["default"]["audio_events"] == 0.30 and w["focus"] == "balanced"
+    w = call(client, "PUT", "/highlights/weights", json={"weights": {"chat": 2, "audio_events": 2}, "focus": "funny"})
+    assert w["focus"] == "funny" and abs(sum(w["global"].values()) - 1) < 0.02
+    call(client, "PUT", "/highlights/weights", json={"focus": "nope"}, expect=400)
+    w = call(client, "POST", "/highlights/weights/reset", json={})
+    assert w["global"]["audio_events"] == 0.30
+    m = call(client, "GET", "/music/tracks")
+    assert len(m["tracks"]) >= 8 and all(t["licence"] for t in m["tracks"])
+    tid = m["tracks"][0]["id"]
+    t = call(client, "PATCH", f"/music/tracks/{tid}", route="/music/tracks/{tid}", json={"moods": ["chill"]})
+    assert t["moods"] == ["chill"] and t["tags_edited"] == 1
+    call(client, "PATCH", "/music/tracks/99999", route="/music/tracks/{tid}", json={}, expect=404)
+    folder = tmp_path / "mymusic"
+    folder.mkdir()
+    import subprocess
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=f=440:d=12", str(folder / "a.mp3")],
+                   check=True)
+    sc = call(client, "POST", "/music/scan", json={"folder": str(folder)})
+    assert sc["added"] == 1 and "responsible" in sc["warning"]
+    call(client, "POST", "/music/scan", json={"folder": str(tmp_path / "missing")}, expect=400)
+    assert call(client, "PUT", "/music/settings", json={"duck_db": 30})["duck_db"] == 18
+    imp = call(client, "POST", "/trending/import", json={"text": "Funny Sound - Someone | funny"})
+    assert imp["added"] == 1
+    call(client, "POST", "/trending/import", json={"text": " "}, expect=400)
+    lst = call(client, "GET", "/trending")
+    call(client, "DELETE", f"/trending/{lst[0]['id']}", route="/trending/{tid}")
+
+
 def test_every_route_is_covered():
     from clipfarm import api
     routes = set()

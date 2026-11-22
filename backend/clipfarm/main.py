@@ -93,6 +93,25 @@ def self_test(out_path: str) -> int:
         info = probe(Path(r["path"]))
         assert (info["width"], info["height"]) == (1080, 1920), info
         res["steps"]["render"] = {"encoder": r["encoder"], "duration": info["duration"], "layout": r["layout"]}
+        # Captions centred in the real install (bundled FFmpeg + fonts): render with/without, measure.
+        import numpy as np
+        flat = work / "flat clip.mp4"
+        subprocess.run([ffmpeg_bin(), "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=0x404040:s=1920x1080:r=30:d=5",
+                        "-f", "lavfi", "-i", "sine=f=220:d=5", "-shortest", "-c:v", "libx264", "-preset", "ultrafast",
+                        "-c:a", "aac", str(flat)], check=True, capture_output=True)
+        cw = [{"word": w, "start": 1 + i * 0.4, "end": 1.35 + i * 0.4} for i, w in enumerate("WAIT FOR IT".split())]
+        frames = []
+        for name, ws in (("with", cw), ("without", [])):
+            rr = render(RenderSpec(flat, 0, 4, work / f"cap {name}.mp4", layout="crop", words=ws, quality="fast",
+                                   punch_zoom=False, progress_bar=False))
+            raw = subprocess.run([ffmpeg_bin(), "-v", "error", "-ss", "1.5", "-i", rr["path"], "-frames:v", "1",
+                                  "-f", "rawvideo", "-pix_fmt", "gray", "-"], capture_output=True, check=True).stdout
+            frames.append(np.frombuffer(raw, np.uint8).reshape(1920, 1080).astype(int))
+        ys, xs = np.nonzero(np.abs(frames[0] - frames[1]) > 30)
+        off = abs((xs.min() + xs.max()) / 2 - 540) / 1080 if xs.size else 1.0
+        res["steps"]["captions"] = {"x": [int(xs.min()), int(xs.max())] if xs.size else None,
+                                    "centre_offset_pct": round(off * 100, 2)}
+        assert off <= 0.02, f"captions off-centre by {off:.1%}"
         secrets.set_secret("selftest_key", "selftest-value-123")
         assert secrets.get_secret("selftest_key") == "selftest-value-123"
         secrets.delete_secret("selftest_key")

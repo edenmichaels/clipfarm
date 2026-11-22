@@ -111,7 +111,8 @@ def test_ass_word_events(tmp_path):
     words = [{"word": w, "start": 10 + i * 0.5, "end": 10.4 + i * 0.5} for i, w in enumerate("one two three four".split())]
     out = build_ass(words, tmp_path / "c.ass", offset=10)
     text = out.read_text()
-    assert text.count("Dialogue:") == 4
+    starts = {l.split(",")[1] for l in text.splitlines() if l.startswith("Dialogue: 0,")}
+    assert len(starts) == 4                # one highlight event per word (a chunk may span two lines)
     assert "0:00:00.00" in text            # offset applied
 
 

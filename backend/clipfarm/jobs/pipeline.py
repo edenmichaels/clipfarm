@@ -19,9 +19,10 @@ from ..discovery.service import rank_game
 from ..editing.hooks import generate_package
 from ..editing.layout import Box
 from ..editing.render import RenderSpec, render
-from ..highlights import dedupe, scorer, signals
+from ..music import pick as music_pick
+from ..highlights import dedupe, detect, learning, rate, run, visual
 from ..highlights.chat_logger import ChatLogger, load_chat
-from ..highlights.transcribe import speech_excitement, transcribe
+from ..highlights.transcribe import transcribe
 from ..providers import available_providers
 from . import media, storage
 from .engine import JobContext, emit, enqueue, handler
@@ -141,72 +142,114 @@ def process_source(payload: dict, ctx: JobContext) -> None:
         db.ex("UPDATE sources SET status='ready', local_path=?, bytes=? WHERE id=?",
               (str(path), path.stat().st_size, src_id))
         ctx.progress(0.5)
-        audio = signals.audio_rms(path)
-        curve, normed = scorer.composite({"audio": audio})
-        dur = float(len(audio))
+        vis_all = visual.analyse(path) if db.get_setting("highlights", {}).get("visual", True) else {}
+        ms, dbg = run.detect_source(path, budget=1, min_len=cfg["min_sec"], max_len=cfg["max_sec"], threshold=0.0,
+                                    visual_fn=(lambda a, b: {k: v[int(a):int(b)] for k, v in vis_all.items()})
+                                    if vis_all else None, log=ctx.log)
+        dur = float(dbg.get("duration") or 0) or cfg["max_sec"]
         if dur <= cfg["max_sec"]:
             start, end = 0.0, dur
         else:
-            ms = scorer.pick_moments(curve, normed, min_len=cfg["min_sec"], max_len=cfg["max_sec"],
-                                     threshold=0.0, top_n_per_hour=1)
             start, end = (ms[0].start, ms[0].end) if ms else (0.0, cfg["max_sec"])
+        parts = dbg.get("parts") or {}
+        mtype = ms[0].type if ms else detect.classify(parts, 0, int(dur)) if parts else "Funny"
+        payoff = (ms[0].peak - start) if ms else (end - start) * 0.6
         views = src["view_count"] or 0
         score = round(min(1.0, 0.5 + np.log10(views + 1) / 10), 3)  # community already voted
         fp = dedupe.fingerprint(src["streamer_id"], src["created_at_platform"], 0, src["platform_id"])
         status = "duplicate" if dedupe.is_duplicate(fp) else "queued"
-        mid = db.ex("""INSERT INTO moments(source_id, start_sec, end_sec, score, signals, fingerprint, status)
-                       VALUES (?,?,?,?,?,?,?)""",
-                    (src_id, start, end, score, json.dumps({"clip_views": views}), fp, status))
+        mid = db.ex("""INSERT INTO moments(source_id, start_sec, end_sec, score, signals, fingerprint, status, type,
+                       reason, detector) VALUES (?,?,?,?,?,?,?,?,?, 'v2')""",
+                    (src_id, start, end, score, json.dumps({"clip_views": views, **(ms[0].signals if ms else {})}),
+                     fp, status, mtype, f"{mtype}: community clip with {views:,} views"))
         if status == "queued" and autopilot.quota_left(p, src["streamer_id"]) != 0:
             enqueue("render_moment", {"project_id": pid, "moment_id": mid, "media": str(path),
-                                      "media_offset": 0.0, "streamer_id": src["streamer_id"]}, pid, priority=3)
+                                      "media_offset": 0.0, "streamer_id": src["streamer_id"], "payoff": payoff},
+                    pid, priority=3)
         else:
             db.ex("UPDATE sources SET status='processed' WHERE id=?", (src_id,))
         return
 
-    # --- VOD: audio-only analysis, then fetch just the winning sections -------------------
+    # --- VOD: audio + chat over the whole VOD, visuals/LLM only for the shortlist ------------
     audio_path = media.download_audio(src["url"], work, f"src{src_id}")
     db.ex("UPDATE sources SET status='ready', local_path=? WHERE id=?", (str(audio_path), src_id))
-    ctx.progress(0.3)
-    audio = signals.audio_rms(audio_path)
-    n = len(audio)
+    ctx.progress(0.25)
     vod_start = datetime.fromisoformat(src["created_at_platform"].replace("Z", "+00:00")).timestamp() \
         if src["created_at_platform"] else 0
     chat = []
     login = db.q1("SELECT login FROM streamers WHERE id=?", (src["streamer_id"],))["login"]
     for f in (storage.media_dir() / "chat").glob(f"{login}-*.jsonl"):
         chat += load_chat(f, vod_start)
-    rate, burst = signals.chat_series(chat, n)
-    curve, normed = scorer.composite({"audio": audio, "chat": rate, "emote": burst})
-    moments = scorer.pick_moments(curve, normed, min_len=cfg["min_sec"], max_len=cfg["max_sec"],
-                                  pad_before=cfg["pad_before"], pad_after=cfg["pad_after"],
-                                  threshold=cfg["score_threshold"], top_n_per_hour=cfg["top_n_per_hour"])
-    # Community clips that fall inside this VOD boost nearby moments.
     clip_offsets = []
     for c in db.q("""SELECT view_count, created_at_platform FROM sources WHERE streamer_id=?
                      AND kind!='vod' AND created_at_platform IS NOT NULL""", (src["streamer_id"],)):
         off = datetime.fromisoformat(c["created_at_platform"].replace("Z", "+00:00")).timestamp() - vod_start
-        if 0 <= off <= n:
+        if off >= 0:
             clip_offsets.append((off, c["view_count"] or 0))
-    scorer.boost_with_clip_views(moments, clip_offsets)
-    ctx.log(f"VOD {src['platform_id']}: {len(moments)} moment(s) above threshold")
+    hcfg = {**db.get_setting("highlights", {}), **settings_of(p).get("highlights", {})}
+    weights = learning.weights_for(src["streamer_id"], p["game_id"])
+    tcfg = db.get_setting("transcription", {})
+    streamer = db.q1("SELECT display_name FROM streamers WHERE id=?", (src["streamer_id"],))
+    game = db.q1("SELECT name FROM games WHERE id=?", (p["game_id"],)) if p["game_id"] else {"name": ""}
+
+    def visual_fn(a: float, b: float):
+        low = media.download_section(src["url"], work, f"src{src_id}_v{int(a)}", a, b, low_res=True)
+        try:
+            return visual.analyse(low)
+        finally:
+            Path(low).unlink(missing_ok=True)
+
+    def words_fn(a: float, b: float):
+        if not tcfg.get("enabled", True):
+            return []
+        sec = media.download_section(src["url"], work, f"src{src_id}_t{int(a)}", a, b, low_res=True)
+        try:
+            return [{**w, "start": w["start"] + a, "end": w["end"] + a}
+                    for w in transcribe(sec, tcfg.get("model", "small"), tcfg.get("device", "auto"))]
+        finally:
+            Path(sec).unlink(missing_ok=True)
+
+    budget_n = max(1, int(round(cfg["top_n_per_hour"] * max(1.0, _duration(audio_path) / 3600))))
     left = autopilot.quota_left(p, src["streamer_id"])
     if left is not None:
-        moments = sorted(moments, key=lambda m: m.score, reverse=True)[:left]   # best ones first
+        budget_n = min(budget_n, max(left, 0))
+    moments, _dbg = run.detect_source(
+        Path(audio_path), chat=chat, clips=clip_offsets, budget=budget_n, min_len=cfg["min_sec"], max_len=cfg["max_sec"],
+        focus=hcfg.get("focus", "balanced"), weights=weights,
+        visual_fn=visual_fn if hcfg.get("visual", True) else None,
+        words_fn=words_fn if hcfg.get("llm", True) else None,
+        rate_fn=(lambda tr, det: rate.rate(tr, det, streamer["display_name"], game["name"])) if hcfg.get("llm", True) else None,
+        threshold=float(cfg.get("highlight_threshold", 0.42)), log=ctx.log) if budget_n else ([], {})
+    ctx.log(f"VOD {src['platform_id']}: {len(moments)} moment(s) picked")
     for i, m in enumerate(moments):
         fp = dedupe.fingerprint(src["streamer_id"], src["created_at_platform"], m.peak, src["platform_id"])
         if dedupe.is_duplicate(fp):
             continue
-        mid = db.ex("""INSERT INTO moments(source_id, start_sec, end_sec, score, signals, fingerprint, status)
-                       VALUES (?,?,?,?,?,?, 'queued')""",
-                    (src_id, m.start, m.end, m.score, json.dumps(m.signals), fp))
+        words = m.signals.pop("_words", None)
+        mid = db.ex("""INSERT INTO moments(source_id, start_sec, end_sec, score, signals, fingerprint, status, type,
+                       reason, words, detector) VALUES (?,?,?,?,?,?, 'queued', ?,?,?, 'v2')""",
+                    (src_id, m.start, m.end, m.score, json.dumps(m.signals), fp, m.type, m.reason,
+                     json.dumps(words) if words else None))
         section = media.download_section(src["url"], work, f"src{src_id}_m{mid}", m.start, m.end)
         enqueue("render_moment", {"project_id": pid, "moment_id": mid, "media": str(section),
-                                  "media_offset": m.start, "streamer_id": src["streamer_id"]}, pid, priority=4)
+                                  "media_offset": m.start, "streamer_id": src["streamer_id"],
+                                  "payoff": m.peak - m.start}, pid, priority=4)
         ctx.progress(0.3 + 0.7 * (i + 1) / max(1, len(moments)))
     Path(audio_path).unlink(missing_ok=True)   # audio no longer needed
     if not moments:
         db.ex("UPDATE sources SET status='processed' WHERE id=?", (src_id,))
+
+
+def settings_of(p: dict) -> dict:
+    return p.get("settings") or {}
+
+
+def _duration(path) -> float:
+    try:
+        from ..editing.ffmpeg_util import probe
+        return probe(Path(path))["duration"]
+    except Exception:
+        return 3600.0
 
 
 @handler("render_moment")
@@ -229,10 +272,14 @@ def render_moment(payload: dict, ctx: JobContext) -> None:
     offset = payload.get("media_offset", 0.0)
     start, end = m["start_sec"] - offset, m["end_sec"] - offset
     tcfg = db.get_setting("transcription", {})
-    words = transcribe(media_path, tcfg.get("model", "small"), tcfg.get("device", "auto"), max(0, start), end) \
-        if tcfg.get("enabled", True) else []
+    if m.get("words"):          # transcribed during detection (source time) -> media time
+        words = [{**w, "start": w["start"] - offset, "end": w["end"] - offset} for w in json.loads(m["words"])]
+    else:
+        words = transcribe(media_path, tcfg.get("model", "small"), tcfg.get("device", "auto"), max(0, start), end) \
+            if tcfg.get("enabled", True) else []
     ctx.progress(0.3)
     transcript = " ".join(w["word"] for w in words)
+    mtype = m.get("type") or "Funny"
     pkg = generate_package(transcript, streamer["display_name"], game["name"], reqs["tags"])
     platform_url = {"twitch": "twitch.tv/", "kick": "kick.com/", "youtube": "youtube.com/"}[streamer["platform"]]
     credit = (reqs["credit"] or "{url}").replace("{url}", platform_url + streamer["login"]) \
@@ -243,16 +290,42 @@ def render_moment(payload: dict, ctx: JobContext) -> None:
     render_cfg = db.get_setting("render", {})
     cap_cfg = {**db.get_setting("captions", {}), **settings.get("captions", {})}
     out = storage.media_dir() / "clips" / f"{streamer['login']}_{mid}.mp4"
-    result = render(RenderSpec(
-        source=media_path, start=max(0.0, start), end=end, out=out,
-        layout=layout,
+    clip_start, clip_end = max(0.0, start), end
+    dur = clip_end - clip_start
+    payoff = float(payload.get("payoff", dur * 0.6))
+
+    # ---- music: licensed library only; never on "original audio only" campaigns/projects ----
+    mcfg = db.get_setting("music", {}) or {}
+    acct_ids = [int(a) for a in (settings.get("per_streamer", {}).get(str(m["streamer_id"]), {}).get("account_ids") or [])]
+    allowed, why_no_music = music_pick.music_allowed(program, settings)
+    track = plan = None
+    if allowed:
+        try:
+            track = music_pick.choose(mtype, acct_ids, seed=mid)
+        except Exception as e:
+            ctx.log(f"Music skipped: {e}")
+        if track:
+            plan = music_pick.plan(track, mtype, payoff, dur)
+    elif why_no_music:
+        rule_notes.append(why_no_music)
+    speech = [(w["start"] - clip_start, w["end"] - clip_start) for w in words if w["end"] > clip_start]
+    swells = [(max(0.0, payoff - 0.3), min(dur, payoff + 2.0))]
+    spec = RenderSpec(
+        source=media_path, start=clip_start, end=clip_end, out=out, layout=layout,
         facecam=Box(**fc) if fc else None, words=words,
-        caption_style=cap_cfg.get("style", "bold_pop"), words_per_chunk=cap_cfg.get("words_per_chunk", 3),
-        hook=pkg["hook"], credit=credit, progress_bar=settings.get("progress_bar", True),
-        punch_zoom=settings.get("zoom", True),
-        music=Path(settings["music"]) if settings.get("music") else None,
+        caption_style=cap_cfg.get("style", "bold_pop"), words_per_chunk=cap_cfg.get("words_per_chunk"),
+        uppercase=cap_cfg.get("uppercase"), profanity=cap_cfg.get("profanity", "keep"),
+        fillers=cap_cfg.get("fillers", "remove"), emoji=bool(cap_cfg.get("emoji", False)),
+        keep_clear=tuple(req["onscreen"]), hook=pkg["hook"], credit=credit,
+        progress_bar=settings.get("progress_bar", True), punch_zoom=settings.get("zoom", True),
+        music=Path(track["path"]) if track else None, music_offset=plan["offset"] if plan else 0.0,
+        music_entry=plan["entry"] if plan else 0.0, music_delay=plan["delay"] if plan else 0.0,
+        music_track_lufs=track.get("loudness") if track else None,
+        duck_db=float(mcfg.get("duck_db", 15)), speech=speech, swells=swells,
+        beats=plan["zoom_beats"] if plan else [],
         encoder=render_cfg.get("encoder", "auto"), quality=render_cfg.get("quality", "high"),
-        fps=render_cfg.get("fps", 30)))
+        fps=render_cfg.get("fps", 30))
+    result = render(spec)
     if result.get("facecam") and not fc:
         db.set_setting(f"facecam:{streamer['id']}", result["facecam"])   # reuse next time
     description = pkg["description"]
@@ -269,13 +342,18 @@ def render_moment(payload: dict, ctx: JobContext) -> None:
     auto = settings.get("auto_approve", False) and not review_flags
     clip_id = db.ex("""INSERT INTO clips(project_id, moment_id, streamer_id, game_id, program_id, file_path, thumb_path,
                          duration_sec, hook_text, title, description, hashtags, layout, caption_style, content_hash,
-                         review_status, rules_applied, review_flags, caption_text, needs_payout_confirm)
-                         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                         review_status, rules_applied, review_flags, caption_text, needs_payout_confirm, words,
+                         caption_preset, moment_type, moment_reason, music_track_id, music_plan, base_path, render_spec)
+                         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (pid, mid, streamer["id"], p["game_id"], program["id"] if program else None, result["path"],
                      result["thumb"], result["duration"], pkg["hook"], pkg["title"], description,
                      json.dumps(pkg["hashtags"]), result["layout"], cap_cfg.get("style"), result["sha256"],
                      "approved" if auto else "pending", rules.as_json(rule_notes, req), json.dumps(review_flags),
-                     caption, int(program is None)))
+                     caption, int(program is None), json.dumps(words), cap_cfg.get("style", "bold_pop"), mtype,
+                     m.get("reason"), track["id"] if track else None, json.dumps(plan) if plan else None,
+                     result.get("base"), json.dumps(spec_json(spec, result))))
+    if track:
+        music_pick.record_use(track["id"], clip_id, acct_ids)
     db.ex("UPDATE moments SET status='rendered', transcript=? WHERE id=?", (transcript, mid))
     # Source can be cleaned once no more renders are waiting on it.
     pending = db.q1("""SELECT COUNT(*) n FROM jobs WHERE kind='render_moment' AND status IN ('queued','running')
@@ -286,6 +364,18 @@ def render_moment(payload: dict, ctx: JobContext) -> None:
     if media_path.name.startswith(f"src{m['src_id']}_m"):
         media_path.unlink(missing_ok=True)       # VOD section only used for this clip
     emit("clip_ready", clip_id=clip_id, title=pkg["title"], streamer=streamer["display_name"])
+
+
+def spec_json(spec: RenderSpec, result: dict) -> dict:
+    """Everything needed to re-render the clip the same way from its base (Review: nudge, fix a word...)."""
+    keep = ("start", "end", "caption_style", "words_per_chunk", "caption_nudge", "uppercase", "profanity", "fillers",
+            "emoji", "keep_clear", "hook", "hook_sec", "credit", "progress_bar", "punch_zoom", "music_offset",
+            "music_entry", "music_delay", "music_track_lufs", "duck_db", "speech", "swells", "beats", "quality", "fps")
+    d = {k: getattr(spec, k) for k in keep}
+    d["music"] = str(spec.music) if spec.music else None
+    d["base"] = result.get("base")
+    d["layout"] = result.get("layout")
+    return d
 
 
 def _campaign_for(streamer_id: int, settings: dict) -> dict | None:
@@ -304,6 +394,66 @@ def _campaign_for(streamer_id: int, settings: dict) -> dict | None:
                   (streamer_id, c["id"]))
         return ((r["v"] if r and r["v"] is not None else -1), c["payout_per_1k"] or 0)
     return max(camps, key=value)
+
+
+def spec_from_clip(c: dict, changes: dict | None = None) -> RenderSpec:
+    """Rebuild a RenderSpec from a clip's stored spec, applying Review changes."""
+    d = json.loads(c["render_spec"] or "{}")
+    if not d.get("base") or not Path(d["base"]).exists():
+        raise PermanentError("This clip's base render is gone (made before v0.4 or cleaned up), so it can't be "
+                             "re-rendered. New clips can.")
+    ch = changes or {}
+    words = ch.get("words") if ch.get("words") is not None else json.loads(c["words"] or "[]")
+    music = d.get("music")
+    if ch.get("original_audio_only"):
+        music = None
+    spec = RenderSpec(source=Path(d["base"]), start=d["start"], end=d["end"], out=Path(c["file_path"]),
+                      layout=d.get("layout") or "crop", words=words, base=Path(d["base"]),
+                      **{k: d[k] for k in ("caption_style", "words_per_chunk", "uppercase", "profanity", "fillers",
+                                           "emoji", "hook", "hook_sec", "credit", "progress_bar", "punch_zoom",
+                                           "music_offset", "music_entry", "music_delay", "music_track_lufs",
+                                           "duck_db", "beats", "quality", "fps") if k in d})
+    spec.keep_clear = tuple(d.get("keep_clear") or ())
+    spec.speech = [tuple(x) for x in d.get("speech") or []]
+    spec.swells = [tuple(x) for x in d.get("swells") or []]
+    spec.caption_nudge = float(ch.get("caption_nudge", d.get("caption_nudge", 0)) or 0)
+    for k in ("caption_style", "uppercase", "emoji", "profanity", "fillers", "hook"):
+        if k in ch and ch[k] is not None:
+            setattr(spec, k, ch[k])
+    spec.music = Path(music) if music else None
+    return spec
+
+
+@handler("rerender_clip")
+def rerender_clip(payload: dict, ctx: JobContext) -> None:
+    """Re-render captions/hook/music over the clip's base (seconds, not minutes). Review uses this."""
+    c = db.q1("SELECT * FROM clips WHERE id=?", (payload["clip_id"],))
+    ch = payload.get("changes") or {}
+    spec = spec_from_clip(c, ch)
+    spec.words = [{**w, "start": float(w["start"]), "end": float(w["end"])} for w in spec.words]
+    res = render(spec)
+    d = json.loads(c["render_spec"] or "{}")
+    d.update({k: v for k, v in ch.items() if k in ("caption_nudge", "caption_style", "uppercase", "emoji",
+                                                     "profanity", "fillers", "hook")})
+    if ch.get("original_audio_only"):
+        d["music"] = None
+    db.ex("""UPDATE clips SET words=?, caption_preset=?, caption_nudge=?, hook_text=COALESCE(?, hook_text),
+             content_hash=?, thumb_path=?, render_spec=?, original_audio_only=?,
+             music_track_id=CASE WHEN ? THEN NULL ELSE music_track_id END WHERE id=?""",
+          (json.dumps(spec.words), spec.caption_style, spec.caption_nudge, ch.get("hook"), res["sha256"], res["thumb"],
+           json.dumps(d), int(bool(ch.get("original_audio_only"))), int(bool(ch.get("original_audio_only"))), c["id"]))
+    emit("clip_ready", clip_id=c["id"], title=c["title"], streamer="Re-rendered")
+
+
+@handler("export_for_trending")
+def export_for_trending(payload: dict, ctx: JobContext) -> None:
+    """Same video and captions, stream audio only: add a trending sound in TikTok/Instagram's editor."""
+    from ..editing.render import export_without_music
+    c = db.q1("SELECT * FROM clips WHERE id=?", (payload["clip_id"],))
+    spec = spec_from_clip(c)
+    out = Path(c["file_path"]).with_name(Path(c["file_path"]).stem + "_for_trending_sound.mp4")
+    export_without_music(spec, out)
+    db.ex("UPDATE clips SET nomusic_path=? WHERE id=?", (str(out), c["id"]))
 
 
 @handler("cleanup")

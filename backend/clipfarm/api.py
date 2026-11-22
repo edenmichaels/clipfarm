@@ -386,6 +386,222 @@ def media(path: str):
     return FileResponse(p)
 
 
+# ---- v0.4: captions, Review editing, feedback, highlight weights, music, trending sounds -------------
+from .editing import captions as capmod  # noqa: E402
+from .highlights import learning  # noqa: E402
+from .music import library as musiclib, trending as trendmod  # noqa: E402
+
+
+@app.get("/captions/presets", dependencies=A)
+def caption_presets():
+    return {"presets": capmod.presets_public(), "default": (db.get_setting("captions") or {}).get("style", "bold_pop"),
+            "safe_zone": capmod.SAFE, "canvas": [capmod.W, capmod.H]}
+
+
+@app.get("/fonts/{name}")
+def font_file(name: str):
+    """Bundled caption fonts for the Review preview (public: fonts are OFL, nothing secret)."""
+    d = capmod.fonts_dir()
+    if not d or name not in capmod.FONTS.values():
+        raise HTTPException(404)
+    return FileResponse(d / name, media_type="font/ttf")
+
+
+def _clip(cid: int) -> dict:
+    c = db.q1("SELECT * FROM clips WHERE id=?", (cid,))
+    if not c:
+        raise HTTPException(404)
+    return c
+
+
+@app.get("/clips/{cid}/edit", dependencies=A)
+def clip_edit_info(cid: int):
+    """What Review needs to preview and edit captions on the actual clip."""
+    c = _clip(cid)
+    d = json.loads(c.get("render_spec") or "{}")
+    ev = Path(c["file_path"]).with_suffix(".events.json") if c.get("file_path") else None
+    fb = db.q1("SELECT rating, tags FROM clip_feedback WHERE clip_id=?", (cid,))
+    track = musiclib.get(c["music_track_id"]) if c.get("music_track_id") else None
+    return {
+        "clip_id": cid, "editable": bool(d.get("base") and Path(d["base"]).exists()),
+        "base_path": d.get("base"), "words": json.loads(c.get("words") or "[]"), "offset": d.get("start", 0.0),
+        "events": json.loads(ev.read_text(encoding="utf-8")) if ev and ev.exists() else [],
+        "preset": c.get("caption_preset") or d.get("caption_style") or "bold_pop", "nudge": c.get("caption_nudge") or 0,
+        "moment_type": c.get("moment_type"), "moment_reason": c.get("moment_reason"),
+        "music": {"title": track["title"], "licence": track["licence"], "source": track["source"],
+                  "plan": json.loads(c.get("music_plan") or "null")} if track else None,
+        "original_audio_only": bool(c.get("original_audio_only")),
+        "nomusic_path": c.get("nomusic_path"),
+        "feedback": {"rating": fb["rating"], "tags": json.loads(fb["tags"])} if fb else None,
+        "feedback_tags": learning.TAGS,
+        "trending": trendmod.suggest(c.get("moment_type") or "Funny"),
+    }
+
+
+class RerenderIn(BaseModel):
+    words: list[dict] | None = None
+    caption_nudge: float | None = None
+    caption_style: str | None = None
+    uppercase: bool | None = None
+    emoji: bool | None = None
+    profanity: str | None = None
+    hook: str | None = None
+    original_audio_only: bool | None = None
+
+
+@app.post("/clips/{cid}/rerender", dependencies=A)
+def clip_rerender(cid: int, b: RerenderIn):
+    c = _clip(cid)
+    d = json.loads(c.get("render_spec") or "{}")
+    if not d.get("base") or not Path(d["base"]).exists():
+        raise HTTPException(409, "This clip was made before captions could be edited (or its base file was "
+                                 "cleaned up). New clips can be re-rendered.")
+    changes = {k: v for k, v in b.model_dump().items() if v is not None}
+    if "words" in changes:
+        for w in changes["words"]:
+            if not {"word", "start", "end"} <= set(w):
+                raise HTTPException(400, "Each word needs word, start and end.")
+    if "caption_nudge" in changes:
+        changes["caption_nudge"] = max(-400.0, min(400.0, float(changes["caption_nudge"])))
+    jid = eng.enqueue("rerender_clip", {"clip_id": cid, "changes": changes}, c["project_id"], priority=1)
+    return {"job_id": jid}
+
+
+@app.post("/clips/{cid}/caption-preview", dependencies=A)
+def clip_caption_preview(cid: int, b: RerenderIn):
+    """Caption layout (no render) for the live preview while you nudge or edit words."""
+    import tempfile
+    c = _clip(cid)
+    d = json.loads(c.get("render_spec") or "{}")
+    words = b.words if b.words is not None else json.loads(c.get("words") or "[]")
+    meta = {}
+    if d.get("base") and Path(d["base"]).with_suffix(".json").exists():
+        meta = json.loads(Path(d["base"]).with_suffix(".json").read_text(encoding="utf-8"))
+    tmp = Path(tempfile.mkdtemp()) / "p.ass"
+    tr = capmod.build_track(words, tmp, b.caption_style or d.get("caption_style", "bold_pop"), d.get("words_per_chunk"),
+                            offset=d.get("start", 0.0), layout=d.get("layout") or "crop", src_w=meta.get("src_w", 1920),
+                            src_h=meta.get("src_h", 1080), keep_clear=tuple(d.get("keep_clear") or ()),
+                            nudge=b.caption_nudge if b.caption_nudge is not None else (c.get("caption_nudge") or 0),
+                            uppercase=b.uppercase if b.uppercase is not None else d.get("uppercase"),
+                            profanity=d.get("profanity", "keep"), fillers=d.get("fillers", "remove"))
+    return {"events": tr.events, "preset": capmod.preset(b.caption_style or d.get("caption_style")).key}
+
+
+class FeedbackIn(BaseModel):
+    rating: int
+    tags: list[str] = []
+
+
+@app.post("/clips/{cid}/feedback", dependencies=A)
+def clip_feedback(cid: int, b: FeedbackIn):
+    _clip(cid)
+    if b.rating not in (-1, 1):
+        raise HTTPException(400, "rating is 1 (thumbs up) or -1 (thumbs down)")
+    res = learning.record(cid, b.rating, b.tags)
+    n = db.q1("SELECT COUNT(*) n FROM clip_feedback")["n"]
+    return {**res, "ratings": n, "needed": learning.MIN_RATINGS}
+
+
+@app.post("/clips/{cid}/export-for-trending", dependencies=A)
+def clip_export_trending(cid: int):
+    c = _clip(cid)
+    jid = eng.enqueue("export_for_trending", {"clip_id": cid}, c["project_id"], priority=1)
+    return {"job_id": jid}
+
+
+@app.get("/highlights/weights", dependencies=A)
+def highlight_weights():
+    w = learning.all_weights()
+    hs = db.get_setting("highlights", {}) or {}
+    names = {}
+    for scope in w["learned"]:
+        kind, sid = scope.split(":", 1)
+        row = db.q1("SELECT display_name n FROM streamers WHERE id=?", (sid,)) if kind == "streamer" else \
+            db.q1("SELECT name n FROM games WHERE id=?", (sid,))
+        names[scope] = row["n"] if row else scope
+    return {**w, "names": names, "focus": hs.get("focus", "balanced"), "min_ratings": learning.MIN_RATINGS,
+            "ratings": db.q1("SELECT COUNT(*) n FROM clip_feedback")["n"]}
+
+
+@app.put("/highlights/weights", dependencies=A)
+def highlight_weights_set(body: dict):
+    if "weights" in body:
+        w = {k: max(0.0, float(v)) for k, v in body["weights"].items() if k in learning.KEYS}
+        tot = sum(w.values()) or 1.0
+        db.set_setting("highlight_weights", {k: round(v / tot, 3) for k, v in w.items()})
+    if "focus" in body:
+        if body["focus"] not in ("balanced", "funny", "action"):
+            raise HTTPException(400, "focus is balanced, funny or action")
+        db.set_setting("highlights", {**(db.get_setting("highlights", {}) or {}), "focus": body["focus"]})
+    return highlight_weights()
+
+
+@app.post("/highlights/weights/reset", dependencies=A)
+def highlight_weights_reset(body: dict):
+    learning.reset(body.get("scope"))
+    return highlight_weights()
+
+
+@app.get("/music/tracks", dependencies=A)
+def music_tracks():
+    try:
+        musiclib.ensure_bundled()
+    except Exception as e:
+        db.log("warn", "music", f"Bundled music couldn't be built: {e}")
+    return {"tracks": musiclib.tracks(), "settings": db.get_setting("music", {}) or {},
+            "local_warning": musiclib.LOCAL_LICENCE}
+
+
+@app.post("/music/scan", dependencies=A)
+def music_scan(body: dict):
+    folder = body.get("folder") or (db.get_setting("music", {}) or {}).get("folder")
+    if not folder:
+        raise HTTPException(400, "Choose your music folder first.")
+    try:
+        res = musiclib.scan_local(folder)
+    except FileNotFoundError as e:
+        raise HTTPException(400, str(e))
+    db.set_setting("music", {**(db.get_setting("music", {}) or {}), "folder": folder})
+    return res
+
+
+@app.patch("/music/tracks/{tid}", dependencies=A)
+def music_edit(tid: int, body: dict):
+    if not musiclib.get(tid):
+        raise HTTPException(404)
+    return musiclib.edit(tid, body)
+
+
+@app.put("/music/settings", dependencies=A)
+def music_settings(body: dict):
+    cur = db.get_setting("music", {}) or {}
+    for k in ("enabled", "duck_db", "folder"):
+        if k in body:
+            cur[k] = body[k]
+    if "duck_db" in cur:
+        cur["duck_db"] = max(12.0, min(18.0, float(cur["duck_db"])))
+    db.set_setting("music", cur)
+    return cur
+
+
+@app.get("/trending", dependencies=A)
+def trending_list():
+    return trendmod.listing(active_only=False)
+
+
+@app.post("/trending/import", dependencies=A)
+def trending_import(body: dict):
+    if not (body.get("text") or "").strip():
+        raise HTTPException(400, "Paste one sound per line.")
+    return trendmod.import_text(body["text"])
+
+
+@app.delete("/trending/{tid}", dependencies=A)
+def trending_delete(tid: int):
+    db.ex("UPDATE trending_sounds SET active=0 WHERE id=?", (tid,))
+    return {"ok": True}
+
+
 # ---- dashboard / analytics / logs -----------------------------------------------------
 @app.get("/dashboard", dependencies=A)
 def dashboard():
@@ -828,10 +1044,17 @@ def clip_posted(cid: int, b: PostedIn):
 @app.get("/posts", dependencies=A)
 def posts(status: str | None = None):
     where = "WHERE p.status=?" if status else ""
-    return db.q(f"""SELECT p.*, a.platform, a.handle, c.title, c.file_path, c.caption_text, pr.name program
+    rows = db.q(f"""SELECT p.*, a.platform, a.handle, c.title, c.file_path, c.caption_text, c.moment_type,
+                    c.nomusic_path, pr.name program
                     FROM posts p JOIN accounts a ON a.id=p.account_id JOIN clips c ON c.id=p.clip_id
                     LEFT JOIN programs pr ON pr.id=p.program_id {where} ORDER BY p.scheduled_at""",
                 (status,) if status else ())
+    from .music import trending as tm
+    for r in rows:      # a trending sound to add in the app when posting (names only, never embedded)
+        if r["platform"] in ("tiktok", "instagram"):
+            s = tm.suggest(r.get("moment_type") or "Funny", r["platform"], 1)
+            r["trending"] = s[0] if s else None
+    return rows
 
 
 @app.post("/posts/{post_id}/cancel", dependencies=A)

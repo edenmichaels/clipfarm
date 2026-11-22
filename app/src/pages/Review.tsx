@@ -2,6 +2,8 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import { Thumb } from "../components/ClipGrid";
+import CaptionStudio from "../components/CaptionStudio";
+import { MOMENT_EMOJI } from "../api";
 
 export default function Review() {
   const [status, setStatus] = useState("pending");
@@ -41,7 +43,7 @@ export default function Review() {
               <button key={c.id} className={c.id === selId ? "clip on" : "clip"} onClick={() => setSelId(c.id)}>
                 <Thumb clip={c} />
                 <div className="meta" style={{ padding: 8 }}>
-                  <b style={{ fontSize: 12 }}>{c.title}</b>
+                  <b style={{ fontSize: 12 }}>{c.moment_type ? `${MOMENT_EMOJI[c.moment_type] || ""} ` : ""}{c.title}</b>
                   <span className={`pill ${c.review_status}`} style={{ alignSelf: "flex-start" }}>{c.review_status}</span>
                 </div>
               </button>
@@ -75,9 +77,7 @@ function ClipEditor({ clip, onDone }: { clip: any; onDone: () => void }) {
 
   return (
     <section className="card" style={{ flex: "2 1 560px", minWidth: 0, display: "flex", flexWrap: "wrap", gap: 22, borderRadius: 14 }}>
-      <div className="preview">
-        {clip.file_path ? <video src={api.mediaUrl(clip.file_path)} controls /> : <div className="center muted" style={{ height: "100%" }}>File was cleaned up</div>}
-      </div>
+      <CaptionStudio clip={clip} onRendered={() => {}} />
       <div className="stack tight grow" style={{ flexBasis: 260 }}>
         <div className="row" style={{ gap: 8 }}>
           <h2 style={{ fontSize: 18 }}>{clip.streamer}</h2>
@@ -102,7 +102,7 @@ function ClipEditor({ clip, onDone }: { clip: any; onDone: () => void }) {
           <h3>Rewards checklist</h3>
           {checklist.map((i, k) => <span key={k} className={i.done ? "ok-text" : "muted"}>{i.done ? "✓" : "○"} {i.item}</span>)}
         </div>
-        <span className="muted" style={{ fontSize: 12 }}>Editing the hook here updates the post text. The text burned into the video stays as rendered.</span>
+        <span className="muted" style={{ fontSize: 12 }}>Editing the hook here updates the post text. Use "Re-render captions" to change what's burned into the video.</span>
       </div>
     </section>
   );

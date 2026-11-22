@@ -56,6 +56,8 @@ export default function Submissions() {
                 <button onClick={() => posted(p)} disabled={!links[p.id]}>I've posted it</button>
               </div>
             ) : <span className="muted small-text">Uploads automatically at the scheduled time.</span>}
+            {p.trending && <span className="small-text">♪ Trending sound idea: <b>{p.trending.name}</b>{p.trending.artist ? ` – ${p.trending.artist}` : ""} <span className="muted">(add it in {PLATFORM_LABEL[p.platform] ?? p.platform}'s editor{p.nomusic_path ? "; use the \"for trending sound\" file" : ""})</span>
+              {p.nomusic_path && <button className="btn-quiet" onClick={() => copy(p.nomusic_path, "Video path")}>Copy no-music file path</button>}</span>}
             {p.error && <span className="bad-text small-text">{p.error}</span>}
           </div>))}
       </section>

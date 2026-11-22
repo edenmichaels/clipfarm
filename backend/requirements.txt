@@ -7,6 +7,9 @@ opencv-python-headless>=4.10
 keyring>=25
 cryptography>=42      # vault encryption + password-protected export
 yt-dlp>=2025.1.1
+onnxruntime>=1.17      # YAMNet sound events (also used by faster-whisper)
+fonttools>=4.40        # caption layout measures the real fonts
+pillow>=10
 faster-whisper>=1.0      # optional but recommended (captions + speech signal); ~CPU/CUDA
 # build / test
 pyinstaller>=6.10

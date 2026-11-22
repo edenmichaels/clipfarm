@@ -39,8 +39,10 @@ DEFAULT_SETTINGS: dict = {
     "delete_sources_after_processing": True,
     "render": {"encoder": "auto", "quality": "high", "fps": 30, "width": 1080, "height": 1920},
     "clip": {"min_sec": 15, "max_sec": 60, "pad_before": 3.0, "pad_after": 2.0,
-             "top_n_per_hour": 4, "score_threshold": 0.55},
-    "captions": {"style": "bold_pop", "words_per_chunk": 3},
+             "top_n_per_hour": 4, "score_threshold": 0.55, "highlight_threshold": 0.42},
+    "captions": {"style": "bold_pop", "profanity": "keep", "fillers": "remove", "emoji": False},
+    "highlights": {"focus": "balanced", "visual": True, "llm": True},
+    "music": {"enabled": True, "duck_db": 15},
     "layout": "auto",                   # auto | split | crop | blur_fill
     "llm": {"provider": "ollama", "model": "llama3.1:8b",
             "base_url": "http://127.0.0.1:11434", "cloud_base_url": "https://api.openai.com/v1",

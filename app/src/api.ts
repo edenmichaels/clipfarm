@@ -106,6 +106,7 @@ export const api = {
   patch: <T = any>(p: string, b: unknown) => req<T>("PATCH", p, b),
   del: <T = any>(p: string) => req<T>("DELETE", p),
   mediaUrl: (path: string) => `${base}/media?path=${encodeURIComponent(path)}&token=${token}`,
+  fontUrl: (file: string) => `${base}/fonts/${encodeURIComponent(file)}`,
   events: () => new EventSource(`${base}/events?token=${token}`),
 };
 
@@ -128,3 +129,22 @@ export const PLATFORM_LABEL: Record<string, string> = {
 export const aud = (v: number | null | undefined, digits = 2) => (v == null ? "—" : `A$${v.toFixed(digits)}`);
 export const band = (lo?: number | null, li?: number | null, hi?: number | null) =>
   li == null ? "—" : `${aud(li)} (${aud(lo ?? 0, 0)}–${aud(hi ?? 0, 0)})`;
+
+/** Wait for a background job (re-render, export) to finish. */
+export async function waitForJob(id: number, onProgress?: (p: number) => void): Promise<any> {
+  for (let i = 0; i < 600; i++) {
+    const jobs = await api.get<any[]>("/jobs?active=false&limit=200");
+    const j = jobs.find((x) => x.id === id);
+    if (j && ["done", "failed", "cancelled"].includes(j.status)) {
+      if (j.status !== "done") throw new Error(j.error || `Job ${j.status}`);
+      return j;
+    }
+    if (j && onProgress) onProgress(j.progress || 0);
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  throw new Error("Timed out waiting for the job");
+}
+
+export const MOMENT_EMOJI: Record<string, string> = {
+  "Funny": "😂", "Action/Explosion": "💥", "Rage/Reaction": "😱", "Clutch/Skill": "🏆", "Fail": "💀", "Wholesome": "🙂",
+};

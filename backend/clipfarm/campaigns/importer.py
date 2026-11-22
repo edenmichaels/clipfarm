@@ -154,6 +154,9 @@ def parse(text: str, url: str | None = None) -> dict:
     if re.search(r"campaign (?:has )?ended|no longer accepting|not accepting clips|budget (?:is )?(?:exhausted|spent)"
                  r"|^ended$", t, re.I | re.M):
         out["status"] = "ended"
+    if re.search(r"original audio only|no (?:background )?music|without (?:background )?music|"
+                 r"do(?:n't| not) add (?:any )?music|keep (?:the )?original audio", t, re.I):
+        put("no_music", 1)
     # Joined? A campaign page shows "Joined" + "Submit clip" once you're in, "Join Campaign" before.
     if re.search(r"^\+?\s*Joined$|Submit clip", t, re.M):
         out["joined"] = True

@@ -20,11 +20,47 @@ permissions:
   contents: write
 
 jobs:
+  # YAMNet sound-event model: Google's official weights converted to ONNX and checked against TensorFlow.
+  models:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - id: cache
+        uses: actions/cache@v4
+        with:
+          path: backend/assets/models
+          key: yamnet-${{ hashFiles('scripts/build_yamnet.py', 'backend/clipfarm/highlights/audio_events.py') }}
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Convert YAMNet to ONNX
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          python -m pip install "tensorflow-cpu==2.15.1" "tf2onnx==1.16.1" "onnxruntime==1.17.3" "numpy<2" "onnx==1.15.0"
+          git clone -q --depth 1 --filter=blob:none --sparse https://github.com/tensorflow/models /tmp/tfm
+          git -C /tmp/tfm sparse-checkout set research/audioset/yamnet
+          curl -sSfL -o /tmp/yamnet.h5 https://storage.googleapis.com/audioset/yamnet.h5
+          python scripts/build_yamnet.py /tmp/tfm/research/audioset/yamnet /tmp/yamnet.h5 backend/assets/models
+      - run: ls -la backend/assets/models && cat backend/assets/models/yamnet_check.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yamnet-model
+          path: backend/assets/models/
+          retention-days: 7
+
   windows:
     runs-on: windows-latest
+    needs: models
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: yamnet-model
+          path: backend/assets/models
 
       - uses: actions/setup-python@v5
         with:
@@ -46,7 +82,7 @@ jobs:
         working-directory: backend
         run: python -m pip install -r requirements.txt
 
-      - name: Fetch FFmpeg and caption font
+      - name: Fetch FFmpeg
         working-directory: backend
         shell: pwsh
         run: |
@@ -55,7 +91,6 @@ jobs:
           Expand-Archive ffmpeg.zip -DestinationPath ffmpeg_tmp -Force
           Get-ChildItem ffmpeg_tmp -Recurse -Include ffmpeg.exe, ffprobe.exe | Copy-Item -Destination bin\
           Remove-Item ffmpeg.zip, ffmpeg_tmp -Recurse -Force
-          Invoke-WebRequest "https://github.com/google/fonts/raw/main/ofl/anton/Anton-Regular.ttf" -OutFile assets\fonts\Anton-Regular.ttf
           "$PWD\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
           .\bin\ffmpeg.exe -hide_banner -version | Select-Object -First 1
 
@@ -72,7 +107,7 @@ jobs:
             --collect-submodules uvicorn --collect-data cv2 `
             --collect-all faster_whisper --collect-all ctranslate2 `
             --collect-submodules yt_dlp --collect-all keyring --hidden-import win32ctypes.core --collect-submodules clipfarm `
-            --collect-submodules cryptography `
+            --collect-submodules cryptography --collect-all onnxruntime --collect-submodules fontTools `
             run_engine.py
           New-Item -ItemType Directory -Force ..\app\src-tauri\binaries | Out-Null
           Copy-Item dist\clipfarm-engine-x86_64-pc-windows-msvc.exe ..\app\src-tauri\binaries\
@@ -186,7 +221,7 @@ jobs:
             app/src-tauri/target/release/bundle/nsis/latest.json
 
   # Before/after screenshots of Home, the menu, every New Project step and the streamer list.
-  # "Before" is v0.2 (commit 0cf1082), "after" is this commit; both use the same demo data (scripts/demo_seed.py).
+  # "Before" is v0.3 (commit fae2193), "after" is this commit; both use the same demo data (scripts/demo_seed.py).
   screenshots:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -212,7 +247,7 @@ jobs:
 
       - name: Take screenshots
         env:
-          BEFORE_REF: 0cf1082
+          BEFORE_REF: fae2193
         run: |
           set -e
           shoot() {   # $1 = before|after, $2 = checkout folder
@@ -253,4 +288,64 @@ jobs:
         with:
           name: ClipFarm-screenshots-before-after
           path: shots/
+          retention-days: 90
+
+  # Highlight evaluation (top-10 precision, v0.3 vs v0.4) + before/after sample clips from the same source.
+  eval:
+    runs-on: ubuntu-latest
+    needs: models
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: yamnet-model
+          path: backend/assets/models
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: Install
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg espeak-ng > /dev/null
+          python -m pip install -r backend/requirements.txt
+      - id: evalcache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/evalset
+          key: evalset-${{ hashFiles('scripts/build_eval_set.py', 'backend/clipfarm/music/compose.py') }}
+      - name: Build the labelled evaluation set (CC0 sounds, licences checked)
+        if: steps.evalcache.outputs.cache-hit != 'true'
+        run: python scripts/build_eval_set.py /tmp/evalset
+      - name: Evaluate before vs after
+        run: |
+          mkdir -p ci-samples
+          CLIPFARM_DATA_DIR=/tmp/evaldata python scripts/eval_highlights.py /tmp/evalset ci-samples/EVALUATION.md
+          cp /tmp/evalset/SOURCES.md ci-samples/EVAL-SOURCES.md
+      - name: Evaluation gate
+        working-directory: backend
+        run: CLIPFARM_EVAL_REPORT=$GITHUB_WORKSPACE/ci-samples/EVALUATION.json python -m pytest -q tests/test_eval.py -rs
+      - name: Before/after sample clips (same source)
+        run: |
+          git worktree add /tmp/before fae2193
+          (cd /tmp/before/backend && CLIPFARM_DATA_DIR=/tmp/sb python $GITHUB_WORKSPACE/scripts/make_samples.py /tmp/evalset $GITHUB_WORKSPACE/ci-samples/before before /tmp/evalset/sounds/music/afterglow.m4a)
+          (cd backend && CLIPFARM_DATA_DIR=/tmp/sa python ../scripts/make_samples.py /tmp/evalset ../ci-samples/after after /tmp/evalset/sounds/music/afterglow.m4a)
+          ls -laR ci-samples
+      - name: Publish to the ci-samples branch
+        if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd ci-samples
+          git init -q && git checkout -q -b ci-samples
+          git add -A && git -c user.name="ClipFarm CI" -c user.email="ci@clipfarm.invalid" commit -qm "Samples for ${GITHUB_SHA}"
+          git push -qf "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.git" ci-samples
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ClipFarm-samples-and-evaluation
+          path: ci-samples/
           retention-days: 90

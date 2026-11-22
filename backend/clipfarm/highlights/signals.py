@@ -61,6 +61,46 @@ def chat_series(messages: list[tuple[float, str]], duration_sec: int) -> tuple[n
     return rate, burst
 
 
+# v0.4: reactions by kind. Tokens are matched lower-case after stripping punctuation.
+LAUGH_TOKENS = {"kekw", "lul", "lulw", "omegalul", "lmao", "lmfao", "lol", "lolol", "xd", "pepelaugh", "icant",
+                "kekwait", "😂", "🤣", "💀", "haha", "hahaha", "ahaha", "dead", "dying", "kek", "lulw", "omegalulw"}
+HYPE_TOKENS2 = {"pog", "pogchamp", "poggers", "pogu", "w", "ww", "www", "insane", "holy", "noway", "omg", "wtf",
+                "🔥", "clutch", "goated", "sheesh", "monkaw", "monkas", "pogcrazy", "ez", "gg", "letsgo", "lets"}
+CLIP_TOKENS = {"clip", "clipit", "clipped", "clipthat"}
+FAIL_TOKENS = {"l", "ll", "rip", "fail", "noo", "nooo", "sadge", "f", "omegalul", "classic", "bruh", "throw", "throwing"}
+_PHRASES = {"no way": "hype", "clip it": "clip", "clip that": "clip", "lets go": "hype", "let's go": "hype"}
+
+
+def chat_reactions(messages: list[tuple[float, str]], duration_sec: int) -> dict[str, np.ndarray]:
+    """Per-second counts of laugh / hype / clip / fail reactions plus messages per second."""
+    out = {k: np.zeros(duration_sec, dtype=np.float32) for k in ("rate", "laugh", "hype", "clip", "fail")}
+    for t, text in messages:
+        i = int(t)
+        if not 0 <= i < duration_sec:
+            continue
+        out["rate"][i] += 1
+        low = text.lower()
+        toks = _word.findall(low)
+        kinds = set()
+        for tok in toks:
+            if tok in LAUGH_TOKENS or (tok.startswith("ha") and set(tok) <= set("ha") and len(tok) >= 4):
+                kinds.add("laugh")
+            if tok in HYPE_TOKENS2:
+                kinds.add("hype")
+            if tok in CLIP_TOKENS:
+                kinds.add("clip")
+            if tok in FAIL_TOKENS:
+                kinds.add("fail")
+        for ph, kind in _PHRASES.items():
+            if ph in low:
+                kinds.add(kind)
+        if "CLIP" in text:
+            kinds.add("clip")
+        for k in kinds:
+            out[k][i] += 1
+    return out
+
+
 def viewer_delta(samples: list[tuple[float, int]], duration_sec: int) -> np.ndarray:
     """samples = [(seconds_from_start, viewers)] (sparse). Positive jumps only, held until next sample."""
     out = np.zeros(duration_sec, dtype=np.float32)
