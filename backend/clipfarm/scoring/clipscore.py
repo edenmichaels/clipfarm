@@ -36,11 +36,13 @@ def score_clip(cid: int, edl: dict | None = None) -> dict:
 
 
 def rank_for_posting(clips: list[dict]) -> list[dict]:
-    """Projected earnings first (rule errors last), then virality."""
+    """Projected earnings first, then virality. Clips breaking a campaign rule come after the rest, and clips
+    not scored yet come last."""
     def key(c):
         flags = c.get("rule_flags") or []
         if isinstance(flags, str):
             flags = json.loads(flags)
         blocked = any(f.get("severity") == "error" for f in flags)
-        return (blocked, -(c.get("profit_likely") or 0), -(c.get("virality") or 0))
+        unscored = c.get("virality") is None and c.get("profit_likely") is None
+        return (unscored, blocked, -(c.get("profit_likely") or 0), -(c.get("virality") or 0))
     return sorted(clips, key=key)

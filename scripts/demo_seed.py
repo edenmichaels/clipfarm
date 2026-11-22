@@ -96,7 +96,9 @@ def seed_edit_projects():
         e["layout"]["facecam"] = {"x": 0.729, "y": 0.037, "w": 0.25, "h": 0.296}
         e["layout"]["keyframes"] = [{"t": a, "layout": "split", "path": [[0, 0.5]], "auto": True, "scene": "facecam+gameplay"}]
         e["rules"].update(program_id=prog, program="KreekCraft", tags=["#KreekCraft"], credit="twitch.tv/kreekcraft")
-        e["texts"] = {"tiktok": {"title": title, "description": "", "hashtags": ["gta6"]}}
+        # the last demo clip is missing the campaign hashtag, to show a red rule flag and its one-click fix
+        tags = ["gta6"] if mtype == "Fail" else ["KreekCraft", "gta6"]
+        e["texts"] = {"tiktok": {"title": title, "description": "", "hashtags": tags}}
         e["music"]["enabled"] = False
         ep.create(cid, e)
         try:                        # low-res base for the live preview + a thumbnail

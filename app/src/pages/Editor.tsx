@@ -150,6 +150,7 @@ function Workspace({ clip, simple, onChanged, go, setMsg }: { clip: any; simple:
   const [rated, setRated] = useState<number | null>(null);
   const [tags, setTags] = useState<string[]>([]);
   const [brands, setBrands] = useState<any[]>([]);
+  const [loadErr, setLoadErr] = useState("");
   const fonts = useCaptionFonts();
   const vid = useRef<HTMLVideoElement>(null);
   const building = useRef(false);
@@ -168,7 +169,7 @@ function Workspace({ clip, simple, onChanged, go, setMsg }: { clip: any; simple:
   const rescore = () => api.post(`/edit/${cid}/score`).then(setScore).catch(() => {});
   const show = (r: any) => { setV(r); rescore(); loadCanvas(r.head); onChanged(); };
   useEffect(() => {
-    api.get(`/edit/${cid}`).then((r) => { setV(r); setPreset(r.edl.export?.preset || "tiktok"); loadCanvas(r.head); }).catch((e) => setMsg(e.message));
+    api.get(`/edit/${cid}`).then((r) => { setV(r); setPreset(r.edl.export?.preset || "tiktok"); loadCanvas(r.head); }).catch((e) => setLoadErr(e.message));
     rescore();
     api.get("/caption-templates").then(setTemplates).catch(() => {});
     api.get("/music/tracks").then((r) => setTracks(r.tracks || [])).catch(() => {});
@@ -241,7 +242,7 @@ function Workspace({ clip, simple, onChanged, go, setMsg }: { clip: any; simple:
     return () => window.removeEventListener("keydown", onKey);
   });
 
-  if (!v) return <section className="card muted">Loading the edit…</section>;
+  if (!v) return <section className="card muted">{loadErr || "Loading the edit…"}</section>;
   const vir = score?.virality;
   const pr = score?.profit;
   const flags: any[] = score?.flags || [];

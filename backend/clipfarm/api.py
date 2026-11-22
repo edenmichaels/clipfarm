@@ -875,9 +875,11 @@ def editor_clips(sort: str = "profit", min_score: int | None = None, program_id:
                  project_id: int | None = None, limit: int = 300):
     if sort not in EDITOR_SORT:
         raise HTTPException(400, "sort is profit, virality or newest")
-    cond, params = ["c.deleted_at IS NULL", "c.review_status != 'rejected'"], []
+    # only clips that can be opened in the Editor (older clips whose source was cleaned up stay in My Clips)
+    cond, params = ["c.deleted_at IS NULL", "c.review_status != 'rejected'",
+                    "(ep.id IS NOT NULL OR c.source_path IS NOT NULL OR c.base_path IS NOT NULL)"], []
     for col, val in (("c.program_id", program_id), ("c.streamer_id", streamer_id), ("c.project_id", project_id),
-                     ("m.type", moment_type)):
+                     ("COALESCE(m.type, c.moment_type)", moment_type)):
         if val is not None:
             cond.append(f"{col}=?")
             params.append(val)
@@ -888,7 +890,7 @@ def editor_clips(sort: str = "profit", min_score: int | None = None, program_id:
         c.profit_low, c.profit_likely, c.profit_high, c.profit_platform, c.expected_views, c.rule_flags, c.review_status,
         c.streamer_id, c.program_id, c.project_id, c.duration_sec, c.variant_of, c.variant_label,
         s.display_name streamer, pr.name program,
-        m.type moment_type, m.reason moment_reason, ep.status edit_status, ep.updated_at edited_at,
+        COALESCE(m.type, c.moment_type) moment_type, m.reason moment_reason, ep.status edit_status, ep.updated_at edited_at,
         EXISTS (SELECT 1 FROM posts p WHERE p.clip_id=c.id AND p.status='posted') posted
         FROM clips c LEFT JOIN streamers s ON s.id=c.streamer_id LEFT JOIN programs pr ON pr.id=c.program_id
         LEFT JOIN moments m ON m.id=c.moment_id LEFT JOIN edit_projects ep ON ep.clip_id=c.id
