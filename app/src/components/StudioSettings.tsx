@@ -49,7 +49,7 @@ export function BrandSettings() {
           <label className="field">Name<input value={edit.name} onChange={(e) => set("name", e.target.value)} placeholder="My TikTok look" /></label>
           <div className="grid2">
             <label className="field">Caption style<select value={edit.caption_template || ""} onChange={(e) => set("caption_template", e.target.value || null)}>
-              <option value="">(keep the clip's)</option>{caps.map((c) => <option key={c.key} value={c.key}>{c.label}</option>)}</select></label>
+              <option value="">(keep the clip's)</option>{caps.map((c) => <option key={c.key} value={c.key}>{c.name}</option>)}</select></label>
             <label className="field">Credit position<select value={edit.credit_pos || ""} onChange={(e) => set("credit_pos", e.target.value || null)}>
               <option value="">Automatic</option><option value="top">Top</option><option value="bottom">Bottom</option></select></label>
             <label className="field">Logo / watermark (.png)

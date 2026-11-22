@@ -93,6 +93,12 @@ export function Preview({ v, canvas, videoRef, t, setT, zone, fallback }: {
           ))}
         </div>
       ))}
+      {live && v?.edl?.hook?.text && t < (v.edl.hook.sec || 2.2) && (
+        <div className="ed-cap ed-hook" style={{
+          left: 540 * s, top: 380 * s, fontFamily: `"CF ${st.family}", Impact, sans-serif`, fontSize: 74 * s, color: "#fff",
+          WebkitTextStroke: `${Math.max(1, 8 * s)}px #000`, whiteSpace: "normal", width: 800 * s,
+        }}>{st.uppercase ? String(v.edl.hook.text).toUpperCase() : v.edl.hook.text}</div>
+      )}
       {z && (
         <div className="ed-safe" aria-hidden>
           <div style={{ top: 0, height: z.top * s, left: 0, right: 0 }} />
@@ -259,7 +265,8 @@ export function TranscriptPanel({ v, seek, op, t }: { v: View; seek: (x: number)
 export function CaptionsPanel({ v, onEdl, templates, fonts, reload }: { v: View; onEdl: (fn: (e: Edl) => Edl, l: string) => void; templates: any; fonts: any[]; reload: () => void }) {
   const c = v.edl.captions;
   const key = typeof c.template === "string" ? c.template : c.template?.key || "custom";
-  const cur = (templates?.templates || []).find((x: any) => x.key === key) || (typeof c.template === "object" ? c.template : null);
+  const found = (templates?.templates || []).find((x: any) => x.key === key);
+  const cur = found?.template || (typeof c.template === "object" ? c.template : null);
   const [draft, setDraft] = useState<any>(null);
   const [name, setName] = useState("");
   const [msg, setMsg] = useState("");
@@ -269,7 +276,7 @@ export function CaptionsPanel({ v, onEdl, templates, fonts, reload }: { v: View;
   const saveMine = async () => {
     try {
       const r = await api.post("/caption-templates", { name: name || "My style", template: { ...tmpl, base: tmpl.base || key } });
-      setMsg(`Saved "${r.template.label || name}"`); reload();
+      setMsg(`Saved "${r.name || name}"`); reload();
       onEdl((e) => { e.captions.template = r.key; return e; }, "Use saved template");
     } catch (e: any) { setMsg(e.message); }
   };
@@ -278,8 +285,8 @@ export function CaptionsPanel({ v, onEdl, templates, fonts, reload }: { v: View;
     <div className="stack tight">
       <div className="row wrap" style={{ gap: 6 }}>
         {(templates?.templates || []).map((x: any) => (
-          <button key={x.key} className={x.key === key ? "pill-btn on" : "pill-btn"} style={{ fontFamily: `"CF ${x.family}"` }}
-            onClick={() => { setDraft(null); onEdl((e) => { e.captions.template = x.key; return e; }, `Caption style: ${x.label}`); }}>{x.label}</button>
+          <button key={x.key} className={x.key === key ? "pill-btn on" : "pill-btn"} style={{ fontFamily: `"CF ${x.template?.family}"` }}
+            onClick={() => { setDraft(null); onEdl((e) => { e.captions.template = x.key; return e; }, `Caption style: ${x.name}`); }}>{x.name}</button>
         ))}
       </div>
       <label className="row" style={{ gap: 8 }}><input type="checkbox" checked={c.enabled !== false} onChange={(e) => onEdl((x) => { x.captions.enabled = e.target.checked; return x; }, e.target.checked ? "Captions on" : "Captions off")} /> Show captions</label>

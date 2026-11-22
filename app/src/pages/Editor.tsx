@@ -256,7 +256,7 @@ function Workspace({ clip, simple, onChanged, go, setMsg }: { clip: any; simple:
         {!simple && <select value={quality} onChange={(e) => setQuality(e.target.value)} aria-label="Preview quality">
           <option value="fast">Preview: fast (live captions)</option><option value="final">Preview: final render</option></select>}
         {!simple && <select defaultValue="" onChange={(e) => { const k = e.target.value; e.target.value = ""; k && onEdl((x) => { x.captions.template = k; return x; }, `Template: ${k}`); }} aria-label="Apply template">
-          <option value="">Apply template…</option>{(templates?.templates || []).map((x: any) => <option key={x.key} value={x.key}>{x.label}</option>)}</select>}
+          <option value="">Apply template…</option>{(templates?.templates || []).map((x: any) => <option key={x.key} value={x.key}>{x.name}</option>)}</select>}
         {!simple && brands.length > 0 && <select value={v.edl.brand?.id ?? ""} onChange={(e) => post(`/edit/${cid}/brand`, { brand_template_id: e.target.value ? Number(e.target.value) : null })} aria-label="Brand template">
           <option value="">No brand template</option>{brands.map((b) => <option key={b.id} value={b.id}>Brand: {b.name}</option>)}</select>}
         <button disabled={!!busy} onClick={async () => {
