@@ -47,8 +47,13 @@ def test_children_die_when_the_engine_is_killed(tmp_path):
     assert psutil.pid_exists(child)
     eng.kill()                                               # like Task Manager's End task
     eng.wait(10)
+    def gone() -> bool:
+        try:
+            return not psutil.pid_exists(child) or psutil.Process(child).status() == psutil.STATUS_ZOMBIE
+        except psutil.NoSuchProcess:                         # it died between the two checks: that's the point
+            return True
     for _ in range(50):
-        if not psutil.pid_exists(child) or psutil.Process(child).status() == psutil.STATUS_ZOMBIE:
+        if gone():
             break
         time.sleep(0.1)
     else:
