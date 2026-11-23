@@ -25,10 +25,11 @@ from . import library
 MOOD_FOR_TYPE = {
     "Funny": ["funny", "chill"], "Action/Explosion": ["hype", "epic"], "Rage/Reaction": ["hype", "tense"],
     "Clutch/Skill": ["epic", "hype"], "Fail": ["sad", "funny"], "Wholesome": ["chill", "funny"],
+    "Chaos/Fail": ["funny", "sad"], "Action + Reaction": ["hype", "funny"], "Rage": ["hype", "tense"],
 }
 ENERGY_FOR_TYPE = {"Funny": 0.55, "Action/Explosion": 0.9, "Rage/Reaction": 0.8, "Clutch/Skill": 0.8,
-                   "Fail": 0.35, "Wholesome": 0.35}
-DROP_TYPES = {"Action/Explosion", "Clutch/Skill", "Fail", "Rage/Reaction"}
+                   "Fail": 0.35, "Wholesome": 0.35, "Chaos/Fail": 0.5, "Action + Reaction": 0.85, "Rage": 0.8}
+DROP_TYPES = {"Action/Explosion", "Clutch/Skill", "Fail", "Rage/Reaction", "Chaos/Fail", "Action + Reaction", "Rage"}
 
 
 def music_allowed(program: dict | None, settings: dict, clip_override: bool | None = None) -> tuple[bool, str]:

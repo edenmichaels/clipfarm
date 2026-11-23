@@ -2,7 +2,7 @@
 // views), your own SFX / B-roll folders, and the automatic effects auto-pilot adds.
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { api, PLATFORM_LABEL } from "../api";
+import { api, PLATFORM_LABEL, waitForJob } from "../api";
 
 const BLANK = { caption_template: null, logo_path: null, logo_pos: "tr", logo_opacity: 0.85, logo_size: 150, intro_text: "",
   outro_text: "", card_bg: "111111", card_fg: "FFFFFF", progress_bar: true, progress_color: "FFE500", credit_pos: null };
@@ -163,5 +163,74 @@ export function LibrarySettings() {
         {msg && <span className="muted">{msg}</span>}
       </section>
     </>
+  );
+}
+
+/** The viral moment model: what it learned from real viral clips, how accurate it is, and when it last trained. */
+export function ViralModelSettings() {
+  const [d, setD] = useState<any>(null);
+  const [msg, setMsg] = useState("");
+  const load = () => api.get("/viral/status").then(setD).catch((e) => setMsg(e.message));
+  useEffect(() => { load(); }, []);
+  if (!d) return <p className="muted">{msg || "Loading…"}</p>;
+  const act = (p: Promise<any>, ok: string) => p.then((r) => { setD(r); setMsg(ok); }).catch((e) => setMsg(e.message));
+  return (
+    <section className="card stack tight">
+      <h2>Viral moment model</h2>
+      <span className="muted small-text">Learns what goes viral from this week's most-viewed Twitch clips of each game
+        (only streamers you're allowed to clip), your own posts' views, and your 👍/👎. Refreshes once a day. Never
+        downloads anything from TikTok or Instagram.</span>
+      <label className="row" style={{ gap: 8 }}><input type="checkbox" checked={d.settings.viral_dataset}
+        onChange={(e) => api.put("/settings", { highlights: { viral_dataset: e.target.checked } }).then(load)} />
+        Collect viral examples automatically (daily)</label>
+      <label className="field">Only keep moments scoring at least {d.settings.viral_threshold}/100
+        <input type="range" min={10} max={80} step={5} value={d.settings.viral_threshold}
+          onChange={(e) => api.put("/settings", { highlights: { viral_threshold: +e.target.value } }).then(load)} /></label>
+      <table className="small-text"><thead><tr><th>Game</th><th>Viral clips</th><th>Not viral</th><th>Yours</th><th>Updated</th></tr></thead>
+        <tbody>{d.dataset.map((r: any) => (
+          <tr key={String(r.game_id)}><td>{r.game || "Any game"}</td><td>{r.positives}</td><td>{r.negatives}</td><td>{r.yours}</td><td>{(r.updated || "").slice(0, 10)}</td></tr>))}
+          {!d.dataset.length && <tr><td colSpan={5} className="muted">No examples yet: they arrive after the first daily refresh (needs Twitch connected and a permitted streamer).</td></tr>}</tbody></table>
+      {d.models.length === 0 ? <span className="muted small-text">Using the built-in starting model (trained on research about what goes viral). It switches to a learned model per game after {d.min_examples} examples.</span> :
+        d.models.map((m: any) => (
+          <div key={m.game_id} className="row between">
+            <span><b>{m.game}</b> <span className="muted small-text">last trained {m.trained_at} · {m.positives} viral / {m.negatives} not</span>
+              {m.metrics?.auc != null && <span className="small-text"> · accuracy (AUC) <b>{(m.metrics.auc * 100).toFixed(0)}%</b> vs {(m.metrics.default_auc * 100).toFixed(0)}% for the starting model · top-10 precision {(m.metrics.precision_at_10 * 100).toFixed(0)}%</span>}</span>
+            <button className="btn-quiet" onClick={() => act(api.post("/viral/reset", { game_id: m.game_id }), "Reset to the starting model")}>Reset to default</button>
+          </div>))}
+      {Object.entries(d.trends || {}).filter(([, t]: any) => Object.keys(t).length).map(([g, t]: any) => (
+        <span key={g} className="small-text">Trending this week in <b>{g}</b>: {Object.keys(t).join(", ").replace(/_/g, " ")}</span>))}
+      <div className="row" style={{ gap: 8 }}>
+        <button onClick={() => act(api.post("/viral/refresh"), "Refreshing in the background…")}>Refresh examples now</button>
+        <button onClick={() => act(api.post("/viral/retrain"), "Retrained")}>Retrain now</button>
+        <button className="btn-quiet" onClick={() => act(api.post("/viral/reset", {}), "Reset to the starting model")}>Reset all to default</button>
+        {msg && <span className="muted">{msg}</span>}
+      </div>
+      <ViralReport />
+    </section>
+  );
+}
+
+
+/** Detection report on a real VOD: community clips found before/after, and 20 picks with reasons + tags. */
+function ViralReport() {
+  const [r, setR] = useState<any>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const load = () => api.get("/viral/report").then(setR).catch(() => {});
+  useEffect(() => { load(); }, []);
+  const make = async () => {
+    setBusy(true); setMsg("Working… this downloads the VOD's audio and checks the best parts (can take 10–30 minutes).");
+    try { const { job_id } = await api.post("/viral/report", {}); await waitForJob(job_id); await load(); setMsg(""); }
+    catch (e: any) { setMsg(e.message); } finally { setBusy(false); }
+  };
+  return (
+    <div className="stack tight">
+      <div className="row" style={{ gap: 8 }}>
+        <button onClick={make} disabled={busy} title="Runs the detector on the newest VOD of a streamer you're allowed to clip and checks it against that VOD's most-viewed community clips">Make detection report on a real VOD</button>
+        {r?.report && <span className="small-text">Last report {r.made}: found <b>{r.found_after}/{r.top}</b> of the VOD's top community clips (before: {r.found_before}/{r.top})</span>}
+      </div>
+      {msg && <span className="muted small-text">{msg}</span>}
+      {r?.report && <details><summary>Show the report</summary><pre className="report-pre">{r.report}</pre></details>}
+    </div>
   );
 }

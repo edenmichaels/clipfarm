@@ -15,10 +15,12 @@ import re
 from .. import db
 from ..edit import timeline as T
 
-DEFAULT_WEIGHTS = {"hook": 0.25, "pacing": 0.20, "retention": 0.20, "relevance": 0.10, "quality": 0.10, "moment": 0.15}
+# v0.8: "moment" is now the viral model's evidence-based score (what actually goes viral), so it counts most.
+DEFAULT_WEIGHTS = {"hook": 0.20, "pacing": 0.15, "retention": 0.15, "relevance": 0.10, "quality": 0.10, "moment": 0.30}
 STRONG_HOOK = re.compile(r"\b(no way|wait|bro|what|insane|never|how|why|watch|craziest|caught|actually|literally)\b|[!?]",
                          re.I)
 TYPE_STRENGTH = {"Funny": 1.0, "Action/Explosion": 1.0, "Rage/Reaction": 0.9, "Clutch/Skill": 0.95, "Fail": 0.9,
+                 "Chaos/Fail": 1.0, "Action + Reaction": 1.0, "Rage": 0.9,
                  "Wholesome": 0.7}
 BEST_LEN = {"tiktok": (15, 40), "shorts": (15, 45), "reels": (12, 35), "x": (10, 45), "srt": (15, 40)}
 

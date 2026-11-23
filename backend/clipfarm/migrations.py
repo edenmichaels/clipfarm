@@ -327,8 +327,28 @@ def _v9(conn: sqlite3.Connection) -> None:
     _add(conn, "sources", "failed_at", "TEXT")
 
 
+# ---- v10: viral moment model (examples from top Twitch clips etc., per-game models, moment tags) ---------
+def _v10(conn: sqlite3.Connection) -> None:
+    _script(conn, """
+    CREATE TABLE IF NOT EXISTS viral_examples(
+        id INTEGER PRIMARY KEY, game_id INTEGER, streamer_id INTEGER,
+        source_kind TEXT NOT NULL,           -- twitch_clip | negative | mundane | my_post | feedback | style_ref | youtube_short
+        platform_id TEXT, vod_id TEXT, vod_offset REAL, duration REAL, views INTEGER,
+        label REAL NOT NULL, weight REAL NOT NULL DEFAULT 1.0,
+        features TEXT, tags TEXT, title TEXT, day TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(source_kind, platform_id, vod_offset));
+    CREATE INDEX IF NOT EXISTS viral_examples_game ON viral_examples(game_id, day);
+    CREATE TABLE IF NOT EXISTS viral_models(
+        game_id INTEGER PRIMARY KEY, data TEXT NOT NULL, trained_at TEXT);
+    """)
+    for col, decl in (("viral_score", "INTEGER"), ("tags", "TEXT"), ("tag_timeline", "TEXT"), ("features", "TEXT"),
+                      ("contributions", "TEXT")):
+        _add(conn, "moments", col, decl)
+
+
 MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [(2, _v2), (3, _v3), (4, _v4), (5, _v5), (6, _v6),
-                                                                      (7, _v7), (8, _v8), (9, _v9)]
+                                                                      (7, _v7), (8, _v8), (9, _v9), (10, _v10)]
 LATEST = MIGRATIONS[-1][0]
 
 

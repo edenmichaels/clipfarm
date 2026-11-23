@@ -539,6 +539,45 @@ def test_v071_engine_and_source_routes(client, tmp_path, monkeypatch):
         eng.PAUSED.clear()
 
 
+def test_v08_viral_routes_and_tag_filter(client, tmp_path):
+    from clipfarm.highlights import features, viral_data
+    st = call(client, "GET", "/viral/status")
+    assert st["models"] == [] and st["settings"]["viral_threshold"] == 35
+    # settings groups are merged, not replaced
+    call(client, "PUT", "/settings", json={"highlights": {"focus": "funny", "visual": False}})
+    call(client, "PUT", "/settings", json={"highlights": {"viral_threshold": 50}})
+    h = call(client, "GET", "/settings")["highlights"]
+    assert h["focus"] == "funny" and h["visual"] is False and h["viral_threshold"] == 50
+    gid = db.ex("INSERT INTO games(name, twitch_id) VALUES ('Grand Theft Auto VI','1')")
+    import random
+    r = random.Random(1)
+    for i in range(60):
+        f = {k: r.random() * 0.3 for k in features.FEATURES}
+        viral = i % 2 == 0
+        if viral:
+            f["laugh"] = 0.9
+        viral_data.add_example(game_id=gid, streamer_id=None, kind="twitch_clip" if viral else "negative",
+                               platform_id=f"x{i}", label=1.0 if viral else 0.0, features=f, day=f"2026-11-{10 + i % 3}",
+                               vod_offset=float(i))
+    res = call(client, "POST", "/viral/retrain")
+    assert any(m["game_id"] == gid for m in res["models"]) and res["dataset"][0]["total"] == 60
+    assert call(client, "POST", "/viral/reset", json={"game_id": gid})["models"] == [m for m in res["models"] if m["game_id"] != gid]
+    assert call(client, "POST", "/viral/refresh")["jobs"]
+    assert call(client, "GET", "/viral/report")["report"] is None
+    assert call(client, "POST", "/viral/report", json={})["job_id"]
+    # filter clips by what happened + how they reacted
+    _, prog, cid, _ = _linked_clip(tmp_path)
+    sid = db.q1("SELECT streamer_id FROM clips WHERE id=?", (cid,))["streamer_id"]
+    src = db.ex("INSERT INTO sources(streamer_id, kind, platform_id, url) VALUES (?, 'vod', 'v88', 'u')", (sid,))
+    mid = db.ex("""INSERT INTO moments(source_id, start_sec, end_sec, score, signals, tags, features, viral_score)
+                   VALUES (?, 0, 20, 0.8, '{}', '["explosion","police"]', '{"laugh": 0.9}', 88)""", (src,))
+    db.ex("UPDATE clips SET moment_id=?, source_path=? WHERE id=?", (mid, str(tmp_path / "s.mp4"), cid))
+    assert [c["id"] for c in call(client, "GET", "/editor/clips?tag=explosion&reaction=laugh")] == [cid]
+    assert call(client, "GET", "/editor/clips?tag=explosion")[0]["moment_tags"] == ["explosion", "police"]
+    assert call(client, "GET", "/editor/clips?tag=boat") == []
+    assert call(client, "GET", "/editor/clips?tag=explosion&reaction=scream") == []
+
+
 def test_every_route_is_covered():
     from clipfarm import api
     routes = set()

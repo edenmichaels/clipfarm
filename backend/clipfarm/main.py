@@ -146,6 +146,7 @@ def _startup_jobs() -> None:
     once("health_check", delay=3, priority=1)
     once("post_due", delay=60, priority=3)
     once("metrics", delay=600, priority=8)
+    once("viral_refresh", delay=1800, priority=9)
     if (db.get_setting("autopilot") or {}).get("enabled"):
         once("autopilot_tick", delay=20, priority=1)
 

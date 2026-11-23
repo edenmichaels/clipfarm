@@ -1,5 +1,67 @@
 # ClipFarm changelog
 
+## 0.8.1 (step 2): viral moment detection that learns from what actually goes viral
+
+### How moments are picked now
+- Every candidate moment gets a **viral score (0–100)** from a new model. The streamer's reaction counts most,
+  then chat, then what happened in the game and how it lands together:
+  - **Reaction:** laughing, screaming, disbelief ("no way", "bro", "what"), a sudden jump in the streamer's voice,
+    and big facecam movement.
+  - **Chat:** busier than that channel's normal, laughing or hype emotes, "clip it".
+  - **What happened:** event tags per second, combining sounds, visuals, what's said and (optionally) a local
+    vision model in Ollama. The tags are crash, explosion, gunfire, police/wanted/arrest, death/wasted,
+    stunt/flip, fall/ragdoll, NPC fight, vehicle steal, plane/heli, boat, chase, fail/glitch, easter egg/animal,
+    and money/heist.
+  - **Surprise:** something unexpected followed within ~3 s by a reaction.
+  - **Talk:** the AI rates it funny/chaotic/shocking; serious or sad talk counts against it.
+  - **Context:** community clips nearby, and this week's trending events for the game.
+- Combinations count extra. **An explosion with the streamer laughing scores far higher than an explosion on its
+  own.**
+- **Never picked:** menus, loading/BRB screens, cutscenes or calm talk with no reaction, sad/serious talk, long
+  calm driving, and music on its own. Loud game audio or music alone never counts.
+- Each moment gets a type (Funny, Chaos/Fail, Action + Reaction, Rage, Clutch/Skill or Wholesome) and a
+  plain-English reason, e.g. *"Explosion at 0:06, streamer screams and laughs, chat 6× normal, matches this
+  week's trending 'police'"*.
+- Clips start 1–3 s before the setup (the thing that happens), keep the full reaction, and end once it peaks.
+  If there was a long setup (an RP conversation, a heist plan), **Make variants** offers a "with setup" version.
+- The viral score now carries the most weight in the clip's virality score, so projected earnings and the
+  posting order use it too.
+
+### Learning from real viral clips
+- Every day ClipFarm collects each game's **most-viewed Twitch clips of the week**, using the official Twitch API
+  and **only for streamers you're allowed to clip**:
+  - It reads the matching part of the VOD (low-res) and stores its features and views as a "viral" example.
+  - Random and mundane windows from the same VODs are stored as "not viral" examples.
+- It also learns from your posts' real views vs the prediction, your 👍/👎, and what you keep, export and delete.
+  YouTube Shorts titles of channels you're allowed to clip count towards trending events (official API; nothing
+  is downloaded).
+- **Never downloads or scrapes TikTok or Instagram.**
+- The model retrains automatically. Each game gets its own model once it has 40+ examples; before that, the
+  research-based starting model is used.
+- **Settings › Highlights › Viral moment model** shows:
+  - examples per game;
+  - accuracy on a held-out day, compared with the starting model;
+  - when it last trained;
+  - this week's trending events;
+  - buttons to Refresh, Retrain and **Reset to default**.
+- **Make detection report on a real VOD:** runs the detector on the newest VOD of a streamer you're allowed to
+  clip. It shows how many of that VOD's top community clips the old and new rankings find, plus the 20 picked
+  moments with their reasons and event tags.
+
+### In the Editor
+- Filter clips by what happened and how people reacted, e.g. *Explosion …with the streamer laughing*.
+- Event tags show on clip cards and as ▼ markers on the timeline.
+- **Why this moment?** shows each feature's contribution to the viral score.
+
+### Fixed
+- Saving one setting in a group (e.g. one highlight option) no longer wipes the group's other options.
+- Learning examples without a VOD time could be stored twice.
+
+### Database
+- Migration v10 (additive):
+  - new tables `viral_examples` and `viral_models`;
+  - moments gain `viral_score`, `tags`, `tag_timeline`, `features` and `contributions`.
+
 ## 0.8.0 (step 1 of the editor rebuild): red box, moving captions, wrong moments
 
 ### Fixed

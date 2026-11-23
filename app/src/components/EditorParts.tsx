@@ -140,6 +140,7 @@ export function Timeline({ v, t, seek, splits, sel, setSel, onEdl, onRange }: {
     .filter((k: any) => k.out != null);
   const zooms = (e.zooms || []).map((z: any, i: number) => ({ i, out: toOut(kept, z.t), kind: z.kind })).filter((z: any) => z.out != null);
   const sfx = (e.sfx || []).map((x: any, i: number) => ({ i, out: toOut(kept, x.t), name: x.id })).filter((x: any) => x.out != null);
+  const evtags = (e.moment?.tags || []).map((x: any, i: number) => ({ i, out: toOut(kept, x.t), tag: x.tag })).filter((x: any) => x.out != null);
   const broll = (e.broll || []).map((x: any, i: number) => ({ i, out: toOut(kept, x.t), dur: x.dur || 2 })).filter((x: any) => x.out != null);
   const m = e.music || {};
   const musicOn = m.enabled && m.path && !e.rules?.no_music;
@@ -181,6 +182,9 @@ export function Timeline({ v, t, seek, splits, sel, setSel, onEdl, onRange }: {
           {kfs.map((k: any) => (
             <div key={`k${k.i}`} className="kf layout" style={{ left: xOf(drag?.kind === "kf" && drag.i === k.i ? drag.out : k.out) }}
               title={`Layout: ${k.layout} (drag to move)`} onMouseDown={k.i === 0 ? undefined : start("kf", { i: k.i })}>◆</div>
+          ))}
+          {evtags.map((x: any) => (
+            <div key={`t${x.i}`} className="kf evtag" style={{ left: xOf(x.out) }} title={`What happened: ${x.tag.replace("_", " ")}`}>▼</div>
           ))}
           {zooms.map((z: any) => (
             <div key={`z${z.i}`} className="kf zoom" style={{ left: xOf(drag?.kind === "zoom" && drag.i === z.i ? drag.out : z.out) }}

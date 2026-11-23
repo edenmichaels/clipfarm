@@ -242,7 +242,7 @@ def test_moment_types_and_focus():
     n = 600
     comp, parts = detect.components(detect.Signals(n, events=ev, loudness=loud, visual=vis))
     assert detect.classify(parts, 98, 110) == "Funny"
-    assert detect.classify(parts, 248, 258) == "Action/Explosion"
+    assert detect.classify(parts, 248, 258) == "Action + Reaction"
     cf, _ = detect.components(detect.Signals(n, events=ev, loudness=loud, visual=vis), "funny")
     ca, _ = detect.components(detect.Signals(n, events=ev, loudness=loud, visual=vis), "action")
     assert cf["audio_events"][100:108].max() > ca["audio_events"][100:108].max()

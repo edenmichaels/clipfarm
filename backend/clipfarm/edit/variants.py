@@ -34,6 +34,13 @@ def _long(e: dict) -> dict:
     return tr.set_range(e, max(lo, a - 5.0), b)
 
 
+def _with_setup(e: dict) -> dict:
+    """Include the long setup (RP conversation, heist plan) before the moment."""
+    a, b = e["range"]
+    st = max(e["source"].get("start", 0.0), float(e["moment"]["setup_start"]))
+    return tr.set_range(e, min(a, st), b) if b - st <= 170 else e
+
+
 def _relayout(e: dict) -> dict:
     kfs = e["layout"].get("keyframes") or []
     if not kfs:
@@ -55,7 +62,8 @@ def plan(edl: dict, n: int = 2) -> list[tuple[str, dict, str]]:
     out = []
     recipes = [("shorter, different hook", lambda e: _tight(e), 0),
                ("different layout, different hook", lambda e: _relayout(e), 1),
-               ("longer build-up", lambda e: _long(e), 2)]
+               ("with setup", lambda e: _with_setup(e), 2) if edl["moment"].get("setup_start") is not None
+               else ("longer build-up", lambda e: _long(e), 2)]
     for i, (what, fn, hi) in enumerate(recipes[:max(1, min(3, n))]):
         e = fn(copy.deepcopy(edl))
         if hooks:

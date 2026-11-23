@@ -81,6 +81,9 @@ TYPE_HOOKS = {
     "Rage/Reaction": ["He was NOT ready for this", "His reaction says it all", "This made {streamer} lose it"],
     "Clutch/Skill": ["The cleanest play you'll see today", "How did he pull this off?", "1 in a million clutch"],
     "Fail": ["This went horribly wrong", "He really thought this would work", "Instant regret"],
+    "Chaos/Fail": ["This went horribly wrong", "He really thought this would work", "Pure chaos"],
+    "Action + Reaction": ["His reaction to this 😭", "Nobody expected this", "Watch his face"],
+    "Rage": ["He was NOT ready for this", "This made {streamer} lose it", "Instant rage"],
     "Wholesome": ["This made our day", "{streamer} is too wholesome", "Chat loved this moment"],
 }
 PLATFORM_TAGS = {"youtube_shorts": ["shorts"], "tiktok": ["fyp"], "instagram_reels": ["reels"], "x": []}

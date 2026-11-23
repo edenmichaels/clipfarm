@@ -1,106 +1,150 @@
-"""Top-10 precision of highlight picks, before (v0.3 loudness + chat) vs after (v0.4), on the labelled set.
+"""Highlight evaluation: top-10 precision and recall, before vs after, on the labelled set.
 
-Usage: python scripts/eval_highlights.py <eval dir from build_eval_set.py> <report.md>
-A pick is correct if its peak falls inside a labelled funny/action/reaction moment (+-2 s) or its window
-overlaps one by 8 s or more. Each labelled moment counts once (a second pick of it isn't a new hit).
-The LLM rating isn't used (no model in CI), so v0.4 runs on sound events, chat, visuals only.
+Usage:
+  python scripts/eval_highlights.py <eval dir> <report.md> [--before-backend <path to v0.7.1 backend>]
+  python scripts/eval_highlights.py --picks <eval dir> <backend dir> <out.json> <ranking: score|viral>
+
+Detectors compared on the same VODs:
+- v0.3: loudness + chat rate (scorer.py, still in the tree)
+- v0.7.1: the previous detector, run from its own checkout (CI: git worktree of e8aada9), ranked by its score
+- v0.8: this build, ranked by the viral model score
+A pick is correct if its peak falls inside a labelled funny/action/reaction moment (+-2 s) or its window overlaps
+one by 8 s or more; each labelled moment counts once. "Traps" are the mundane/sad segments that must never be
+picked: sad talk, calm driving, cutscenes, menus, loading, BRB, calm talking.
+The LLM rating isn't used (no model in CI).
 """
 import json
+import subprocess
 import sys
 from pathlib import Path
 
+TRAPS = {"sad", "driving", "cutscene", "menu", "loading", "brb", "talk"}
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
-from clipfarm.highlights import audio_events, run, scorer, signals, visual  # noqa: E402
 
+def picks_mode(d: Path, backend: Path, out: Path, ranking: str) -> None:
+    sys.path.insert(0, str(backend))
+    from clipfarm.highlights import run, visual
+    res = []
+    for i in (1, 2, 3):
+        vod = d / f"vod{i}.mp4"
+        lines = (d / f"chat{i}.jsonl").read_text().splitlines()
+        msgs = [(m["t"], m["m"]) for m in map(json.loads, lines)] if lines else []
+        vis = visual.analyse(vod)
+        kw = {"viral_threshold": 0} if ranking == "viral" else {}
+        ms, _ = run.detect_source(vod, chat=msgs, budget=12, min_len=15, max_len=60, threshold=0.0,
+                                  visual_fn=lambda a, b, v=vis: {k: x[int(a):int(b)] for k, x in v.items()}, **kw)
+        for m in ms:
+            res.append({"vod": f"vod{i}", "start": m.start, "end": m.end, "peak": m.peak,
+                        "score": float(getattr(m, "viral", None) if ranking == "viral" and getattr(m, "viral", None)
+                                       is not None else m.score),
+                        "type": m.type, "reason": m.reason, "tags": [t["tag"] for t in getattr(m, "tags", [])]})
+    out.write_text(json.dumps(res, default=float))
+
+
+if sys.argv[1] == "--picks":
+    picks_mode(Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4]), sys.argv[5])
+    sys.exit(0)
+
+ROOT = Path(__file__).resolve().parents[1]
 d, report = Path(sys.argv[1]), Path(sys.argv[2])
+before_backend = Path(sys.argv[sys.argv.index("--before-backend") + 1]) if "--before-backend" in sys.argv else None
 labels = json.loads((d / "labels.json").read_text())
+n_pos = sum(len(v) for k, v in labels.items() if not k.endswith("_plan"))
 
 
-def chat(i):
-    return [(m["t"], m["m"]) for m in map(json.loads, (d / f"chat{i}.jsonl").read_text().splitlines() if
-                                          (d / f"chat{i}.jsonl").read_text().strip() else [])]
+def segment(vod: str, t: float) -> tuple[str, str]:
+    acc = 0.0
+    for k, dur, lab in labels[vod + "_plan"]:
+        if acc <= t < acc + dur:
+            return k, lab
+        acc += dur
+    return "?", "?"
 
 
 def hit(m, labs):
-    for j, l in enumerate(labs):
-        overlap = min(m["end"], l["end"]) - max(m["start"], l["start"])
-        if l["start"] - 2 <= m["peak"] <= l["end"] + 2 or overlap >= 8:
+    for j, lab in enumerate(labs):
+        overlap = min(m["end"], lab["end"]) - max(m["start"], lab["start"])
+        if lab["start"] - 2 <= m["peak"] <= lab["end"] + 2 or overlap >= 8:
             return j
     return None
 
 
-def score(picks):
+def evaluate(picks):
+    top = sorted(picks, key=lambda r: -r["score"])[:10]
     used, rows = set(), []
-    for p in picks:
-        j = hit(p, labels[p["vod"]])
+    for p in top:
+        j = hit(p, labels.get(p["vod"], []))
         ok = j is not None and (p["vod"], j) not in used
         if ok:
             used.add((p["vod"], j))
-        rows.append({**p, "correct": ok, "label": labels[p["vod"]][j]["type"] if j is not None else None})
-    return sum(r["correct"] for r in rows) / max(1, len(rows)), rows
+        kind, lab = segment(p["vod"], (p["start"] + p["end"]) / 2)
+        rows.append({**p, "correct": ok, "label": labels[p["vod"]][j]["type"] if j is not None else None,
+                     "segment": kind, "trap": kind in TRAPS and not ok})
+    prec = sum(r["correct"] for r in rows) / max(1, len(rows))
+    return {"precision": prec, "recall": len(used) / max(1, n_pos), "traps": [r for r in rows if r["trap"]],
+            "rows": rows}
 
 
-before, after = [], []
+# v0.3
+sys.path.insert(0, str(ROOT / "backend"))
+from clipfarm.highlights import audio_events, scorer, signals  # noqa: E402
+
+v03 = []
 for i in (1, 2, 3):
     vod = d / f"vod{i}.mp4"
-    msgs = chat(i)
-    # --- before: v0.3 detector (loudness + chat rate + emote bursts)
+    lines = (d / f"chat{i}.jsonl").read_text().splitlines()
+    msgs = [(m["t"], m["m"]) for m in map(json.loads, lines)] if lines else []
     audio = signals.audio_rms(vod)
     rate, burst = signals.chat_series(msgs, len(audio))
     curve, normed = scorer.composite({"audio": audio, "chat": rate, "emote": burst})
     for m in scorer.pick_moments(curve, normed, min_len=15, max_len=60, threshold=0.0, top_n_per_hour=60, min_gap=30):
-        before.append({"vod": f"vod{i}", "start": m.start, "end": m.end, "peak": m.peak, "score": m.score})
-    # --- after: v0.4 detector
-    vis = visual.analyse(vod)
-    ms, _ = run.detect_source(vod, chat=msgs, budget=10, min_len=15, max_len=60, threshold=0.0,
-                              visual_fn=lambda a, b, v=vis: {k: x[int(a):int(b)] for k, x in v.items()})
-    for m in ms:
-        after.append({"vod": f"vod{i}", "start": m.start, "end": m.end, "peak": m.peak, "score": m.score,
-                      "type": m.type, "reason": m.reason})
+        v03.append({"vod": f"vod{i}", "start": m.start, "end": m.end, "peak": m.peak, "score": m.score, "type": "",
+                    "reason": "", "tags": []})
 
-top_b = sorted(before, key=lambda r: -r["score"])[:10]
-top_a = sorted(after, key=lambda r: -r["score"])[:10]
-pb, rb = score(top_b)
-pa, ra = score(top_a)
-typed = [r for r in ra if r["correct"]]
+
+def run_picks(backend: Path, ranking: str, name: str):
+    out = report.parent / f"_picks_{name}.json"
+    subprocess.run([sys.executable, __file__, "--picks", str(d), str(backend), str(out), ranking], check=True)
+    return json.loads(out.read_text())
+
+
+results = {"v0.3": evaluate(v03)}
+if before_backend:
+    results["v0.7.1"] = evaluate(run_picks(before_backend, "score", "v071"))
+results["v0.8"] = evaluate(run_picks(ROOT / "backend", "viral", "v08"))
+before_key = "v0.7.1" if "v0.7.1" in results else "v0.3"
+a = results["v0.8"]
+typed = [r for r in a["rows"] if r["correct"]]
 type_acc = sum(r["type"] == r["label"] for r in typed) / max(1, len(typed))
-n_pos = sum(len(v) for k, v in labels.items() if not k.endswith("_plan"))
+
 lines = [
     "# Highlight detection: evaluation report", "",
-    f"Labelled set: 3 synthetic VODs (~8 min each), {n_pos} labelled funny/action/reaction moments. Real CC0 "
-    "recordings for laughter, explosions, gunfire, cheering and screaming (see SOURCES.md); speech from "
-    "espeak-ng; video and chat generated.", "",
-    "Traps (the mundane moments that fooled loudness-based picking): menu/inventory screens with loud music; "
-    "loading and BRB screens; calm talking; the streamer shouting at chat with chat spamming caps; loud "
-    "intermission music with chat vibing to it (catJAM, 🔥); and sub trains with loud thank-yous and a flood "
-    "of PogChamp / W / gifted-sub messages. Positive moments get realistic chat (about 2 messages a second).", "",
-    f"Sound-event model: {'YAMNet (ONNX)' if audio_events.available() else 'NOT AVAILABLE'}. LLM rating: not used.", "",
-    "| | Top-10 precision |", "|---|---|",
-    f"| Before (v0.3: loudness + chat rate) | **{pb:.0%}** |", f"| After (v0.4) | **{pa:.0%}** |", "",
-    f"Moment type correct on the v0.4 hits: {type_acc:.0%}", "",
-    "## Before: top 10", "", "| VOD | Window | Score | Correct | What it was |", "|---|---|---|---|---|"]
-
-
-def what(r):
-    if r["label"]:
-        return r["label"]
-    plan = labels[r["vod"] + "_plan"]
-    t = 0
-    for k, dur, lab in plan:
-        if t <= r["peak"] < t + dur:
-            return f"{k} ({lab})"
-        t += dur
-    return "?"
-
-
-for r in rb:
-    lines.append(f"| {r['vod']} | {r['start']:.0f}-{r['end']:.0f}s | {r['score']:.2f} | {'yes' if r['correct'] else 'no'} | {what(r)} |")
-lines += ["", "## After: top 10", "", "| VOD | Window | Score | Type | Correct | What it was |", "|---|---|---|---|---|---|"]
-for r in ra:
-    lines.append(f"| {r['vod']} | {r['start']:.0f}-{r['end']:.0f}s | {r['score']:.2f} | {r['type']} | "
-                 f"{'yes' if r['correct'] else 'no'} | {what(r)} |")
+    f"Labelled set: 3 synthetic VODs (~9 min each), {n_pos} labelled moments (funny, action **with a streamer "
+    "reaction**, reactions). Real CC0 recordings for laughter, explosions, gunfire, cheering and screaming (see "
+    "SOURCES.md); speech from espeak-ng; video, engine noise and chat generated.", "",
+    "Traps that must never be picked: **sad talk with chat sending F / o7 / Sadge**, **calm driving**, "
+    "**story cutscenes** (two voices + music, no reaction), menus, loading/BRB screens, calm talking. Also hard: "
+    "the streamer shouting at chat, loud music with chat vibing, sub trains, and **explosions nobody reacts to** "
+    "(not labelled as hits: spectacle goes viral mainly with a reaction).", "",
+    f"Sound-event model: {'YAMNet (ONNX)' if audio_events.available() else 'NOT AVAILABLE'}. LLM rating: not used "
+    "(no model in CI). Viral model: the default (starting) weights; no real-data training in CI.", "",
+    "| Detector | Top-10 precision | Moments found in top 10 (recall) | Traps in top 10 |", "|---|---|---|---|"]
+for k, r in results.items():
+    lines.append(f"| {k} | **{r['precision']:.0%}** | {r['recall']:.0%} | {len(r['traps'])} |")
+lines += ["", f"Moment type correct on the v0.8 hits: {type_acc:.0%}", ""]
+for k, r in results.items():
+    lines += [f"## {k}: top 10", "", "| VOD | Window | Score | Type | Correct | What it was | Reason |",
+              "|---|---|---|---|---|---|---|"]
+    for row in r["rows"]:
+        lines.append(f"| {row['vod']} | {row['start']:.0f}-{row['end']:.0f}s | {row['score']:.2f} | {row['type']} | "
+                     f"{'yes' if row['correct'] else 'no'} | {row['label'] or row['segment']} | "
+                     f"{(row.get('reason') or '').replace('|', '/')[:110]} |")
+    lines.append("")
 report.write_text("\n".join(lines) + "\n")
-(report.with_suffix(".json")).write_text(json.dumps({"before": pb, "after": pa, "type_accuracy": type_acc,
-                                                     "before_rows": rb, "after_rows": ra}, indent=1, default=float))
-print("\n".join(lines[:16]))
+report.with_suffix(".json").write_text(json.dumps({
+    "before": results[before_key]["precision"], "before_name": before_key, "after": a["precision"],
+    "before_recall": results[before_key]["recall"], "after_recall": a["recall"],
+    "after_traps": [{"vod": t["vod"], "segment": t["segment"], "start": t["start"]} for t in a["traps"]],
+    "v03": results["v0.3"]["precision"], "type_accuracy": type_acc,
+    "rows": {k: r["rows"] for k, r in results.items()}}, indent=1, default=float))
+print("\n".join(lines[:14]))

@@ -20,6 +20,9 @@ PLAN = {   # moment type: (zoom amount at payoff, flash, shake, emoji, sfx at pa
     "Rage/Reaction": (1.2, False, True, "😱", "impact", None),
     "Clutch/Skill": (1.18, True, False, "🏆", "ding", "riser"),
     "Fail": (1.12, False, False, "💀", "bonk", None),
+    "Chaos/Fail": (1.14, False, True, "💀", "bonk", None),
+    "Action + Reaction": (1.24, True, True, "💥", "boom", "whoosh"),
+    "Rage": (1.2, False, True, "😱", "impact", None),
     "Wholesome": (1.08, False, False, "❤️", "ding", None),
 }
 

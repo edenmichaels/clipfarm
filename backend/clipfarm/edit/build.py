@@ -53,7 +53,9 @@ def auto_edit(*, media: Path, start: float, end: float, words: list[dict], strea
     e["hook"]["text"] = hook
     peak = (e["range"][0] + payoff) if payoff is not None else None
     e["moment"] = {"type": moment.get("type") or "Funny", "reason": moment.get("reason"), "peak": peak,
-                   "score": moment.get("score")}
+                   "score": (moment["viral"] / 100) if moment.get("viral") is not None else moment.get("score"),
+                   "viral": moment.get("viral"), "tags": moment.get("tags") or [], "why": moment.get("why") or [],
+                   "setup_start": moment.get("setup_start")}
     # zooms: punch-in on the payoff
     if peak is not None and settings.get("zoom", True):
         e["zooms"] = [{"t": round(peak - 0.15, 3), "kind": "punch", "amount": 0.12, "dur": 1.0}]

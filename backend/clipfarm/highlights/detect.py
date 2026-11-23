@@ -24,7 +24,8 @@ from .signals import smooth, zscore
 
 DEFAULT_WEIGHTS = {"audio_events": 0.30, "chat": 0.25, "llm": 0.20, "visual": 0.15, "community": 0.10}
 PENALTY_WEIGHT = 0.45
-TYPES = ["Funny", "Action/Explosion", "Rage/Reaction", "Clutch/Skill", "Fail", "Wholesome"]
+TYPES = ["Funny", "Chaos/Fail", "Action + Reaction", "Rage", "Clutch/Skill", "Wholesome"]   # v0.8 names
+_OLD = {"Action/Explosion": "Action + Reaction", "Fail": "Chaos/Fail", "Rage/Reaction": "Rage"}
 FOCUS = {"balanced": (1.0, 1.0), "funny": (1.5, 0.7), "action": (0.7, 1.5)}   # (funny, action) multipliers
 CHAT_DELAY = 3          # chat reacts a few seconds after the moment
 
@@ -89,7 +90,8 @@ def components(s: Signals, focus: str = "balanced") -> tuple[dict[str, np.ndarra
         react = _rel(np.maximum(ev.get("scream", z), ev.get("cheer", z)))
         parts.update(laugh=laugh, action=action, scream=_rel(ev.get("scream", z)), cheer=_rel(ev.get("cheer", z)),
                      speech=ev.get("speech", z), music=ev.get("music", z), silence=ev.get("silence", z),
-                     driving=ev.get("driving", z), sad=ev.get("sad", z))
+                     driving=ev.get("driving", z), sad=ev.get("sad", z),
+                     **{f"ev_{k}": ev.get(k, z) for k in ("explosion", "gunshot", "crash", "siren", "vehicle")})
         a = np.clip(_maxr([fw * laugh * 1.15, aw * action, 0.9 * react], n), 0, 1)
         comp["audio_events"] = np.clip(smooth(a, 2) * loud_boost, 0, 1).astype(np.float32)
     if s.chat and s.chat.get("rate") is not None and s.chat["rate"].sum() > 0:
@@ -123,7 +125,10 @@ def components(s: Signals, focus: str = "balanced") -> tuple[dict[str, np.ndarra
             + 0.15 * np.clip(vi["shake"] / 2.5, 0, 1)
         comp["visual"] = np.clip(smooth(v, 2), 0, 1).astype(np.float32)
         parts.update(static=vi["static"], dark=vi["dark"], ui=vi["ui"], flash=vi["flash"], motion=vi["motion"],
+                     shake=vi.get("shake", np.zeros(n, np.float32)), cuts=vi.get("cuts", np.zeros(n, np.float32)),
                      visual_covered=covered.astype(np.float32))
+        if "face_motion" in vi:
+            parts["face_motion"] = vi["face_motion"]
     if s.clips:
         cc = np.zeros(n, np.float32)
         t = np.arange(n)
@@ -186,11 +191,15 @@ class Moment:
     type: str = "Funny"
     signals: dict = field(default_factory=dict)
     reason: str = ""
+    viral: int | None = None                  # viral model score 0-100
+    tags: list = field(default_factory=list)  # [{tag, t (s from start), strength}]
+    features: dict = field(default_factory=dict)
+    why: list = field(default_factory=list)   # "Why this moment?" rows
 
 
 def classify(parts: dict[str, np.ndarray], a: int, b: int, llm: dict | None = None) -> str:
-    if llm and llm.get("type") in TYPES:
-        return llm["type"]
+    if llm and _OLD.get(llm.get("type"), llm.get("type")) in TYPES:
+        return _OLD.get(llm["type"], llm["type"])
 
     def m(k):
         v = parts.get(k)
@@ -200,9 +209,9 @@ def classify(parts: dict[str, np.ndarray], a: int, b: int, llm: dict | None = No
     rage = m("scream") * (1 - min(1.0, m("laugh") * 2))
     clutch = m("cheer") + 0.6 * m("chat_hype")
     fail = 0.9 * m("chat_fail")
-    scores = {"Funny": funny, "Action/Explosion": action, "Rage/Reaction": rage, "Clutch/Skill": clutch, "Fail": fail}
+    scores = {"Funny": funny, "Action + Reaction": action, "Rage": rage, "Clutch/Skill": clutch, "Chaos/Fail": fail}
     best = max(scores, key=scores.get)
-    return best if scores[best] > 0.15 else "Wholesome" if m("speech") > 0.5 else "Action/Explosion"
+    return best if scores[best] > 0.15 else "Wholesome"
 
 
 def _quiet_point(loud: np.ndarray | None, t: int, radius: int = 1) -> int:
@@ -295,8 +304,9 @@ def rescore_with_llm(m: Moment, rating: dict | None, weights: dict[str, float] |
     m.score = round((1 - w) * m.score + w * llm, 3)
     if serious >= 6 and fun < 5:
         m.score = round(m.score * 0.5, 3)        # sad/serious talk is never a top pick
-    if rating.get("type") in TYPES:
-        m.type = rating["type"]
+    if _OLD.get(rating.get("type"), rating.get("type")) in TYPES:
+        m.type = _OLD.get(rating["type"], rating["type"])
     if rating.get("reason"):
         m.reason = f"{m.type}: {rating['reason']}"
+    m.signals["_llm"] = {k: rating.get(k) for k in ("funny", "chaos", "shock", "serious", "type")}
     return m

@@ -148,4 +148,5 @@ export async function waitForJob(id: number, onProgress?: (p: number) => void): 
 
 export const MOMENT_EMOJI: Record<string, string> = {
   "Funny": "😂", "Action/Explosion": "💥", "Rage/Reaction": "😱", "Clutch/Skill": "🏆", "Fail": "💀", "Wholesome": "🙂",
+  "Chaos/Fail": "💀", "Action + Reaction": "💥", "Rage": "😱",
 };

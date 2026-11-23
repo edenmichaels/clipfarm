@@ -13,7 +13,7 @@ import Programs from "./Programs";
 import Health from "./Health";
 import Logs from "./Logs";
 import { CaptionSettings, HighlightSettings, MusicSettings } from "../components/QualitySettings";
-import { BrandSettings, LearningSettings, LibrarySettings } from "../components/StudioSettings";
+import { BrandSettings, LearningSettings, LibrarySettings, ViralModelSettings } from "../components/StudioSettings";
 
 export const TABS = ["General", "Accounts", "Connections", "Campaigns", "Captions", "Highlights", "Music", "Brand", "Posting",
   "Rewards programs", "Backup", "Setup health", "Logs", "Rules"];
@@ -153,7 +153,7 @@ export default function Settings({ initialTab, go }: { initialTab?: string; go: 
       {tab === "Setup health" && <div className="embedded"><Health go={go} /></div>}
       {tab === "Logs" && <div className="embedded"><Logs /></div>}
       {tab === "Captions" && <CaptionSettings />}
-      {tab === "Highlights" && <div className="stack" style={{ maxWidth: 760 }}><HighlightSettings /><LearningSettings /></div>}
+      {tab === "Highlights" && <div className="stack" style={{ maxWidth: 760 }}><HighlightSettings /><ViralModelSettings /><LearningSettings /></div>}
       {tab === "Music" && <div className="stack" style={{ maxWidth: 760 }}><MusicSettings /><LibrarySettings /></div>}
       {tab === "Brand" && <BrandSettings />}
     </div>

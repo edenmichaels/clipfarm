@@ -77,7 +77,12 @@ def get_settings():
 
 @app.put("/settings", dependencies=A)
 def put_settings(body: dict):
+    """Save settings. A group (e.g. "highlights") is merged key by key, so saving one option never wipes the
+    group's other options. Send {"group": {"key": null}} to clear one key."""
     for k, v in body.items():
+        old = db.get_setting(k)
+        if isinstance(v, dict) and isinstance(old, dict):
+            v = {kk: vv for kk, vv in {**old, **v}.items() if vv is not None}
         db.set_setting(k, v)
     return db.all_settings()
 
@@ -958,7 +963,8 @@ def edit_canvas(cid: int):
 @app.get("/editor/clips", dependencies=A)
 def editor_clips(sort: str = "profit", min_score: int | None = None, program_id: int | None = None,
                  streamer_id: int | None = None, moment_type: str | None = None, status: str | None = None,
-                 project_id: int | None = None, limit: int = 300):
+                 project_id: int | None = None, tag: str | None = None, reaction: str | None = None,
+                 limit: int = 300):
     if sort not in EDITOR_SORT:
         raise HTTPException(400, "sort is profit, virality or newest")
     # only clips that can be opened in the Editor (older clips whose source was cleaned up stay in My Clips)
@@ -972,11 +978,17 @@ def editor_clips(sort: str = "profit", min_score: int | None = None, program_id:
     if min_score is not None:
         cond.append("c.virality >= ?")
         params.append(min_score)
+    if tag:                                     # e.g. "explosion": event tags from the viral model
+        cond.append("m.tags LIKE ?")
+        params.append(f'%"{tag}"%')
+    if reaction in ("laugh", "scream", "disbelief", "chat_laugh", "face"):   # "... with laughter"
+        cond.append(f"CAST(json_extract(m.features, '$.{reaction}') AS REAL) >= 0.45")
     rows = db.q(f"""SELECT c.id, c.title, c.file_path, c.thumb_path, c.virality, c.virality_reason, c.virality_parts,
         c.profit_low, c.profit_likely, c.profit_high, c.profit_platform, c.expected_views, c.rule_flags, c.review_status,
         c.streamer_id, c.program_id, c.project_id, c.duration_sec, c.variant_of, c.variant_label,
         s.display_name streamer, pr.name program,
         COALESCE(m.type, c.moment_type) moment_type, m.reason moment_reason, ep.status edit_status, ep.updated_at edited_at,
+        m.viral_score, m.tags moment_tags,
         EXISTS (SELECT 1 FROM posts p WHERE p.clip_id=c.id AND p.status='posted') posted
         FROM clips c LEFT JOIN streamers s ON s.id=c.streamer_id LEFT JOIN programs pr ON pr.id=c.program_id
         LEFT JOIN moments m ON m.id=c.moment_id LEFT JOIN edit_projects ep ON ep.clip_id=c.id
@@ -988,6 +1000,7 @@ def editor_clips(sort: str = "profit", min_score: int | None = None, program_id:
             continue
         flags = json.loads(r["rule_flags"] or "[]")
         out.append({**r, "status": st, "rule_flags": flags, "virality_parts": json.loads(r["virality_parts"] or "{}"),
+                    "moment_tags": json.loads(r["moment_tags"] or "[]"),
                     "rules_ok": not any(f.get("severity") == "error" for f in flags)})
     if sort == "profit":
         from .scoring import clipscore
@@ -1295,6 +1308,63 @@ def virality_weights_reset(body: dict):
     else:
         db.ex("DELETE FROM settings WHERE key LIKE 'virality_weights%'")
     return learning_stats()
+
+
+# ---- viral moment model --------------------------------------------------------------------------------
+@app.get("/viral/status", dependencies=A)
+def viral_status():
+    from .highlights import viral_data, viral_model
+    models = []
+    for r in db.q("SELECT game_id, data, trained_at FROM viral_models ORDER BY game_id"):
+        d = json.loads(r["data"])
+        g = db.q1("SELECT name FROM games WHERE id=?", (r["game_id"],)) if r["game_id"] else None
+        models.append({"game_id": r["game_id"], "game": g["name"] if g else "All games", "trained_at": d.get("trained_at"),
+                       "positives": d.get("n_pos"), "negatives": d.get("n_neg"), "metrics": d.get("metrics", {})})
+    games = db.q("SELECT DISTINCT g.id, g.name FROM games g JOIN projects p ON p.game_id=g.id")
+    return {"models": models, "dataset": viral_data.stats(), "min_examples": viral_model.MIN_EXAMPLES,
+            "trends": {g["name"]: viral_model.trend_tags(g["id"]) for g in games},
+            "settings": {"viral_dataset": (db.get_setting("highlights", {}) or {}).get("viral_dataset", True),
+                         "viral_threshold": (db.get_setting("highlights", {}) or {}).get("viral_threshold", 35)},
+            "jobs": db.q("""SELECT kind, status, COUNT(*) n FROM jobs WHERE kind LIKE 'viral_%'
+                            AND status IN ('queued','running') GROUP BY kind, status""")}
+
+
+@app.post("/viral/refresh", dependencies=A)
+def viral_refresh_now():
+    if not db.q1("SELECT 1 FROM jobs WHERE kind='viral_refresh' AND status IN ('queued','running') AND run_after <= datetime('now')"):
+        db.ex("DELETE FROM jobs WHERE kind='viral_refresh' AND status='queued'")
+        eng.enqueue("viral_refresh", {}, priority=5)
+    return viral_status()
+
+
+@app.post("/viral/report", dependencies=A)
+def viral_report_start(body: dict):
+    """Make the detection report on a real VOD (runs in the background; needs Twitch connected)."""
+    jid = eng.enqueue("viral_report", {"source_id": body.get("source_id"), "game": body.get("game")}, priority=4)
+    return {"job_id": jid}
+
+
+@app.get("/viral/report", dependencies=A)
+def viral_report_last():
+    r = db.get_setting("viral_report_last")
+    if not r or not Path(r["path"]).exists():
+        return {"report": None}
+    return {**r, "report": Path(r["path"]).read_text(encoding="utf-8")}
+
+
+@app.post("/viral/retrain", dependencies=A)
+def viral_retrain():
+    from .highlights import viral_model
+    res = [viral_model.train(None)] + [viral_model.train(g["game_id"]) for g in
+                                       db.q("SELECT DISTINCT game_id FROM viral_examples WHERE game_id IS NOT NULL")]
+    return {**viral_status(), "result": res}
+
+
+@app.post("/viral/reset", dependencies=A)
+def viral_reset(body: dict):
+    from .highlights import viral_model
+    viral_model.reset(body.get("game_id"))
+    return viral_status()
 
 
 @app.get("/trends", dependencies=A)

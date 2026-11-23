@@ -321,10 +321,13 @@ jobs:
       - name: Build the labelled evaluation set (CC0 sounds, licences checked)
         if: steps.evalcache.outputs.cache-hit != 'true'
         run: python scripts/build_eval_set.py /tmp/evalset
-      - name: Evaluate before vs after
+      - name: Evaluate before (v0.3, v0.7.1) vs after
         run: |
           mkdir -p ci-samples
-          CLIPFARM_DATA_DIR=/tmp/evaldata python scripts/eval_highlights.py /tmp/evalset ci-samples/EVALUATION.md
+          git worktree add /tmp/before071 e8aada9
+          cp -r backend/assets/models /tmp/before071/backend/assets/   # same sound model for a fair comparison
+          CLIPFARM_DATA_DIR=/tmp/evaldata python scripts/eval_highlights.py /tmp/evalset ci-samples/EVALUATION.md \
+            --before-backend /tmp/before071/backend
           cp /tmp/evalset/SOURCES.md ci-samples/EVAL-SOURCES.md
       - name: Evaluation gate
         working-directory: backend

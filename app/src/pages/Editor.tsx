@@ -10,6 +10,10 @@ import {
 } from "../components/EditorParts";
 
 const STATUSES = ["new", "edited", "ready", "posted"];
+export const TAG_LABEL: Record<string, string> = { explosion: "Explosion", crash: "Crash", gunfire: "Gunfire",
+  police: "Police / wanted / arrest", death: "Death / wasted", stunt: "Stunt / flip / jump", fall: "Fall / ragdoll",
+  npc: "NPC fight / reaction", vehicle_steal: "Vehicle steal", plane: "Plane / heli", boat: "Boat", chase: "Chase",
+  fail: "Fail / glitch", easter_egg: "Easter egg / animal / myth", money: "Money / heist" };
 const TABS = ["Transcript", "Captions", "Layout", "Hook & Title", "Music & Audio", "Effects", "Campaign rules"];
 const FEEDBACK_TAGS = ["not funny", "too slow", "cut too early", "cut too late", "boring game part", "wrong moment",
   "bad captions", "wrong music", "bad framing", "great moment", "great timing"];
@@ -22,7 +26,7 @@ export function scoreClass(v?: number | null) { return v == null ? "" : v >= 90 
 export default function Editor({ go, initialClip }: { go: (p: Page, tab?: string) => void; initialClip?: number }) {
   const [sort, setSort] = useState(readPref("ed.sort", "profit"));
   const [top, setTop] = useState(false);
-  const [filters, setFilters] = useState<any>({ program_id: "", streamer_id: "", moment_type: "", status: "" });
+  const [filters, setFilters] = useState<any>({ program_id: "", streamer_id: "", moment_type: "", status: "", tag: "", reaction: "" });
   const [clips, setClips] = useState<any[]>([]);
   const [all, setAll] = useState<any[]>([]);
   const [selId, setSelId] = useState<number | null>(initialClip ?? null);
@@ -87,6 +91,12 @@ export default function Editor({ go, initialClip }: { go: (p: Page, tab?: string
                 <option value="">All moments</option>{opts.types.map((t) => <option key={t} value={t}>{MOMENT_EMOJI[t] || ""} {t}</option>)}</select>
               <select value={filters.status} onChange={(e) => setFilters({ ...filters, status: e.target.value })} aria-label="Status">
                 <option value="">Any status</option>{STATUSES.map((s) => <option key={s}>{s}</option>)}</select>
+              <select value={filters.tag} onChange={(e) => setFilters({ ...filters, tag: e.target.value })} aria-label="What happened" title="What happened in the game (event tags)">
+                <option value="">Any event</option>{Object.entries(TAG_LABEL).map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select>
+              <select value={filters.reaction} onChange={(e) => setFilters({ ...filters, reaction: e.target.value })} aria-label="Reaction" title="How the streamer or chat reacted">
+                <option value="">Any reaction</option><option value="laugh">…with the streamer laughing</option>
+                <option value="scream">…with the streamer screaming</option><option value="chat_laugh">…with chat laughing</option>
+                <option value="disbelief">…with "no way" / "bro"</option></select>
             </div>
           )}
           {picked.length > 0 && (
@@ -113,6 +123,7 @@ export default function Editor({ go, initialClip }: { go: (p: Page, tab?: string
                 <div className="stack tight grow" style={{ minWidth: 0 }}>
                   <b className="ellipsis">{c.moment_type ? `${MOMENT_EMOJI[c.moment_type] || ""} ` : ""}{c.title}</b>
                   {c.variant_label && <span className="muted tiny">Variant {c.variant_label} of clip #{c.variant_of}</span>}
+                  {(c.moment_tags || []).length > 0 && <span className="tagrow">{c.moment_tags.slice(0, 3).map((t: string) => <span key={t} className="tagchip">{TAG_LABEL[t]?.split(" / ")[0] || t}</span>)}</span>}
                   <span className="muted tiny ellipsis">{c.streamer}{c.program ? ` · ${c.program}` : ""}</span>
                   <div className="row" style={{ gap: 6 }}>
                     <span className={`score ${scoreClass(c.virality)}`} title={c.virality_reason || ""}>{c.virality ?? "–"}</span>
@@ -311,6 +322,17 @@ function Workspace({ clip, simple, onChanged, go, setMsg }: { clip: any; simple:
               <span><span className="muted tiny">Rules</span><br />{flags.some((f) => f.severity === "error")
                 ? <b className="warn-text" style={{ cursor: "pointer" }} onClick={() => { setTab("Campaign rules"); }}>⚑ {flags.length} to fix</b> : <b className="ok-text">✓ OK</b>}</span>
             </div>
+            {(v.edl.moment?.why || []).length > 0 && (
+              <details className="ed-why">
+                <summary>Why this moment?{v.edl.moment?.viral != null ? ` Viral score ${v.edl.moment.viral}/100` : ""}</summary>
+                {v.edl.moment.why.slice(0, 10).map((r: any) => (
+                  <div key={r.feature} className="why-row" title={`${r.feature}: ${r.value}`}>
+                    <span>{r.label}</span>
+                    <i className={r.contribution >= 0 ? "pos" : "neg"} style={{ width: `${Math.min(100, Math.abs(r.contribution) * 40)}%` }} />
+                    <b className={r.contribution >= 0 ? "ok-text" : "warn-text"}>{r.contribution >= 0 ? "+" : ""}{r.contribution.toFixed(2)}</b>
+                  </div>))}
+              </details>
+            )}
             {!simple && vir?.parts && (
               <div className="ed-parts">{Object.entries(vir.parts).map(([k, x]: any) => (
                 <span key={k} title={k}><i style={{ width: `${x}%` }} />{k}</span>))}</div>

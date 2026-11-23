@@ -87,11 +87,22 @@ LINES = ["okay so we need to grab the car first and then head over to the bank, 
          "alright alright I'm reading chat, thanks for the follow, appreciate you",
          "WHAT ARE YOU DOING BRO GET IN THE CAR GET IN THE CAR WE HAVE TO GO RIGHT NOW",
          "NO NO NO THAT IS NOT WHERE WE PARKED I AM SO CONFUSED RIGHT NOW HONESTLY",
-         "THANK YOU SO MUCH FOR THE SUBS GUYS THANK YOU THANK YOU WELCOME TO THE CREW"]
+         "THANK YOU SO MUCH FOR THE SUBS GUYS THANK YOU THANK YOU WELCOME TO THE CREW",
+         # v0.8: sad/serious talk and a story cutscene (two voices)
+         "honestly chat it has been a really hard year, my grandma passed away last month and I miss her a lot",
+         "I just want to say thank you for being here, you guys really helped me through some dark times",
+         "the boss told you to stay out of the city, this business is bigger than all of us now",
+         "then we do it my way, nobody gets hurt and we split the money four ways like we agreed"]
 for i, line in enumerate(LINES):
     loud = line.isupper()
-    subprocess.run(["espeak-ng", "-s", "175" if loud else "150", "-a", "200" if loud else "90", "-w",
+    voice = ["-v", "en+m3"] if i == 10 else ["-v", "en+f2"] if i == 9 else []
+    speed = "175" if loud else "118" if i in (7, 8) else "150"          # sad talk is slow
+    subprocess.run(["espeak-ng", *voice, "-s", speed, "-a", "200" if loud else "90", "-w",
                     str(snd / f"speech{i}.wav"), line.lower()], check=True)
+# calm driving: engine hum + road noise (generated)
+ff("-f", "lavfi", "-i", "aevalsrc='0.25*sin(2*PI*48*t)*(1+0.2*sin(2*PI*0.3*t))+0.12*sin(2*PI*96*t)':s=48000:d=60",
+   "-f", "lavfi", "-i", "anoisesrc=c=brown:a=0.25:d=60", "-filter_complex",
+   "[1:a]lowpass=f=400[n];[0:a][n]amix=inputs=2:normalize=0", snd / "engine.wav")
 
 # music (ClipFarm originals)
 from clipfarm.music import compose  # noqa: E402
@@ -157,25 +168,28 @@ SUBS = ["xUser gifted 5 Tier 1 subs!", "PogChamp", "W", "POGGERS POGGERS", "subs
         "HYPE TRAIN!!", "PogChamp PogChamp", "WWWW", "gifted a sub to someone"]
 # Intermission / loading music: chat vibing to the song, not reacting to gameplay.
 VIBE = ["catJAM", "🔥", "this song slaps", "song name?", "🔥🔥", "vibing", "BOP", "catJAM catJAM", "W song"]
+# Sad / serious moment: chat sends condolences (what the old detector counted as "fail" hype).
+SAD = ["F", "o7", "Sadge", "F F F", "rip", "❤️", "o7 o7", "PepeHands", "sending love", "F"]
 # Streamer shouting at chat about nothing: caps spam and "!!" (what loudness + caps detectors love).
 CAPS = ["CHAT LOOK", "WHAT!!", "LMAO WHAT", "HE'S SO LOUD", "BRO CALM DOWN!!", "o7", "monkaS", "WHY ARE YOU YELLING"]
 
-PLANS = [   # (kind, seconds, label) ; label: pos / neg / filler
-    [("gameplay", 40, "filler"), ("menu", 45, "neg"), ("gameplay", 30, "filler"), ("funny", 25, "pos"),
-     ("talk", 60, "neg"), ("action", 30, "pos"), ("gameplay", 30, "filler"), ("loudtalk", 50, "neg"),
-     ("loading", 25, "neg"), ("funny", 25, "pos"), ("gameplay", 30, "filler"), ("loudmusic", 45, "neg"),
-     ("reaction", 25, "pos"), ("gameplay", 25, "filler")],
-    [("gameplay", 30, "filler"), ("brb", 50, "neg"), ("action", 30, "pos"), ("gameplay", 30, "filler"),
-     ("subtrain", 40, "neg"), ("funny", 25, "pos"), ("talk", 50, "neg"), ("gameplay", 25, "filler"),
-     ("loudmusic", 40, "neg"), ("action", 30, "pos"), ("menu", 40, "neg"), ("funny", 25, "pos"),
-     ("gameplay", 30, "filler")],
-    [("gameplay", 30, "filler"), ("loudtalk", 60, "neg"), ("reaction", 25, "pos"), ("loading", 30, "neg"),
-     ("gameplay", 25, "filler"), ("funny", 25, "pos"), ("menu", 45, "neg"), ("action", 30, "pos"),
-     ("talk", 45, "neg"), ("subtrain", 40, "neg"), ("funny", 25, "pos"), ("gameplay", 30, "filler"),
-     ("action", 30, "pos"), ("gameplay", 20, "filler")],
+PLANS = [   # (kind, seconds, label) ; label: pos / neg / weak (spectacle with no reaction) / filler
+    [("gameplay", 30, "filler"), ("menu", 40, "neg"), ("funny", 25, "pos"), ("sad", 45, "neg"),
+     ("talk", 45, "neg"), ("action", 30, "pos"), ("driving", 50, "neg"), ("loudtalk", 40, "neg"),
+     ("boomonly", 25, "weak"), ("loading", 20, "neg"), ("funny", 25, "pos"), ("cutscene", 40, "neg"),
+     ("loudmusic", 40, "neg"), ("reaction", 25, "pos"), ("gameplay", 20, "filler")],
+    [("gameplay", 25, "filler"), ("brb", 40, "neg"), ("action", 30, "pos"), ("driving", 45, "neg"),
+     ("subtrain", 40, "neg"), ("funny", 25, "pos"), ("sad", 45, "neg"), ("boomonly", 25, "weak"),
+     ("loudmusic", 35, "neg"), ("action", 30, "pos"), ("cutscene", 40, "neg"), ("menu", 35, "neg"),
+     ("funny", 25, "pos"), ("gameplay", 25, "filler")],
+    [("gameplay", 25, "filler"), ("loudtalk", 45, "neg"), ("reaction", 25, "pos"), ("cutscene", 40, "neg"),
+     ("loading", 25, "neg"), ("funny", 25, "pos"), ("driving", 45, "neg"), ("action", 30, "pos"),
+     ("sad", 45, "neg"), ("boomonly", 25, "weak"), ("subtrain", 35, "neg"), ("funny", 25, "pos"),
+     ("talk", 35, "neg"), ("action", 30, "pos"), ("gameplay", 20, "filler")],
 ]
 VKIND = {"funny": "gameplay", "action": "action", "reaction": "gameplay", "loudtalk": "gameplay",
-         "loudmusic": "gameplay", "subtrain": "gameplay"}
+         "loudmusic": "gameplay", "subtrain": "gameplay", "boomonly": "action", "sad": "talk", "driving": "gameplay",
+         "cutscene": "talk"}
 
 labels = {}
 for vi, plan in enumerate(PLANS, start=1):
@@ -195,13 +209,26 @@ for vi, plan in enumerate(PLANS, start=1):
                 parts.append((snd / f"{rng.choice(kinds['explosion'])}.mp3", t + 4 + k * 4.5, 1.2))
             if kinds["gunshot"]:
                 parts += [(snd / f"{kinds['gunshot'][0]}.mp3", t + 6 + k * 3, 1.0) for k in range(3)]
-            chat_burst(t + 8, 12, HYPE, 2.0, msgs)
-            labels.setdefault(f"vod{vi}", []).append({"start": t + 3, "end": t + 24, "type": "Action/Explosion"})
+            parts += [(snd / "speech4.wav", t + 6, 1.3), (snd / f"{rng.choice(kinds['laughter'])}.mp3", t + 9, 1.4)]
+            chat_burst(t + 8, 12, HYPE + LAUGH, 2.0, msgs)
+            labels.setdefault(f"vod{vi}", []).append({"start": t + 3, "end": t + 24, "type": "Action + Reaction"})
         elif kind == "reaction":
             pool = kinds["scream"] + kinds["cheer"]
             parts += [(snd / "speech4.wav", t + 2, 1.2), (snd / f"{rng.choice(pool)}.mp3", t + 8, 1.4)]
             chat_burst(t + 10, 10, HYPE, 1.8, msgs)
-            labels.setdefault(f"vod{vi}", []).append({"start": t + 6, "end": t + 22, "type": "Rage/Reaction"})
+            labels.setdefault(f"vod{vi}", []).append({"start": t + 6, "end": t + 22, "type": "Rage"})
+        elif kind == "boomonly":          # spectacle nobody reacts to
+            for k in range(3):
+                parts.append((snd / f"{rng.choice(kinds['explosion'])}.mp3", t + 4 + k * 6, 1.2))
+        elif kind == "sad":
+            parts += [(snd / "speech7.wav", t + 2, 0.8), (snd / "speech8.wav", t + 16, 0.8),
+                      (snd / "music" / next(m["file"] for m in music if "afterglow" in m["file"]), t, 0.35)]
+            chat_burst(t + 5, dur - 8, SAD, 2.5, msgs)
+        elif kind == "driving":
+            parts += [(snd / "engine.wav", t, 1.0), (snd / "speech1.wav", t + 15, 0.5)]
+        elif kind == "cutscene":
+            parts += [(snd / "speech9.wav", t + 2, 0.8), (snd / "speech10.wav", t + 12, 0.8),
+                      (snd / "music" / next(m["file"] for m in music if "heist" in m["file"]), t, 0.5)]
         elif kind in ("talk",):
             for k in range(int(dur // 9)):
                 parts.append((snd / f"speech{k % 4}.wav", t + k * 9, 0.6))

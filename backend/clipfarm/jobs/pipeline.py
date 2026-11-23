@@ -127,6 +127,15 @@ def _ensure_chat_logger(s: dict) -> None:
     _chat_loggers[key] = ev
 
 
+def _store_viral(mid: int, m) -> None:
+    """The viral model's output on the moment: score, event tags (with source times), features, 'Why?' rows."""
+    a = int(m.start)
+    timeline = [{"tag": t["tag"], "t": a + t["t"], "strength": t["strength"]} for t in (m.tags or [])]
+    db.ex("UPDATE moments SET viral_score=?, tags=?, tag_timeline=?, features=?, contributions=? WHERE id=?",
+          (m.viral, json.dumps(sorted({t["tag"] for t in timeline})), json.dumps(timeline),
+           json.dumps(m.features or {}), json.dumps(m.why or []), mid))
+
+
 @on_failure("process_source")
 def process_source_failed(payload: dict, message: str, final: bool, retry_in: int | None) -> None:
     """A source that keeps failing is retried 3 times (30 s, 2 min, 10 min), then shown as failed with a Retry
@@ -160,7 +169,7 @@ def process_source(payload: dict, ctx: JobContext) -> None:
         vis_all = visual.analyse(path) if db.get_setting("highlights", {}).get("visual", True) else {}
         ms, dbg = run.detect_source(path, budget=1, min_len=cfg["min_sec"], max_len=cfg["max_sec"], threshold=0.0,
                                     visual_fn=(lambda a, b: {k: v[int(a):int(b)] for k, v in vis_all.items()})
-                                    if vis_all else None, log=ctx.log)
+                                    if vis_all else None, log=ctx.log, game_id=p.get("game_id"), viral_threshold=0)
         dur = float(dbg.get("duration") or 0) or cfg["max_sec"]
         if dur <= cfg["max_sec"]:
             start, end = 0.0, dur
@@ -173,10 +182,13 @@ def process_source(payload: dict, ctx: JobContext) -> None:
         score = round(min(1.0, 0.5 + np.log10(views + 1) / 10), 3)  # community already voted
         fp = dedupe.fingerprint(src["streamer_id"], src["created_at_platform"], 0, src["platform_id"])
         status = "duplicate" if dedupe.is_duplicate(fp) else "queued"
+        sigs = {k: v for k, v in (ms[0].signals if ms else {}).items() if not k.startswith("_")}
         mid = db.ex("""INSERT INTO moments(source_id, start_sec, end_sec, score, signals, fingerprint, status, type,
-                       reason, detector) VALUES (?,?,?,?,?,?,?,?,?, 'v2')""",
-                    (src_id, start, end, score, json.dumps({"clip_views": views, **(ms[0].signals if ms else {})}),
+                       reason, detector) VALUES (?,?,?,?,?,?,?,?,?, 'v3')""",
+                    (src_id, start, end, score, json.dumps({"clip_views": views, **sigs}),
                      fp, status, mtype, f"{mtype}: community clip with {views:,} views"))
+        if ms:
+            _store_viral(mid, ms[0])
         if status == "queued" and autopilot.quota_left(p, src["streamer_id"]) != 0:
             enqueue("render_moment", {"project_id": pid, "moment_id": mid, "media": str(path),
                                       "media_offset": 0.0, "streamer_id": src["streamer_id"], "payoff": payoff},
@@ -234,7 +246,8 @@ def process_source(payload: dict, ctx: JobContext) -> None:
         visual_fn=visual_fn if hcfg.get("visual", True) else None,
         words_fn=words_fn if hcfg.get("llm", True) else None,
         rate_fn=(lambda tr, det: rate.rate(tr, det, streamer["display_name"], game["name"])) if hcfg.get("llm", True) else None,
-        threshold=float(cfg.get("highlight_threshold", 0.42)), log=ctx.log) if budget_n else ([], {})
+        threshold=float(cfg.get("highlight_threshold", 0.42)), log=ctx.log, game_id=p.get("game_id"),
+        viral_threshold=int(hcfg.get("viral_threshold", 35))) if budget_n else ([], {})
     ctx.log(f"VOD {src['platform_id']}: {len(moments)} moment(s) picked")
     for i, m in enumerate(moments):
         fp = dedupe.fingerprint(src["streamer_id"], src["created_at_platform"], m.peak, src["platform_id"])
@@ -242,9 +255,11 @@ def process_source(payload: dict, ctx: JobContext) -> None:
             continue
         words = m.signals.pop("_words", None)
         mid = db.ex("""INSERT INTO moments(source_id, start_sec, end_sec, score, signals, fingerprint, status, type,
-                       reason, words, detector) VALUES (?,?,?,?,?,?, 'queued', ?,?,?, 'v2')""",
-                    (src_id, m.start, m.end, m.score, json.dumps(m.signals), fp, m.type, m.reason,
+                       reason, words, detector) VALUES (?,?,?,?,?,?, 'queued', ?,?,?, 'v3')""",
+                    (src_id, m.start, m.end, m.score, json.dumps({k: v for k, v in m.signals.items()
+                                                                   if not k.startswith("_")}), fp, m.type, m.reason,
                      json.dumps(words) if words else None))
+        _store_viral(mid, m)
         section = media.download_section(src["url"], work, f"src{src_id}_m{mid}", m.start, m.end)
         enqueue("render_moment", {"project_id": pid, "moment_id": mid, "media": str(section),
                                   "media_offset": m.start, "streamer_id": src["streamer_id"],
@@ -321,7 +336,13 @@ def render_moment(payload: dict, ctx: JobContext) -> None:
     # ---- auto-edit -> edit project (EDL) -> export -------------------------------------------------
     edl = edit_build.auto_edit(
         media=keep, start=clip_start, end=clip_end, words=words, streamer=streamer, program=program, req=req,
-        settings=settings, moment={"id": mid, "type": mtype, "reason": m.get("reason"), "score": m.get("score")},
+        settings=settings, moment={"id": mid, "type": mtype, "reason": m.get("reason"), "score": m.get("score"),
+                                   "viral": m.get("viral_score"),
+                                   "tags": [{**t, "t": round(t["t"] - offset, 2)}
+                                            for t in json.loads(m.get("tag_timeline") or "[]")],
+                                   "why": json.loads(m.get("contributions") or "[]"),
+                                   "setup_start": (lambda v: None if v is None else round(v - offset, 2))(
+                                       json.loads(m.get("signals") or "{}").get("setup_start"))},
         hook=pkg["hook"], credit=credit, account_ids=acct_ids, payoff=payoff)
     if why_off := edl["music"].get("why_off"):
         rule_notes.append(why_off)
@@ -655,6 +676,165 @@ def metrics(payload: dict, ctx: JobContext) -> None:
                       (p["id"], st["views"], st["likes"], st["comments"]))
     if not db.q1("SELECT 1 FROM jobs WHERE kind='metrics' AND status='queued'"):
         enqueue("metrics", {}, priority=8, delay_sec=6 * 3600)
+
+
+# ---- viral reference dataset + model (daily) ---------------------------------------------------------------
+@handler("viral_refresh")
+def viral_refresh(payload: dict, ctx: JobContext) -> None:
+    """Collect this week's most-viewed Twitch clips per game (permitted streamers only) and queue feature
+    extraction; add your own posts/feedback; then retrain. Runs once a day."""
+    from ..highlights import viral_data
+    from ..providers import available_providers
+    try:
+        if (db.get_setting("highlights", {}) or {}).get("viral_dataset", True):
+            tw = available_providers().get("twitch")
+            games = db.q("""SELECT DISTINCT g.id, g.name, g.twitch_id FROM games g JOIN projects p ON p.game_id=g.id
+                            WHERE g.twitch_id IS NOT NULL""")
+            permitted = viral_data.permitted_streamers("twitch")
+            for g in games if tw and permitted else []:
+                try:
+                    clips = tw.top_clips_for_game(g["twitch_id"], days=7, n=100)
+                except Exception as e:                  # noqa: BLE001
+                    ctx.log(f"Top clips for {g['name']}: {e}")
+                    continue
+                chosen = viral_data.select_clips(clips, permitted)
+                have = {r["platform_id"] for r in db.q("SELECT platform_id FROM viral_examples WHERE source_kind='twitch_clip'")}
+                for c in chosen:
+                    if c["id"] not in have:
+                        enqueue("viral_example", {"clip": c, "game_id": g["id"]}, priority=9)
+                ctx.log(f"{g['name']}: {len(chosen)} viral clip(s) from permitted streamers")
+            yt_channels = [s["platform_user_id"] for s in db.q("SELECT id, platform_user_id FROM streamers WHERE platform='youtube'")
+                           if compliance.can_clip(s["id"])[0]]
+            if yt_channels:
+                viral_data.youtube_short_titles(yt_channels, None)
+        viral_data.collect_own()
+    finally:
+        if not db.q1("SELECT 1 FROM jobs WHERE kind='viral_train' AND status='queued'"):
+            enqueue("viral_train", {}, priority=9, delay_sec=3 * 3600)
+        if not db.q1("SELECT 1 FROM jobs WHERE kind='viral_refresh' AND status='queued'"):
+            enqueue("viral_refresh", {}, priority=9, delay_sec=24 * 3600)
+
+
+@handler("viral_example")
+def viral_example(payload: dict, ctx: JobContext) -> None:
+    from ..highlights import viral_data
+    c = payload["clip"]
+    compliance.assert_can_clip(c["streamer_id"])            # re-check: permission may have changed
+    work = storage.media_dir() / "viral_examples"
+    viral_data.extract_clip(c, payload["game_id"], work)
+
+
+@handler("viral_train")
+def viral_train(payload: dict, ctx: JobContext) -> None:
+    from ..highlights import viral_model
+    res = [viral_model.train(None)]
+    for g in db.q("SELECT DISTINCT game_id FROM viral_examples WHERE game_id IS NOT NULL"):
+        res.append(viral_model.train(g["game_id"]))
+    ctx.log("Viral model: " + "; ".join(f"game {r.get('game_id', '?')}: "
+                                        + ("trained" if r.get("trained") else f"{r.get('examples', 0)} examples")
+                                        for r in res))
+
+
+@handler("viral_report")
+def viral_report(payload: dict, ctx: JobContext) -> None:
+    """Detection report on a real VOD (Settings > Highlights > Make detection report):
+    dataset size per game, model accuracy, and on one real VOD of a permitted streamer: how many of its
+    top community clips each ranking finds (top 10), plus the 20 picked moments with reasons and event tags.
+    Community clips are NOT given to the detector here, so finding them is a fair test."""
+    from ..highlights import viral_data, viral_model
+    from ..providers import available_providers
+    tw = available_providers().get("twitch")
+    if not tw:
+        raise PermanentError("Connect Twitch first (Settings > Connections): the report uses a real Twitch VOD.")
+    game_like = payload.get("game") or "Grand Theft Auto VI"
+    cands = db.q("""SELECT so.*, s.platform_user_id, s.display_name, s.id sid FROM sources so
+                    JOIN streamers s ON s.id=so.streamer_id WHERE so.kind='vod' AND s.platform='twitch'
+                    ORDER BY so.created_at_platform DESC""")
+    if payload.get("source_id"):
+        cands = [c for c in cands if c["id"] == payload["source_id"]]
+    vod = next((c for c in cands if compliance.can_clip(c["sid"])[0]), None)
+    if not vod:
+        raise PermanentError("No VOD from a streamer you're allowed to clip yet. Start a project for "
+                             f"{game_like} with a permitted streamer first.")
+    work = storage.media_dir() / "reports"
+    work.mkdir(parents=True, exist_ok=True)
+    clips = tw.clips_in_vod(vod["platform_user_id"], vod["platform_id"], vod["created_at_platform"])
+    top = clips[:10]
+    ctx.log(f"Report on {vod['display_name']} VOD {vod['platform_id']}: {len(clips)} community clips")
+    audio_path = media.download_audio(vod["url"], work, f"report_{vod['id']}")
+    ctx.progress(0.2)
+    vod_start = datetime.fromisoformat(vod["created_at_platform"].replace("Z", "+00:00")).timestamp()
+    chat = []
+    login = db.q1("SELECT login FROM streamers WHERE id=?", (vod["sid"],))["login"]
+    for f in (storage.media_dir() / "chat").glob(f"{login}-*.jsonl"):
+        chat += load_chat(f, vod_start)
+    tcfg = db.get_setting("transcription", {})
+
+    def visual_fn(a, b):
+        low = media.download_section(vod["url"], work, f"rv{int(a)}", a, b, low_res=True)
+        try:
+            return visual.analyse(low)
+        finally:
+            Path(low).unlink(missing_ok=True)
+
+    def words_fn(a, b):
+        if not tcfg.get("enabled", True):
+            return []
+        sec = media.download_section(vod["url"], work, f"rt{int(a)}", a, b, low_res=True)
+        try:
+            return [{**w, "start": w["start"] + a, "end": w["end"] + a}
+                    for w in transcribe(sec, tcfg.get("model", "small"), tcfg.get("device", "auto"))]
+        finally:
+            Path(sec).unlink(missing_ok=True)
+    game = db.q1("SELECT id, name FROM games WHERE name LIKE ?", (f"%{game_like}%",))
+    try:
+        ms, _ = run.detect_source(Path(audio_path), chat=chat, clips=[], budget=20, min_len=12, max_len=50,
+                                  threshold=0.2, visual_fn=visual_fn, words_fn=words_fn,
+                                  rate_fn=lambda tr, det: rate.rate(tr, det, vod["display_name"], game_like),
+                                  game_id=game["id"] if game else None, viral_threshold=0, log=ctx.log)
+    finally:
+        Path(audio_path).unlink(missing_ok=True)
+    ctx.progress(0.9)
+
+    def found(picks):
+        hit = set()
+        for c in top:
+            a, b = c["vod_offset"], c["vod_offset"] + c["duration"]
+            if any(min(b, m.end) - max(a, m.start) >= min(6, c["duration"] / 2) for m in picks):
+                hit.add(c["id"])
+        return hit
+    old_top = sorted(ms, key=lambda m: -m.score)[:10]
+    new_top = sorted(ms, key=lambda m: -(m.viral or 0))[:10]
+    fo, fn = found(old_top), found(new_top)
+
+    def when(t):
+        return f"{int(t // 3600)}:{int(t % 3600 // 60):02d}:{int(t % 60):02d}"
+    st = viral_data.stats()
+    mdl = viral_model.load(game["id"] if game else None)
+    lines = [f"# Viral moment detection report: {vod['display_name']}, {game_like}", "",
+             f"VOD: {vod['url']} ({vod['created_at_platform'][:10]}). Made {datetime.now().strftime('%Y-%m-%d %H:%M')}.", "",
+             "## Dataset", "", "| Game | Viral clips | Not viral | Yours |", "|---|---|---|---|"]
+    lines += [f"| {r['game'] or 'any'} | {r['positives']} | {r['negatives']} | {r['yours']} |" for r in st] or ["| (none yet) | | | |"]
+    m = mdl.get("metrics") or {}
+    lines += ["", f"Model: {'trained ' + str(mdl.get('trained_at')) if mdl.get('trained') else 'starting model (not trained yet)'}"
+              + (f"; hold-out AUC {m['auc']:.2f} vs {m['default_auc']:.2f} for the starting model, top-10 precision "
+                 f"{m['precision_at_10']:.0%} vs {m['default_precision_at_10']:.0%}" if m.get("auc") is not None else ""), "",
+              "## This VOD's top 10 community clips found in the top 10 picks", "",
+              "| Ranking | Found |", "|---|---|",
+              f"| Before (signal curve, no viral model) | **{len(fo)}/{len(top)}** |",
+              f"| After (viral model) | **{len(fn)}/{len(top)}** |", "",
+              "## 20 picked moments (after)", "", "| # | Time | Score | Type | Event tags | Reason | Community clip? |",
+              "|---|---|---|---|---|---|---|"]
+    for i, mm in enumerate(sorted(ms, key=lambda x: -(x.viral or 0))[:20], 1):
+        cc = next((c for c in clips if min(c["vod_offset"] + c["duration"], mm.end) - max(c["vod_offset"], mm.start) >= 4), None)
+        lines.append(f"| {i} | {when(mm.start)}–{when(mm.end)} | {mm.viral} | {mm.type} | "
+                     f"{', '.join(t['tag'] for t in mm.tags) or '-'} | {mm.reason.replace('|', '/')} | "
+                     f"{('yes, ' + format(cc['views'], ',') + ' views') if cc else 'no'} |")
+    out = work / f"viral_report_{datetime.now().strftime('%Y%m%d_%H%M')}.md"
+    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    db.set_setting("viral_report_last", {"path": str(out), "made": datetime.now().isoformat(timespec="minutes"),
+                                         "found_before": len(fo), "found_after": len(fn), "top": len(top)})
+    emit("report_ready", path=str(out))
 
 
 @handler("health_check")
