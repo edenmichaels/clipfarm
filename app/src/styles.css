@@ -452,9 +452,20 @@ details summary { cursor: pointer; color: var(--soft); }
 .shortcuts td { padding: 4px 10px 4px 0; vertical-align: top; }
 kbd { font: 12px/1.4 ui-monospace, monospace; background: var(--panel2); border: 1px solid var(--line2); border-radius: 4px; padding: 1px 6px; white-space: nowrap; }
 /* smaller windows / high scaling (125-150 %): inspector moves under the preview */
+/* compact chrome for small windows / 125-150 % scaling */
+@media (max-width: 1400px) { .st-tools .lbl { display: none; } .st-tools button { padding: 6px 9px; } }
 @media (max-width: 1100px) {
-  .studio { grid-template-columns: minmax(190px, 15rem) 1fr; grid-template-rows: auto auto minmax(0, 1fr) minmax(0, 1fr) minmax(150px, 32%);
-    grid-template-areas: "bar bar" "msgs msgs" "left centre" "left right" "bottom bottom"; }
+  .side { width: 156px; flex-basis: 156px; padding: 12px 8px; }
+  .brand-name { font-size: 16px; }
+  .nav { padding: 8px 10px; }
+  .studio { gap: 6px; padding: 6px; grid-template-columns: minmax(170px, 36%) 1fr;
+    grid-template-rows: auto auto minmax(0, 1fr) minmax(0, 1fr) minmax(140px, 30%);
+    grid-template-areas: "bar bar" "msgs msgs" "centre left" "centre right" "bottom bottom"; }
+  .st-bar { gap: 4px; padding: 4px 6px; }
+  .st-bar .saved, .st-bar .sep { display: none; }
+  .st-bar button, .st-bar select { padding: 4px 8px; font-size: 13px; }
+  .st-under .pill-btn { display: none; }
+  .tl-labels, .tl-area { grid-template-rows: 16px repeat(9, 18px); gap: 2px; }
 }
 @media (max-width: 760px) {
   .studio { grid-template-columns: 1fr; grid-template-rows: auto auto 46vh auto auto 220px;

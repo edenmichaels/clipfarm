@@ -1,5 +1,41 @@
 # ClipFarm changelog
 
+## 0.8.4 (step 5): full audit
+
+The full bug table is in `docs/reports/v0.8-audit.md`. It lists 15 issues, each with its area, problem, cause, fix and test.
+
+### Fixes
+- **After a crash, power cut or Task Manager kill:**
+  - jobs that were running are re-queued;
+  - ClipFarm's leftover render folders in Temp are removed on start-up;
+  - unsaved Editor changes are offered back.
+- **Editor at 125 % / 150 % Windows display scaling:**
+  - the menu gets narrower;
+  - toolbar tools become icon-only (hover for names);
+  - the inspector stacks beside the preview, so the preview stays large.
+- **B-roll and sticker thumbnails** from your own folders now show in the Editor.
+- **Screenshot uploads** are capped at 25 MB / 40 MP.
+- **Zoom amounts in Styles:** old projects whose zoom amounts were stored as factors now scale correctly.
+
+### Proven by tests
+- **Every API route needs the per-launch token.** Only `/health`, the fonts and the OAuth callback are public.
+- No shell is used anywhere.
+- Bundled fonts, emoji and SFX each carry their licence.
+- Nothing is fetched from TikTok or Instagram.
+- On Windows, killing the engine also kills its ffmpeg.
+- **Soak:** `scripts/soak.py` loops style, edits, preview, proxy and export. It checks memory, handles, temp folders, child processes and render speed. CI runs it for 30 s. For the 6–12 h run on your PC:
+
+  ```
+  python scripts\soak.py --minutes 600 --out soak.json
+  ```
+
+### Reports
+- `docs/reports/v0.8-step1-root-causes.md`
+- `docs/reports/v0.8-detection-report.md`
+- `docs/reports/v0.8-audit.md`
+- `docs/reports/v0.8-styles-before-after.png`
+- `docs/reports/v0.8-captions-before-after.png`
+
 ## 0.8.3 (step 4): the Editor is the app
 
 ### A real video editor, and the screen ClipFarm opens on

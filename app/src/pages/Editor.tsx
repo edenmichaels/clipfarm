@@ -339,12 +339,12 @@ function Studio({ clip, bin, onChanged, go, msg, setMsg, session }: {
           <button onClick={redo} title="Redo (Ctrl+Y)" aria-label="Redo">↷</button>
         </div>
         <div className="row st-tools" style={{ gap: 4 }}>
-          <button onClick={split} title="Split at the playhead (S)">✂ Split</button>
-          <button onClick={freeze} title="Freeze frame (F)">❄ Freeze</button>
-          <button onClick={addText} title="Add text (T)">T Text</button>
-          <button onClick={() => setLeft("Stickers")} title="Stickers">☺ Sticker</button>
-          <button onClick={addTransition} title="Transition (Shift+T)">◇ Transition</button>
-          <button onClick={() => post(`/edit/${cid}/effects`, {})} title="Automatic zooms, effects and sounds">✨ Effects</button>
+          <button onClick={split} title="Split at the playhead (S)">✂<span className="lbl"> Split</span></button>
+          <button onClick={freeze} title="Freeze frame (F)">❄<span className="lbl"> Freeze</span></button>
+          <button onClick={addText} title="Add text (T)">T<span className="lbl"> Text</span></button>
+          <button onClick={() => setLeft("Stickers")} title="Stickers">☺<span className="lbl"> Sticker</span></button>
+          <button onClick={addTransition} title="Transition (Shift+T)">◇<span className="lbl"> Transition</span></button>
+          <button onClick={() => post(`/edit/${cid}/effects`, {})} title="Automatic zooms, effects and sounds">✨<span className="lbl"> Effects</span></button>
         </div>
         <span className="sep" />
         <button className="btn-quiet" disabled={!!busy} onClick={() => run("Auto-editing", api.post(`/edit/${cid}/auto-edit`))} title="Rebuild the edit from the automatic version">Auto-edit</button>
