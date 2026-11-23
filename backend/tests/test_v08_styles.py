@@ -40,9 +40,11 @@ def test_every_style_renders(fresh_db, tmp_path, key, facecam, overlay):
     elif s["layout"]["mode"] == "split" and facecam:
         assert lays == {"split"} and e["layout"]["cam_h"] == styles.cam_px(s["layout"]["cam_ratio"])
     elif s["layout"]["mode"] == "full_reaction":
-        assert lays == ({"cam_full"} if facecam else {"crop"})
+        assert lays == ({"focus"} if facecam else {"crop"})
+    elif s["layout"]["mode"] == "corner" and facecam:
+        assert lays <= {"corner", "focus"}
     elif s["layout"]["mode"] == "gameplay":
-        assert lays.isdisjoint({"split", "pip", "cam_full"})
+        assert lays.isdisjoint({"split", "pip", "cam_full", "corner", "focus"})
     still = ec.render_frame(e, 1.0, tmp_path / "f.png", tmp_path / "cache")
     img = _png(tmp_path / "f.png")
     assert img.shape == (1920, 1080, 3)
@@ -54,12 +56,11 @@ def test_every_style_renders(fresh_db, tmp_path, key, facecam, overlay):
         assert still["title"]["box"] == "white_box"
     if s["title"]["box"] == "none":
         assert still["title"] is None
-    # captions: every word event is centred where the style's position says
-    ys = {ev["y"] for ev in still["events"]}
-    assert len(ys) == 1
+    # captions: one fixed place at the bottom, whatever the style
+    assert {ev["baseline"] for ev in still["events"]} == {C.BASELINE}
 
 
-def test_split_ratio_and_seam_caption_position(fresh_db, tmp_path):
+def test_split_ratio_and_bottom_captions(fresh_db, tmp_path):
     src = tmp_path / "s.mp4"
     _grey_source(src, 9)
     for ratio in (0.35, 0.40, 0.45):
@@ -73,17 +74,7 @@ def test_split_ratio_and_seam_caption_position(fresh_db, tmp_path):
         col = img[:, 60]
         bluish = (col[:, 2] - col[:, 0] > 10)
         assert abs(int(bluish[:1500].sum()) - cam_h) <= 12, (ratio, int(bluish.sum()), cam_h)
-        y = next(iter({ev["y"] for ev in still["events"]}))
-        assert abs(y - (cam_h + 70)) <= 40, f"seam captions at {y}, seam {cam_h}"
-
-
-def test_caption_positions_for_each_layout():
-    for lay, cam in (("split", 768), ("crop", 640), ("blur_fill", 640)):
-        pl = C.placement(lay)
-        ys = [C.position_y(p, lay, cam, pl) for p in (C.POSITIONS if lay == "split" else C.POSITIONS[1:])]
-        assert ys == sorted(ys)                             # seam/upper/centre/lower go down the screen
-        if lay == "split":
-            assert all(y > cam for y in ys)                 # never on the face
+        assert {ev["baseline"] for ev in still["events"]} == {C.BASELINE}       # captions never on the seam now
 
 
 def test_no_highlight_style_keeps_the_text_colour(fresh_db, tmp_path):
@@ -91,7 +82,7 @@ def test_no_highlight_style_keeps_the_text_colour(fresh_db, tmp_path):
     assert st["captions"]["highlight"] is False
     tr = C.build_track([{"word": w, "start": i * 0.4, "end": i * 0.4 + 0.3} for i, w in enumerate("a b c d".split())],
                        tmp_path / "c.ass", {**C.template_from("minimal").as_dict(), "highlight_on": False, "base": "minimal"},
-                       2, layout="crop", duration=2.0, position="lower")
+                       2, duration=2.0, vocab=False)
     assert "FFE600" not in tr.path.read_text(encoding="utf-8").upper()
 
 
@@ -103,8 +94,8 @@ def test_style_tweaks_are_validated_and_saved(fresh_db):
     s["captions"]["position"] = "sideways"
     saved = styles.save("My split", s)
     assert saved["key"].startswith("user:") and saved["layout"]["cam_ratio"] == 0.45
-    assert saved["captions"]["highlight_color"] == "FFE600" and saved["captions"]["words"] == 3
-    assert saved["captions"]["position"] == "seam"
+    assert saved["captions"]["highlight_color"] == "FFE600" and saved["captions"]["words"] == 6
+    assert "position" not in saved["captions"]                     # captions have one fixed place
     assert any(x["key"] == saved["key"] for x in styles.all_styles())
     assert styles.last_updated()
     styles.delete(saved["id"])
@@ -112,7 +103,7 @@ def test_style_tweaks_are_validated_and_saved(fresh_db):
 
 
 def test_default_resolution_order(fresh_db):
-    assert styles.default_for(has_facecam=True) == ("streamer_split", "automatic")
+    assert styles.default_for(has_facecam=True) == ("streamer_corner", "automatic")
     assert styles.default_for(has_facecam=False) == ("gameplay_only", "automatic")
     assert styles.default_for(has_facecam=True, category="Just Chatting")[0] == "full_reaction"
     styles.set_default("streamer:5", "meme_high_energy")
@@ -144,9 +135,10 @@ def test_effects_follow_the_style(fresh_db, tmp_path):
     _grey_source(src, 9)
     m = _styled(src, "meme_high_energy")
     kinds = {o["kind"] for o in m["overlays"]}
-    assert {"flash", "shake"} <= kinds and m["zooms"][0]["amount"] > 0.12
+    assert "flash" in kinds and "shake" not in kinds                 # v0.8.5: no style shakes
+    assert m["zooms"][0]["amount"] == 0.12                           # your own zoom is kept as it is
     c = styles.apply(m, "clean")
-    assert not [o for o in c["overlays"] if o.get("from_style")] and c["zooms"][0]["amount"] < 0.12
+    assert not [o for o in c["overlays"] if o.get("from_style")] and c["zooms"][0]["amount"] == 0.12
     assert c["style_fx"] == {"sfx": False, "emoji": False}
 
 
@@ -164,10 +156,10 @@ def test_make_style_from_a_streamer_split_screenshot(fresh_db, tmp_path):
     res = style_refs.make_style(_shot(tmp_path, src, "streamer_split"), "Copied split")
     f, s = res["found"], res["style"]
     assert f["layout"] == "split" and abs(f["seam_y"] - 0.40) <= 0.02, f
-    assert f["caption_position"] == "seam" and f["highlight_color"] == "FFE600", f
+    assert f["caption_position"] == "lower" and f["highlight_color"] == "FFE600", f
     assert f["title_box"] == "white_box", f
     assert s["layout"]["mode"] == "split" and abs(s["layout"]["cam_ratio"] - 0.40) <= 0.02
-    assert s["captions"]["position"] == "seam" and s["title"]["box"] == "white_box"
+    assert s["title"]["box"] == "white_box"
     assert res["method"] == "image analysis"               # no vision model configured
 
 
@@ -217,7 +209,11 @@ def test_auto_edit_picks_the_style_and_caption_defaults_still_win(fresh_db, tmp_
               req={"tags": [], "onscreen": []}, settings={}, moment={"type": "Funny"}, hook="Hi", credit=None,
               account_ids=[], payoff=3.0, category="Grand Theft Auto VI")
     e = build.auto_edit(**kw)
-    assert e["style"]["key"] == "streamer_split" and e["style"]["source"] == "automatic"
+    assert e["style"]["key"] == "streamer_corner" and e["style"]["source"] == "automatic"
+    assert e["zooms"] == []                                            # v0.8.5: no automatic zoom by default
+    db.set_setting("editing", {"zoom_cuts": True})
+    assert [z["t"] for z in build.auto_edit(**kw)["zooms"]] == [3.85]  # switched on: one instant cut on the payoff
+    db.set_setting("editing", {})
     templates.set_default("global", "clean_white")
     e = build.auto_edit(**kw)
     assert e["captions"]["template"] == "clean_white"

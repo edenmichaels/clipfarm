@@ -35,35 +35,23 @@ def _bbox(img: np.ndarray):
     return (xs.min(), xs.max(), ys.min(), ys.max()) if xs.size else None
 
 
-LAYOUTS = [("crop", 1920, 1080, ()), ("blur_fill", 1920, 1080, ()), ("blur_fill", 1920, 1080, ("streamer_overlay",)),
-           ("split", 1920, 1080, ()), ("crop", 1280, 720, ()), ("blur_fill", 2560, 1440, ()),
-           ("blur_fill", 1080, 1920, ())]
-
-
-# ---- captions ------------------------------------------------------------------------------------------
+# ---- captions (v0.8.5: one fixed place for every layout; see test_v085 for the full set) -------------------
 @needs_ffmpeg
-@pytest.mark.parametrize("layout,sw,sh,keep", LAYOUTS)
-def test_captions_centred_and_inside_safe_zone(tmp_path, layout, sw, sh, keep):
-    tr = C.build_track(WORDS, tmp_path / "c.ass", "bold_pop", layout=layout, src_w=sw, src_h=sh, keep_clear=keep)
+def test_captions_centred_and_inside_safe_zone(tmp_path):
+    tr = C.build_track(WORDS, tmp_path / "c.ass", "bold_pop", vocab=False)
     for ev in tr.events:
         img = _frame(tr.path, ev["start"] + 0.12)
         x0, x1, y0, y1 = _bbox(img)
-        centre_off = abs((x0 + x1) / 2 - 540) / 1080
-        assert centre_off <= 0.02, (layout, ev["word"], x0, x1)                  # within ±2 % of frame width
-        assert C.SAFE["left"] - 10 <= x0 and x1 <= C.SAFE["right"] + 10, (layout, ev["word"], x0, x1)
-        assert C.SAFE["top"] <= y0 and y1 <= C.SAFE["bottom"] + 10, (layout, ev["word"], y0, y1)
+        assert abs((x0 + x1) / 2 - 540) / 1080 <= 0.01, (ev["word"], x0, x1)
+        assert C.SAFE["left"] - 10 <= x0 and x1 <= C.SAFE["right"] + 10, (ev["word"], x0, x1)
+        assert 1100 <= y0 and y1 <= C.SAFE["bottom"], (ev["word"], y0, y1)
         assert ev["lines"] <= 2
-        if layout == "split":                                                     # on the seam, clear of the face
-            assert y0 >= 640 - 80, (y0, ev["word"])
-        if layout == "blur_fill" and keep:                                       # under the picture (overlay safe)
-            band_bottom = (1920 + 1080 * sh / sw) / 2
-            assert y0 >= band_bottom, (y0, band_bottom)
 
 
 @needs_ffmpeg
 def test_hook_and_credit_in_top_safe_zone(tmp_path):
-    tr = C.build_track(WORDS[:2], tmp_path / "c.ass", "bold_pop", layout="crop", hook="He actually did it no way",
-                       credit="twitch.tv/tester", duration=8)
+    tr = C.build_track(WORDS[:2], tmp_path / "c.ass", "bold_pop", hook="He actually did it no way",
+                       credit="twitch.tv/tester", duration=8, vocab=False)
     img = _frame(tr.path, 0.5)
     top = img[:900]
     x0, x1, y0, y1 = _bbox(top)
@@ -72,7 +60,7 @@ def test_hook_and_credit_in_top_safe_zone(tmp_path):
 
 def test_word_highlight_sync_within_100ms(tmp_path):
     words = [{"word": f"w{i}", "start": 3.0 + i * 0.37, "end": 3.3 + i * 0.37} for i in range(9)]
-    tr = C.build_track(words, tmp_path / "c.ass", offset=2.0)
+    tr = C.build_track(words, tmp_path / "c.ass", offset=2.0, vocab=False)
     assert len(tr.events) == len(words)
     for w, ev in zip(words, tr.events):
         assert abs(ev["start"] - (w["start"] - 2.0)) <= 0.1
@@ -86,7 +74,7 @@ def test_word_highlight_sync_within_100ms(tmp_path):
 @needs_ffmpeg
 def test_highlight_colour_visible_on_spoken_word(tmp_path):
     words = [{"word": "HELLO", "start": 1.0, "end": 1.5}, {"word": "THERE", "start": 1.6, "end": 2.1}]
-    tr = C.build_track(words, tmp_path / "c.ass", "bold_pop", layout="crop")
+    tr = C.build_track(words, tmp_path / "c.ass", "bold_pop", vocab=False)
     img = _frame(tr.path, 1.75)                                                 # THERE is being spoken
     yellow = (img[..., 2] > 200) & (img[..., 1] > 180) & (img[..., 0] < 80)
     ys, xs = np.nonzero(yellow)
@@ -105,12 +93,14 @@ def test_long_words_wrap_to_two_lines_and_fit(tmp_path, style):
     ws = [{"word": w, "start": i * 0.4, "end": i * 0.4 + 0.35} for i, w in
           enumerate(["UNBELIEVABLE", "EXTRAORDINARY", "CATASTROPHE", "no", "way", "INTERNATIONALLY"])]
     pr = C.preset(style)
-    tr = C.build_track(ws, tmp_path / "c.ass", style, layout="crop")
+    tr = C.build_track(ws, tmp_path / "c.ass", style, vocab=False)
     assert len(tr.events) == len(ws)
-    for ev in tr.events:
-        assert len(ev["rows"]) <= 2 and ev["em"] >= pr.em * 0.6 - 0.5
-        for row in ev["rows"]:
-            assert C.text_width(" ".join(row), pr.family, ev["em"], pr.outline_px) <= C.SAFE_WIDTH + 1
+    for cap in C.captions_from(ws, pr, pr.max_words, True):
+        assert len(cap["lines"]) <= 2
+        k = cap.get("condense", 1.0)                       # a single over-wide word is narrowed, never shrunk
+        for row in cap["lines"]:
+            assert C.drawn_width(" ".join(w["word"].upper() for w in row), pr) * k \
+                <= C.CAP_WIDTH + 1
 
 
 def test_profanity_and_fillers():
@@ -152,7 +142,7 @@ def test_rendered_frame_caption_centred(tmp_path, layout):
                     "-c:a", "aac", str(src)], check=True)
     words = [{"word": w, "start": 2 + i * 0.4, "end": 2.35 + i * 0.4} for i, w in enumerate("WAIT FOR IT".split())]
     common = dict(layout=layout, facecam=Box(0.7, 0.0, 0.3, 0.3) if layout == "split" else None, quality="fast",
-                  punch_zoom=False, progress_bar=False)
+                  progress_bar=False)
     a = render(RenderSpec(src, 0, 6, tmp_path / "a.mp4", words=words, **common))
     b = render(RenderSpec(src, 0, 6, tmp_path / "b.mp4", words=[], **common))
     import cv2
@@ -338,7 +328,7 @@ def test_speech_is_ducked_and_mix_is_minus_14_lufs(tmp_path, fresh_db):
     subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "anoisesrc=c=pink:a=0.2:d=20", "-ac", "2",
                     str(mus)], check=True)
     spec = RenderSpec(src, 0, 10, tmp_path / "o.mp4", layout="blur_fill", music=mus, music_track_lufs=-20,
-                      speech=[(3.0, 6.0)], duck_db=15, quality="fast", punch_zoom=False)
+                      speech=[(3.0, 6.0)], duck_db=15, quality="fast")
     assert music_gain_db(4.5, spec) == pytest.approx(-15, abs=0.01) and music_gain_db(8.5, spec) == 0
     from clipfarm.editing.render import render_base
     base, meta = render_base(spec)

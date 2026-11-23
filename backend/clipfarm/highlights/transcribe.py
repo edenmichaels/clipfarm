@@ -62,6 +62,12 @@ def transcribe(media: Path, size: str = "small", device: str = "auto",
         log.warning("Speech model unavailable (%s); rendering without captions", e)
         return []
     kwargs = {"word_timestamps": True, "vad_filter": True}
+    try:                       # your vocabulary (streamer names, GTA terms) as a hint
+        from ..editing import vocab
+        if (hint := vocab.prompt()):
+            kwargs["initial_prompt"] = hint
+    except Exception:          # noqa: BLE001
+        pass
     if start or end:
         kwargs["clip_timestamps"] = [start, end] if end else [start]
     words = []

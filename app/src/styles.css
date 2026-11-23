@@ -472,3 +472,6 @@ kbd { font: 12px/1.4 ui-monospace, monospace; background: var(--panel2); border:
     grid-template-areas: "bar" "msgs" "centre" "right" "left" "bottom"; overflow: auto; height: auto; }
   .content.studio-host { overflow: auto; }
 }
+.cv-pip { border-color: rgba(255, 212, 0, .7); cursor: grab; }
+.cv-pip .rs { position: absolute; bottom: -6px; width: 12px; height: 12px; background: var(--accent); border-radius: 2px; }
+.cv-pip .rs.l { left: -6px; cursor: nesw-resize; } .cv-pip .rs.r { right: -6px; cursor: nwse-resize; }

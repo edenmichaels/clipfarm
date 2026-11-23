@@ -121,13 +121,13 @@ def record_posted(clip_id: int, account_id: int, url: str, external_id: str | No
     if not post:
         check_can_post(clip_id, account_id)
         pid = db.ex("""INSERT INTO posts(clip_id, account_id, scheduled_at, posted_at, status, url, external_id,
-                       program_id, projected_aud, manual) VALUES (?,?,datetime('now'),datetime('now'),'posted',?,?,?,?,?)""",
+                       program_id, projected_aud, manual) VALUES (?,?,datetime('now','localtime'),datetime('now','localtime'),'posted',?,?,?,?,?)""",
                     (clip_id, account_id, url, external_id, _clip(clip_id)["program_id"],
                      _projected(clip_id, db.q1("SELECT platform FROM accounts WHERE id=?", (account_id,))["platform"]),
                      int(manual)))
     else:
         pid = post["id"]
-        db.ex("""UPDATE posts SET status='posted', posted_at=datetime('now'), url=?, external_id=COALESCE(?, external_id),
+        db.ex("""UPDATE posts SET status='posted', posted_at=datetime('now','localtime'), url=?, external_id=COALESCE(?, external_id),
                  error=NULL WHERE id=?""", (url, external_id, pid))
     item = create_submission_item(pid)
     return {"post_id": pid, "submission": item}

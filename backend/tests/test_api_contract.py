@@ -332,9 +332,6 @@ def test_v04_routes(client, tmp_path):
     assert info["editable"] is False and "feedback_tags" in info and isinstance(info["trending"], list)
     call(client, "GET", "/clips/99999/edit", route="/clips/{cid}/edit", expect=404)
     call(client, "POST", f"/clips/{cid}/rerender", route="/clips/{cid}/rerender", json={"caption_nudge": -40}, expect=409)
-    pv = call(client, "POST", f"/clips/{cid}/caption-preview", route="/clips/{cid}/caption-preview",
-              json={"caption_nudge": -40, "caption_style": "minimal"})
-    assert pv["events"] and pv["preset"] == "minimal"
     fb = call(client, "POST", f"/clips/{cid}/feedback", route="/clips/{cid}/feedback",
               json={"rating": 1, "tags": ["great timing"]})
     assert fb["ratings"] == 1 and fb["needed"] == 50
@@ -412,7 +409,7 @@ def test_v05_edit_routes(client, tmp_path):
     call(client, "POST", f"/edit/{cid}/export", route="/edit/{cid}/export", json={"preset": "vhs"}, expect=400)
     assert "tiktok" in call(client, "GET", "/export-presets")
     t = call(client, "GET", "/caption-templates")
-    assert len(t["templates"]) >= 4 and "karaoke" in t["animations"]
+    assert len(t["templates"]) >= 4 and "animations" not in t and "Open Font License" in t["font_licence"]
     mine = call(client, "POST", "/caption-templates", json={"name": "Mine", "template": {"base": "minimal", "text": "#00ff00"}})
     assert mine["template"]["text"] == "00FF00"
     call(client, "POST", "/caption-templates", json={"template": {}}, expect=400)
@@ -437,8 +434,7 @@ def test_v06_editor_routes(client, tmp_path):
     fr = client.get(f"/edit/{cid}/frame?t=1.0", headers=H)
     assert fr.status_code == 200 and fr.headers["content-type"] == "image/png" and fr.content[:4] == b"\x89PNG"
     COVERED.add(("GET", "/edit/{cid}/frame"))
-    cv = call(client, "GET", f"/edit/{cid}/canvas", route="/edit/{cid}/canvas")
-    assert cv["events"] and cv["style"]["family"] and cv["duration"] > 20
+    assert v["caption_y"] and 1380 < v["caption_y"] < 1480        # one fixed caption place (v0.8.5)
     s = call(client, "POST", f"/edit/{cid}/score", route="/edit/{cid}/score")
     assert 0 <= s["virality"]["score"] <= 100 and s["virality"]["reason"] and isinstance(s["flags"], list)
     rows = call(client, "GET", "/editor/clips")
@@ -602,7 +598,7 @@ def test_v08_styles_and_style_refs(client, tmp_path):
     import subprocess
     from PIL import Image
     st = call(client, "GET", "/styles")
-    assert [x["key"] for x in st["styles"]][:5] == ["streamer_split", "full_reaction", "gameplay_only",
+    assert [x["key"] for x in st["styles"]][:6] == ["streamer_corner", "streamer_split", "full_reaction", "gameplay_only",
                                                      "meme_high_energy", "clean"]
     assert st["fields"]["layout.cam_ratio"] == [0.35, 0.45]
     mine = dict(st["styles"][0], name="Mine")
@@ -668,6 +664,19 @@ def test_v08_editor_routes(client, tmp_path):
     call(client, "POST", f"/edit/{cid}/sequence", route="/edit/{cid}/sequence", json={"clip_id": cid}, expect=400)
     v3 = call(client, "DELETE", f"/edit/{cid}/sequence/0", route="/edit/{cid}/sequence/{idx}")
     assert not v3["edl"]["sequence"]
+    # v0.8.5: corner facecam, notices, vocabulary
+    db.ex("UPDATE edit_projects SET data=json_set(data, '$.layout.facecam', json(?)) WHERE clip_id=?",
+          (json.dumps({"x": 0.7, "y": 0.03, "w": 0.25, "h": 0.3}), cid))
+    pv = call(client, "POST", f"/edit/{cid}/pip", route="/edit/{cid}/pip", json={"corner": "tl", "w": 0.9, "remember": True})
+    assert pv["edl"]["layout"]["pip"] == {"corner": "tl", "w": 0.45, "source": "yours"}
+    call(client, "POST", f"/edit/{cid}/pip", route="/edit/{cid}/pip", json={"corner": "middle"}, expect=400)
+    assert call(client, "POST", f"/edit/{cid}/notice/dismiss", route="/edit/{cid}/notice/dismiss")["ok"]
+    assert call(client, "POST", "/styles/notices/dismiss")["ok"]
+    voc = call(client, "GET", "/vocabulary")
+    assert "Vice City" in voc["terms"]
+    voc = call(client, "PUT", "/vocabulary", json={"terms": ["Leonida"], "fixes": [{"from": "vice sitty", "to": "Vice City"}]})
+    assert voc == {"terms": ["Leonida"], "fixes": [{"from": "vice sitty", "to": "Vice City"}]}
+    call(client, "PUT", "/vocabulary", json={"terms": "nope"}, expect=400)
     st = call(client, "GET", "/stickers")
     assert "🔥" in st["emoji"] and st["images"] == []
     s = call(client, "PUT", "/editor/session", json={"clip_id": cid, "t": 3.5, "panel": "Styles", "junk": 1})

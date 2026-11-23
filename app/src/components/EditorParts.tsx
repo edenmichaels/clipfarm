@@ -174,21 +174,25 @@ export function CaptionsPanel({ v, onEdl, templates, fonts, reload }: { v: View;
         ))}
       </div>
       <label className="row" style={{ gap: 8 }}><input type="checkbox" checked={c.enabled !== false} onChange={(e) => onEdl((x) => { x.captions.enabled = e.target.checked; return x; }, e.target.checked ? "Captions on" : "Captions off")} /> Show captions</label>
-      <label className="field">Position: move up or down ({Math.round(c.nudge || 0)} px)
-        <input type="range" min={-400} max={400} step={10} value={c.nudge || 0} onChange={(e) => onEdl((x) => { x.captions.nudge = +e.target.value; return x; }, "Move captions")} /></label>
+      <span className="muted tiny">Captions sit in one fixed place at the bottom for the whole clip and never move or animate. The spoken word changes colour only.</span>
+      <label className="field">Fine-tune the height for this clip ({Math.round(c.nudge || 0)} px)
+        <input type="range" min={-120} max={60} step={5} value={Math.max(-120, Math.min(60, c.nudge || 0))} onChange={(e) => onEdl((x) => { x.captions.nudge = +e.target.value; return x; }, "Caption height")} /></label>
+      <label className="field">Words per caption
+        <select value={c.words_per_chunk || tmpl.max_words || 3} onChange={(e) => onEdl((x) => { x.captions.words_per_chunk = +e.target.value; return x; }, "Words per caption")}>
+          {[1, 2, 3].map((n) => <option key={n} value={n}>{n === 3 ? "1–3 (standard)" : `Up to ${n}`}</option>)}
+          {[4, 5, 6].map((n) => <option key={n} value={n}>Up to {n} (1–2 lines)</option>)}
+        </select></label>
       <details>
         <summary>Edit this style</summary>
         <div className="grid2">
           <label className="field">Font<select value={tmpl.family || ""} onChange={(e) => set("family", e.target.value)}>{fonts.map((f) => <option key={f.family}>{f.family}</option>)}</select></label>
-          <label className="field">Size<input type="number" min={40} max={140} value={tmpl.em || 90} onChange={(e) => set("em", +e.target.value)} /></label>
+          <label className="field">Size<input type="number" min={104} max={140} value={tmpl.em || 124} onChange={(e) => set("em", +e.target.value)} /></label>
           <label className="field">Text<input type="color" value={hex(tmpl.text)} onChange={(e) => set("text", e.target.value)} /></label>
           <label className="field">Highlight<input type="color" value={hex(tmpl.highlight)} onChange={(e) => set("highlight", e.target.value)} /></label>
           <label className="field">Outline<input type="color" value={hex(tmpl.outline)} onChange={(e) => set("outline", e.target.value)} /></label>
-          <label className="field">Outline width<input type="number" min={0} max={16} value={tmpl.outline_px ?? 8} onChange={(e) => set("outline_px", +e.target.value)} /></label>
-          <label className="field">Shadow<input type="number" min={0} max={16} value={tmpl.shadow_px ?? 4} onChange={(e) => set("shadow_px", +e.target.value)} /></label>
-          <label className="field">Words at a time<input type="number" min={1} max={3} value={tmpl.max_words || 3} onChange={(e) => set("max_words", +e.target.value)} /></label>
-          <label className="field">Height on screen ({Math.round((tmpl.y ?? 0.64) * 100)}%)<input type="range" min={0.11} max={0.74} step={0.01} value={tmpl.y ?? 0.64} onChange={(e) => set("y", +e.target.value)} /></label>
-          <label className="field">Animation<select value={tmpl.animation || "pop"} onChange={(e) => set("animation", e.target.value)}>{(templates?.animations || []).map((a: string) => <option key={a}>{a}</option>)}</select></label>
+          <label className="field">Outline width<input type="number" min={6} max={12} value={tmpl.outline_px ?? 9} onChange={(e) => set("outline_px", +e.target.value)} /></label>
+          <label className="field">Shadow<input type="number" min={0} max={8} value={tmpl.shadow_px ?? 4} onChange={(e) => set("shadow_px", +e.target.value)} /></label>
+          <label className="row" style={{ gap: 6 }}><input type="checkbox" checked={tmpl.highlight_on !== false} onChange={(e) => set("highlight_on", e.target.checked)} /> Highlight the spoken word</label>
           <label className="row" style={{ gap: 6 }}><input type="checkbox" checked={!!tmpl.uppercase} onChange={(e) => set("uppercase", e.target.checked)} /> UPPERCASE</label>
           <label className="row" style={{ gap: 6 }}><input type="checkbox" checked={!!tmpl.emoji} onChange={(e) => set("emoji", e.target.checked)} /> Emoji on keywords</label>
         </div>
@@ -207,14 +211,14 @@ export function CaptionsPanel({ v, onEdl, templates, fonts, reload }: { v: View;
   );
 }
 
-const LAYOUTS: [string, string][] = [["split", "Split: facecam top, game bottom"], ["crop", "Smart crop (follows the action)"],
-  ["speaker", "Speaker-tracked crop"], ["pip", "Picture-in-picture facecam"], ["blur_fill", "Full frame, blurred background"]];
+export const LAYOUTS: [string, string][] = [["corner", "Gameplay + facecam in a corner"], ["focus", "Focus on the streamer"],
+  ["split", "Split: facecam top, game bottom"], ["crop", "Gameplay crop (fixed, on the action)"],
+  ["speaker", "Speaker crop (fixed)"], ["blur_fill", "Full frame, blurred background"]];
 
 export function LayoutPanel({ v, onEdl, post, t }: { v: View; onEdl: (fn: (e: Edl) => Edl, l: string) => void; post: (path: string, b?: any) => void; t: number }) {
   const lay = v.edl.layout;
   const kept = keptOf(v);
   const fc = lay.facecam;
-  const [box, setBox] = useState<any>(fc || { x: 0.72, y: 0.02, w: 0.26, h: 0.3 });
   return (
     <div className="stack tight">
       <div className="row wrap" style={{ gap: 6 }}>
@@ -237,18 +241,22 @@ export function LayoutPanel({ v, onEdl, post, t }: { v: View; onEdl: (fn: (e: Ed
           {i > 0 && <button className="btn-danger" onClick={() => onEdl((x) => { x.layout.keyframes.splice(i, 1); return x; }, "Remove keyframe")}>✕</button>}
         </div>
       ))}
-      <details>
-        <summary>Facecam box {fc ? "(set)" : "(auto)"}</summary>
-        <span className="muted tiny">Where the webcam is in the stream, as a share of the frame. Saved for this streamer.</span>
-        <div className="grid2">
-          {(["x", "y", "w", "h"] as const).map((k) => (
-            <label key={k} className="field">{{ x: "Left", y: "Top", w: "Width", h: "Height" }[k]} ({Math.round(box[k] * 100)}%)
-              <input type="range" min={0} max={1} step={0.01} value={box[k]} onChange={(e) => setBox({ ...box, [k]: +e.target.value })} /></label>
-          ))}
-        </div>
-        <div className="ed-fcbox"><div style={{ left: `${box.x * 100}%`, top: `${box.y * 100}%`, width: `${box.w * 100}%`, height: `${box.h * 100}%` }} /></div>
-        <button onClick={() => post(`/edit/${v.clip_id}/facecam`, box)}>Use this facecam box</button>
-      </details>
+      <span className="muted tiny">Every shot is one fixed crop: nothing pans or slides. A layout change is an instant cut.</span>
+      {(lay.keyframes || []).some((k: any) => k.layout === "corner" || k.layout === "focus") && (
+        <div className="stack tight">
+          <b className="small-text">Facecam corner</b>
+          <div className="row wrap" style={{ gap: 4 }}>
+            {[["tl", "↖ Top left"], ["tr", "↗ Top right"], ["bl", "↙ Bottom left"], ["br", "↘ Bottom right"]].map(([c, l]) => (
+              <button key={c} className={(lay.pip?.corner || "tr") === c ? "pill-btn on small" : "pill-btn small"}
+                onClick={() => post(`/edit/${v.clip_id}/pip`, { corner: c, w: lay.pip?.w ?? 0.34 })}>{l}</button>))}
+          </div>
+          <label className="field">Size {Math.round((lay.pip?.w ?? 0.34) * 100)}% of the width
+            <input type="range" min={0.25} max={0.45} step={0.01} defaultValue={lay.pip?.w ?? 0.34}
+              onMouseUp={(e: any) => post(`/edit/${v.clip_id}/pip`, { corner: lay.pip?.corner || "tr", w: +e.target.value })} /></label>
+          <button className="btn-quiet" onClick={() => post(`/edit/${v.clip_id}/pip`, { corner: lay.pip?.corner || "tr", w: lay.pip?.w ?? 0.34, remember: true })}>Save as my default for this streamer</button>
+          {lay.pip?.source === "auto" && <span className="muted tiny">Corner picked automatically: the one that hides the least of the game's HUD and action.</span>}
+        </div>)}
+      {fc && <span className="muted tiny">Facecam: {lay.facecam_source === "saved" ? "your box" : lay.facecam_source === "guess" ? "best guess (draw it below to be sure)" : "detected"}.</span>}
     </div>
   );
 }
@@ -361,9 +369,9 @@ export function EffectsPanel({ v, onEdl, t, post }: { v: View; onEdl: (fn: (e: E
         </select>
       </div>
       <div className="row wrap" style={{ gap: 6 }}>
-        <button onClick={() => add("zooms", { t: at(), kind: "punch", amount: 0.18, dur: 0.6 }, "Add zoom")}>+ Punch-in zoom at {fmt(t)}</button>
+        <button onClick={() => add("zooms", { t: at(), kind: "punch", amount: 0.18, dur: 0.6 }, "Add zoom")}>+ Zoom cut at {fmt(t)}</button>
         <button onClick={() => add("overlays", { kind: "flash", t: at(), dur: 0.15 }, "Add flash")}>+ Flash</button>
-        <button onClick={() => add("overlays", { kind: "shake", t: at(), dur: 0.5 }, "Add shake")}>+ Shake</button>
+
         {REACTION_EMOJI.map((em) => <button key={em} title="Reaction emoji" onClick={() => add("overlays", { kind: "emoji", t: at(), dur: 1.2, emoji: em }, "Add emoji")}>{em}</button>)}
       </div>
       <label className="row" style={{ gap: 8 }}><input type="checkbox" checked={e.progress_bar !== false} onChange={(x) => onEdl((y) => { y.progress_bar = x.target.checked; return y; }, "Progress bar")} /> Progress bar</label>

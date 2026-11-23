@@ -116,7 +116,7 @@ def test_caption_handle_position_and_old_zoom_factors(fresh_db, tmp_path):
     _grey_source(src, 8)
     e = _edl(src, 1.0, 7.0, "split", "bold_pop")
     y = ec.caption_y(e)
-    assert y is not None and 640 < y < 900                   # on the seam of the split layout
+    assert y is not None and 1380 < y < 1480                 # v0.8.5: the fixed bottom place, every layout
     e["captions"]["nudge"] = 120
     assert ec.caption_y(e) == y                              # the handle adds the nudge itself
     # a zoom stored as a factor (1.16) used to zoom to 216 %; it's now read as +16 %

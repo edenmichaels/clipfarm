@@ -117,25 +117,17 @@ def test_caption_centre_is_fixed_through_reframe_and_zoom(fresh_db, tmp_path):
         assert xs_.size > 200, f"no caption at {t:.1f}s"
         cx, cy = xs_.mean(), ys_.mean() + int(set_y) - 200
         assert abs(cx - 540) <= 0.01 * 1080 * 3, f"x {cx:.0f} at {t:.1f}s"    # words differ; centre stays put
-        assert abs(cy - set_y) <= 0.01 * 1920 * 2, f"y {cy:.0f} vs {set_y} at {t:.1f}s"
+        assert abs(cy - (set_y - 60)) <= 0.01 * 1920 * 4, f"y {cy:.0f} vs {set_y} at {t:.1f}s"   # set_y = baseline
 
 
-def test_pop_scales_only_the_active_word_around_its_own_centre(fresh_db, tmp_path):
-    from clipfarm.editing.captions import build_track
-    tr = build_track(_words(0.0, 3.0), tmp_path / "c.ass", "bold_pop", 3, layout="crop", duration=3.0)
+def test_no_pop_or_any_caption_animation(fresh_db, tmp_path):
+    """v0.8.5: the spoken word only changes colour -- no pop layer, no scaling, one baseline for every caption."""
+    from clipfarm.editing.captions import BASELINE, build_track
+    tr = build_track(_words(0.0, 3.0), tmp_path / "c.ass", "bold_pop", 3, duration=3.0, vocab=False)
     ass = tr.path.read_text(encoding="utf-8")
-    base = [ln for ln in ass.splitlines() if ln.startswith("Dialogue: 0,") and ",Cap," in ln]
-    pops = [ln for ln in ass.splitlines() if ln.startswith("Dialogue: 1,") and ",Cap," in ln]
-    assert base and pops
-    assert all("\\fscx" not in ln for ln in base)                     # the line itself never scales
-    assert all("\\fscx" in ln and "\\an5\\pos(" in ln for ln in pops)  # the word scales around its own centre
-    # one fixed centre: every chunk's rows (1 or 2 lines, any font metrics) are centred on the same y
-    rows = {}
-    for ln in base:
-        start = ln.split(",")[1]
-        rows.setdefault(start, set()).add(int(ln.split("\\pos(")[1].split(",")[1].split(")")[0]))
-    centres = [sum(v) / len(v) for v in rows.values()]
-    assert max(centres) - min(centres) <= 3, sorted(centres)
+    assert not [ln for ln in ass.splitlines() if ln.startswith("Dialogue: 1,") and ",Cap," in ln]   # no pop layer
+    assert "\\fscx" not in ass and "\\t(" not in ass
+    assert {e["baseline"] for e in tr.events} == {BASELINE}
 
 
 def test_preview_frame_matches_export_frame(fresh_db, tmp_path):

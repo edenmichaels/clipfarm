@@ -12,7 +12,7 @@ from .. import db
 from ..editing.ffmpeg_util import probe
 from ..editing.layout import Box
 from ..music import pick as music_pick
-from . import project, reframe, styles, templates
+from . import effects as FX, project, reframe, styles, templates
 from . import timeline as T
 
 
@@ -34,20 +34,27 @@ def auto_edit(*, media: Path, start: float, end: float, words: list[dict], strea
                   "tags": req.get("tags", []), "credit": credit, "disclosure": req.get("disclosure"),
                   "onscreen": list(req.get("onscreen", [])), "no_music": bool(program and program.get("no_music")),
                   "platforms": json.loads(program["allowed_platforms"] or "[]") if program and program.get("allowed_platforms") else []}
-    # reframe
-    fc = db.get_setting(f"facecam:{streamer['id']}")
+    # reframe: one fixed crop per shot; with a facecam: gameplay + facecam in a corner, focus on the streamer
+    # when they're the moment (v0.8.5)
+    from . import facecam as F
+    saved = F.saved_box(streamer.get("id"))
+    if saved and saved.get("by") != "you":
+        saved = None                       # an old automatic guess: detection (or you) decides now
     speech = [(w["start"], w["end"]) for w in words]
-    lay = reframe.analyse(media, e["range"][0], e["range"][1], facecam=Box(**fc) if fc else None,
-                          onscreen=e["rules"]["onscreen"], speech=speech, detect_cam=fc is None)
+    lay = reframe.analyse(media, e["range"][0], e["range"][1],
+                          facecam=Box(**{k: saved[k] for k in ("x", "y", "w", "h")}) if saved else None,
+                          onscreen=e["rules"]["onscreen"], speech=speech, detect_cam=saved is None, words=words,
+                          has_title=bool(hook), pip=db.get_setting(f"pip:{streamer.get('id')}") if streamer.get("id") else None)
     forced = settings.get("layout") or db.get_setting("layout", "auto")
     if forced and forced != "auto":
         for k in lay["keyframes"]:
             if not (k["layout"] == "blur_fill" and "streamer_overlay" in e["rules"]["onscreen"]):
-                k["layout"] = forced if (forced != "split" or lay["facecam"]) else k["layout"]
+                needs_cam = forced in ("split", "corner", "focus", "pip")
+                k["layout"] = forced if (not needs_cam or lay["facecam"]) else k["layout"]
     lay["keyframes"], _fixed = reframe.enforce_rules(lay["keyframes"], e["rules"]["onscreen"], lay["facecam"])
     e["layout"].update(lay)
-    if lay["facecam"] and not fc:
-        db.set_setting(f"facecam:{streamer['id']}", lay["facecam"])      # remembered per streamer
+    if F.should_ask(streamer.get("id"), lay.get("facecam_source", "none")):
+        e["layout"]["facecam_ask"] = True      # the Editor asks you once to draw this streamer's facecam
     # captions
     e["captions"]["template"] = templates.default_for(program["id"] if program else None, account_ids)
     # hook + moment
@@ -57,9 +64,9 @@ def auto_edit(*, media: Path, start: float, end: float, words: list[dict], strea
                    "score": (moment["viral"] / 100) if moment.get("viral") is not None else moment.get("score"),
                    "viral": moment.get("viral"), "tags": moment.get("tags") or [], "why": moment.get("why") or [],
                    "setup_start": moment.get("setup_start")}
-    # zooms: punch-in on the payoff
-    if peak is not None and settings.get("zoom", True):
-        e["zooms"] = [{"t": round(peak - 0.15, 3), "kind": "punch", "amount": 0.12, "dur": 1.0}]
+    # zooms: OFF by default (v0.8.5). With zoom cuts on, an instant cut to a centred zoom on the payoff and back.
+    if peak is not None and settings.get("zoom", True) and FX.zoom_cuts_on(e):
+        e["zooms"] = [{"t": round(peak - 0.15, 3), "kind": "punch", "amount": 0.12, "dur": 1.0, "auto": True}]
     e["progress_bar"] = settings.get("progress_bar", True)
     # music
     plan_music(e, account_ids, settings, program, seed=moment.get("id"))

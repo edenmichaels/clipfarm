@@ -32,9 +32,55 @@ PRESETS = {   # export presets per platform
 
 
 # ---- layouts as filter graphs with named pads --------------------------------------------------------
+def _rounded(out: str, pw: int, ph: int) -> str:
+    """The pad's picture with a thin white border, rounded corners (alpha) -> [out]."""
+    from .facecam import BORDER, RADIUS
+    r = RADIUS
+    return (f"pad=iw+{2 * BORDER}:ih+{2 * BORDER}:{BORDER}:{BORDER}:color=white,format=yuva420p,"
+            f"geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':"
+            f"a='255*lte(hypot(max(0,abs(X-W/2+0.5)-(W/2-{r})),max(0,abs(Y-H/2+0.5)-(H/2-{r}))),{r})'[{out}]")
+
+
+def _pip_over(base: str, small: str, out: str, rect: tuple[int, int, int, int]) -> str:
+    """Soft shadow, then the rounded picture, over the base picture at rect (border included)."""
+    x, y, pw, ph = rect
+    sp = 26
+    return (f"color=c=black:s={pw}x{ph}:r=30,format=yuva420p,colorchannelmixer=aa=0.5,"
+            f"pad={pw + 2 * sp}:{ph + 2 * sp}:{sp}:{sp}:color=black@0,boxblur=luma_radius=0:chroma_radius=0:"
+            f"alpha_radius=12:alpha_power=2[{out}sh];"
+            f"[{base}][{out}sh]overlay=x={x - sp + 4}:y={y - sp + 9}:shortest=1[{out}bs];"
+            f"[{out}bs][{small}]overlay=x={x}:y={y}:shortest=1,setsar=1[{out}]")
+
+
 def piece_graph(lay: str, inp: str, out: str, sw: int, sh: int, cam: dict | None, path: list,
-                cam_h: int = 640, seam_line: bool = False) -> str:
+                cam_h: int = 640, seam_line: bool = False, pip: dict | None = None, has_title: bool = False) -> str:
+    """One shot -> 1080x1920. Every crop here is FIXED for the whole shot: nothing pans, slides or zooms."""
     keys = [(float(t), float(x)) for t, x in (path or [[0, 0.5]])]
+    if lay in ("corner", "focus") and cam:
+        from . import facecam as F
+        fx, fy, fw, fh = int(cam["x"] * sw), int(cam["y"] * sh), int(cam["w"] * sw), int(cam["h"] * sh)
+        fw, fh = max(2, fw // 2 * 2), max(2, fh // 2 * 2)
+        cw = min(sw, int(sh * 9 / 16)) // 2 * 2
+        gx = L.fixed_x(keys, sw, cw)
+        if lay == "corner":
+            x, y, pw, ph = F.pip_rect(pip, F.cam_aspect(cam, sw, sh), has_title)
+            iw, ih = pw - 2 * F.BORDER, ph - 2 * F.BORDER
+            return (f"[{inp}]split=2[{out}a][{out}b];"
+                    f"[{out}a]crop={cw}:{sh}:{gx}:0,scale={W}:{H},setsar=1[{out}g];"
+                    f"[{out}b]crop={fw}:{fh}:{fx}:{fy},scale={iw}:{ih}:force_original_aspect_ratio=increase,"
+                    f"crop={iw}:{ih},setsar=1,{_rounded(out + 'c', iw, ih)};"
+                    + _pip_over(f"{out}g", f"{out}c", out, (x, y, pw, ph)))
+        # focus: the streamer fills the frame (fixed crop of the webcam), the gameplay small in the corner
+        x, y, pw, ph = F.pip_rect({**(pip or {}), "w": max(0.38, float((pip or {}).get("w", 0.4)))}, sw / sh, has_title)
+        iw, ih = pw - 2 * F.BORDER, ph - 2 * F.BORDER
+        return (f"[{inp}]split=2[{out}a][{out}b];"
+                f"[{out}a]crop={fw}:{fh}:{fx}:{fy},scale={W}:{H}:force_original_aspect_ratio=increase,"
+                f"crop={W}:{H},setsar=1[{out}f];"
+                f"[{out}b]scale={iw}:{ih}:force_original_aspect_ratio=increase,crop={iw}:{ih},setsar=1,"
+                f"{_rounded(out + 'c', iw, ih)};"
+                + _pip_over(f"{out}f", f"{out}c", out, (x, y, pw, ph)))
+    if lay in ("corner", "focus"):
+        lay = "crop"
     if lay == "cam_full" and cam:
         # Full Reaction: the facecam fills the screen (scaled up to cover 1080x1920, centred on the cam box)
         fx, fy, fw, fh = int(cam["x"] * sw), int(cam["y"] * sh), int(cam["w"] * sw), int(cam["h"] * sh)
@@ -50,21 +96,27 @@ def piece_graph(lay: str, inp: str, out: str, sw: int, sh: int, cam: dict | None
         gw = min(sw, int(sh * W / game_h)) // 2 * 2
         return (f"[{inp}]split=2[{out}a][{out}b];"
                 f"[{out}a]crop={fw}:{fh}:{fx}:{fy},scale={W}:{cam_h}:force_original_aspect_ratio=increase,crop={W}:{cam_h}[{out}c];"
-                f"[{out}b]crop={gw}:{sh}:'{L._lerp_expr(keys, sw, gw)}':0,scale={W}:{game_h}:force_original_aspect_ratio=increase,"
+                f"[{out}b]crop={gw}:{sh}:{L.fixed_x(keys, sw, gw)}:0,scale={W}:{game_h}:force_original_aspect_ratio=increase,"
                 f"crop={W}:{game_h}[{out}g];[{out}c][{out}g]vstack=inputs=2,setsar=1{seam}[{out}]")
     if lay in ("crop", "speaker") or (lay == "pip" and not cam):
         cw = min(sw, int(sh * 9 / 16)) // 2 * 2
-        return f"[{inp}]crop={cw}:{sh}:'{L._lerp_expr(keys, sw, cw)}':0,scale={W}:{H},setsar=1[{out}]"
+        return f"[{inp}]crop={cw}:{sh}:{L.fixed_x(keys, sw, cw)}:0,scale={W}:{H},setsar=1[{out}]"
     if lay == "pip":
         cw = min(sw, int(sh * 9 / 16)) // 2 * 2
         fx, fy, fw, fh = int(cam["x"] * sw), int(cam["y"] * sh), int(cam["w"] * sw), int(cam["h"] * sh)
         return (f"[{inp}]split=2[{out}a][{out}b];"
-                f"[{out}a]crop={cw}:{sh}:'{L._lerp_expr(keys, sw, cw)}':0,scale={W}:{H},setsar=1[{out}g];"
+                f"[{out}a]crop={cw}:{sh}:{L.fixed_x(keys, sw, cw)}:0,scale={W}:{H},setsar=1[{out}g];"
                 f"[{out}b]crop={fw}:{fh}:{fx}:{fy},scale=420:-2,pad=iw+8:ih+8:4:4:white[{out}c];"
                 f"[{out}g][{out}c]overlay=x=60:y=250[{out}]")
     return (f"[{inp}]split=2[{out}a][{out}b];"
             f"[{out}a]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},boxblur=20:2,eq=brightness=-0.08[{out}bg];"
             f"[{out}b]scale={W}:-2[{out}fg];[{out}bg][{out}fg]overlay=(W-w)/2:(H-h)/2,setsar=1[{out}]")
+
+
+def _has_title(edl: dict) -> bool:
+    """A title at the top pushes the corner facecam down (it never covers the title)."""
+    h = edl.get("hook") or {}
+    return bool(h.get("text")) and not h.get("hidden") and h.get("box") != "none"
 
 
 def _item(edl: dict, i: int) -> dict:
@@ -100,6 +152,7 @@ def base_key(edl: dict) -> str:
     stat = [f"{p}:{p.stat().st_size}:{int(p.stat().st_mtime)}" if p.exists() else f"{p}:missing" for p in srcs]
     lay = edl.get("layout") or {}
     blob = json.dumps({"src": stat, "cam_h": lay.get("cam_h", 640), "seam": bool(lay.get("seam_line")),
+                       "pip": lay.get("pip"), "title": _has_title(edl),
                        "pieces": [(tuple(sg), k.get("layout"), k.get("cam"), k.get("path"), k.get("t"))
                                   for sg, k in pieces(edl)]}, sort_keys=True)
     return hashlib.sha1(blob.encode()).hexdigest()[:16]
@@ -144,6 +197,7 @@ def render_base(edl: dict, cache: Path, quality: str = "export") -> tuple[Path, 
     main_src = edl["source"]
     has_a = main_src.get("has_audio", True) or any(_item(edl, i)["source"].get("has_audio", True) for i in items)
     cam_h, seam = int(edl["layout"].get("cam_h", 640)), bool(edl["layout"].get("seam_line"))
+    pip, has_title = edl["layout"].get("pip"), _has_title(edl)
     g, pads = [], []
     for n, (sg, kf) in enumerate(ps):
         src, k, ss = _item(edl, sg.item)["source"], idx[sg.item], ss_of[sg.item]
@@ -158,7 +212,7 @@ def render_base(edl: dict, cache: Path, quality: str = "export") -> tuple[Path, 
             rel = [[(float(t) - (sg.a - kf["t"])) / sg.speed, x] for t, x in (kf.get("path") or [[0, 0.5]])]
             rel = [[max(0.0, t), x] for t, x in rel] or [[0, 0.5]]
         g.append(piece_graph(kf["layout"], f"s{n}", f"v{n}", src["width"], src["height"], kf.get("cam"), rel,
-                             cam_h, seam))
+                             cam_h, seam, pip, has_title))
         g.append(f"[v{n}]fps=30,format=yuv420p[w{n}]")
         pads.append(f"[w{n}]")
         if has_a:
@@ -183,7 +237,7 @@ def render_base(edl: dict, cache: Path, quality: str = "export") -> tuple[Path, 
     if res.returncode != 0:
         raise RuntimeError(f"FFmpeg failed (edit base): {res.stderr[-1500:]}")
     first = ps[0][1]["layout"]
-    meta = {"layout": "crop" if first in ("speaker", "pip", "cam_full") else first, "src_w": main_src["width"],
+    meta = {"layout": "crop" if first in ("speaker", "pip", "cam_full", "corner", "focus") else first, "src_w": main_src["width"],
             "src_h": main_src["height"], "has_audio": has_a, "duration": round(sum(sg.length for sg, _ in ps), 3),
             "key": key}
     meta_p.write_text(json.dumps(meta), encoding="utf-8")
@@ -248,7 +302,7 @@ def layer_specs(edl: dict, dur: float) -> dict:
     zooms = [{"t": max(0.0, x["t"] - float(x.get("dur", 0.4)) / 2), "kind": "punch",
               "amount": 0.25 if x["kind"] == "zoom" else 0.15, "dur": float(x.get("dur", 0.4))}
              for x in tr if x["kind"] in ("zoom", "whip")]
-    shakes = [(max(0.0, x["t"] - 0.15), x["t"] + 0.15) for x in tr if x["kind"] == "whip"]
+    shakes: list = []          # v0.8.5: a "whip" is an instant zoom cut now, never a shake
     return {"text_layers": texts, "emojis": emojis, "stickers": images, "color": edl.get("color"),
             "transform": edl.get("transform"), "transitions": tr, "zooms": zooms, "shakes": shakes,
             "audio_keys": edl.get("audio_keys") or {}}
@@ -317,19 +371,16 @@ def spec_for(edl: dict, out: Path, base: Path, quality: str = "export", music: b
         source=base, start=0.0, end=dur, out=out, layout="crop", words=words, base=base,
         template=template, caption_style=cap.get("template") if isinstance(cap.get("template"), str) else "bold_pop",
         captions_enabled=cap.get("enabled", True) and edl["export"].get("captions", "burned") == "burned",
-        caption_nudge=float(cap.get("nudge", 0)), keep_clear=tuple(rules.get("onscreen") or ()),
+        caption_nudge=float(cap.get("nudge", 0)),
         hook=None if hk.get("hidden") else hk.get("text"),
         hook_sec=dur if hk.get("whole") else float(hk.get("sec", 2.2)),
-        title_box=hk.get("box") or "outline", title_pos=hk.get("position"),
-        caption_position=cap.get("position"), cam_h=int(edl["layout"].get("cam_h", 640)),
+        title_box=hk.get("box") or "outline",
         words_per_chunk=cap.get("words_per_chunk"), emoji=bool(cap.get("emoji")),
         credit=None if edl.get("credit_hidden") else rules.get("credit"),
-        progress_bar=edl.get("progress_bar", True), punch_zoom=False,
-        layout_segments=layout_segments(edl), zooms=zooms, flashes=fl, shakes=sh, sfx=sfx,
+        progress_bar=edl.get("progress_bar", True), zooms=zooms, flashes=fl, shakes=sh, sfx=sfx,
         music=Path(m["path"]) if use_music else None, music_offset=float(m.get("offset", 0)),
         music_entry=float(m.get("entry", 0)), music_delay=float(m.get("delay", 0)), music_track_lufs=m.get("loudness"),
         music_volume_db=float(m.get("volume_db", 0)), duck_db=float(m.get("duck_db", 15)), speech=speech, swells=swells,
-        beats=[b for b in (m.get("zoom_beats") or []) if b <= dur] if use_music else [],
         speech_gain_db=float(edl["audio"].get("speech_gain_db", 0)), enhance=bool(edl["audio"].get("enhance")),
         denoise=bool(edl["audio"].get("denoise")), target_lufs=float(edl["audio"].get("target_lufs", -14)),
         scale_to=(540, 960) if quality == "proxy" else None, quality="fast" if quality == "proxy" else "high",
@@ -337,8 +388,7 @@ def spec_for(edl: dict, out: Path, base: Path, quality: str = "export", music: b
         emojis=emojis, broll=broll, logo=logo, cards=cards,
         progress_color=brand.get("progress_color") or "FFE500",
         text_layers=lay["text_layers"], stickers=lay["stickers"], color=lay["color"], transform=lay["transform"],
-        transitions=lay["transitions"], audio_keys=lay["audio_keys"],
-        credit_pos=brand.get("credit_pos"),
+        transitions=lay["transitions"], audio_keys=lay["audio_keys"], credit_pos=brand.get("credit_pos"),
         )
 
 
@@ -376,18 +426,10 @@ def render_frame(edl: dict, t_out: float, out: Path, cache: Path, quality: str =
 
 
 def caption_y(edl: dict, template: dict | None = None) -> float | None:
-    """Centre y (1920 px canvas, before the user's nudge) of the caption block, for the Editor's drag handle."""
-    import tempfile
-    from ..editing.render import track_for
-    words = T.words_out(edl)
-    if not words or not edl["captions"].get("enabled", True):
+    """Middle of a one-line caption (1920 px canvas, before your nudge), for the Editor's drag handle. Captions sit in
+    one fixed place for every clip and layout, so this is a constant (None when the clip has no captions)."""
+    from ..editing import captions as C
+    if not edl["captions"].get("enabled", True) or not T.words_out(edl):
         return None
-    ps = pieces(edl)
-    first = ps[0][1]["layout"] if ps else "blur_fill"
-    meta = {"layout": "crop" if first in ("speaker", "pip", "cam_full") else first, "src_w": edl["source"]["width"],
-            "src_h": edl["source"]["height"], "duration": T.duration(edl)}
-    with tempfile.TemporaryDirectory() as d:
-        spec = spec_for(edl, Path(d) / "o.mp4", Path(d) / "b.mp4", "export", False, template)
-        spec.words, spec.text_layers, spec.hook, spec.credit = words[:4], [], None, None
-        tr = track_for(spec, meta, Path(d) / "c.ass")
-    return round(tr.events[0]["y"] - spec.caption_nudge, 1) if tr.events else None
+    pr = C.template_from(template or edl["captions"].get("template"))
+    return round(C.BASELINE - pr.em * 0.35, 1)

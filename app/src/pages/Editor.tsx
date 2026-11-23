@@ -329,7 +329,8 @@ function Studio({ clip, bin, onChanged, go, msg, setMsg, session }: {
   const flags: any[] = score?.flags || [];
 
   // on-canvas handles: text, stickers and the caption block can be dragged on the preview
-  const overlay = (s: number) => <CanvasLayers v={v} t={t} s={s} sel={sel} setSel={setSel} onEdl={onEdl} />;
+  const overlay = (s: number) => <CanvasLayers v={v} t={t} s={s} sel={sel} setSel={setSel} onEdl={onEdl}
+    onPip={(corner, w) => post(`/edit/${cid}/pip`, { corner, w })} />;
 
   return (
     <div className="studio">
@@ -367,8 +368,12 @@ function Studio({ clip, bin, onChanged, go, msg, setMsg, session }: {
         <button className="btn-primary" disabled={!!busy} onClick={sendToPost}>Send to Post</button>
         <button className="btn-quiet" onClick={() => setSheet(true)} aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)">⌨</button>
       </header>
-      {(msg || restore || rated != null) && (
+      {(msg || restore || rated != null || v.notice || v.edl.layout?.facecam_ask) && (
         <div className="st-msgs">
+          {v.notice && <div className="ed-flag"><span>ℹ {v.notice}</span>
+            <button className="btn-quiet" onClick={() => api.post(`/edit/${cid}/notice/dismiss`).then(() => setV({ ...v, notice: null }))}>OK</button></div>}
+          {v.edl.layout?.facecam_ask && <div className="ed-flag"><span>We're not sure exactly where this streamer's webcam is. Draw it once and every clip of theirs uses it.</span>
+            <button onClick={() => setRight("Layout")}>Draw the facecam</button></div>}
           {restore && <div className="ed-flag"><span>Unsaved change from {new Date(restore.at).toLocaleTimeString()} ({restore.label}) was found after ClipFarm closed.</span>
             <button onClick={() => { onEdl(() => restore.edl, `Restored: ${restore.label}`); setRestore(null); }}>Restore it</button>
             <button className="btn-quiet" onClick={() => { setRestore(null); api.put("/editor/session", { draft: null }).catch(() => {}); }}>Discard</button></div>}
@@ -436,7 +441,7 @@ function Studio({ clip, bin, onChanged, go, msg, setMsg, session }: {
           {right === "Captions" && <CaptionsPanel v={v} onEdl={onEdl} templates={templates} fonts={fonts}
             reload={() => { api.get(`/edit/${cid}`).then(show); api.get("/caption-templates").then(setTemplates); }} />}
           {right === "Title" && <HookPanel v={v} onEdl={onEdl} post={post} />}
-          {right === "Layout" && <div className="stack"><LayoutPanel v={v} onEdl={onEdl} post={post} t={t} /><FacecamEditor v={v} onEdl={onEdl} /></div>}
+          {right === "Layout" && <div className="stack"><LayoutPanel v={v} onEdl={onEdl} post={post} t={t} /><FacecamEditor v={v} onSaved={show} /></div>}
           {right === "Colour" && <ColourPanel v={v} onEdl={onEdl} />}
           {right === "Audio" && <AudioKeysPanel v={v} onEdl={onEdl} t={t} />}
           {right === "Effects" && <EffectsPanel v={v} onEdl={onEdl} t={t} post={post} />}
@@ -463,7 +468,8 @@ function Studio({ clip, bin, onChanged, go, msg, setMsg, session }: {
 }
 
 /** Drag text layers, stickers and the caption block right on the preview. */
-function CanvasLayers({ v, t, s, sel, setSel, onEdl }: { v: any; t: number; s: number; sel: Sel; setSel: (x: Sel) => void; onEdl: (fn: (e: any) => any, l: string) => void }) {
+function CanvasLayers({ v, t, s, sel, setSel, onEdl, onPip }: { v: any; t: number; s: number; sel: Sel; setSel: (x: Sel) => void;
+  onEdl: (fn: (e: any) => any, l: string) => void; onPip: (corner: string, w: number) => void }) {
   const [drag, setDrag] = useState<any>(null);
   const e = v.edl;
   const W = 1080 * s, H = 1920 * s;
@@ -474,8 +480,18 @@ function CanvasLayers({ v, t, s, sel, setSel, onEdl }: { v: any; t: number; s: n
   const up = () => {
     if (!drag) return;
     const { kind, i, dx, dy } = drag;
-    if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
-      if (kind === "caps") onEdl((x) => { x.captions.nudge = Math.round((x.captions.nudge || 0) + dy / s); return x; }, "Move captions");
+    if (kind === "pip" || kind === "pipsize") {
+      const [x, y, w, h] = v.pip_rect;
+      if (kind === "pip" && (Math.abs(dx) > 4 || Math.abs(dy) > 4)) {
+        const cx = (x + w / 2) * s + dx, cy = (y + h / 2) * s + dy;         // snap to the nearest corner
+        onPip(`${cy < 960 * s ? "t" : "b"}${cx < 540 * s ? "l" : "r"}`, v.edl.layout.pip?.w ?? 0.34);
+      } else if (kind === "pipsize" && Math.abs(dx) > 2) {
+        const right = (v.edl.layout.pip?.corner || "tr").endsWith("r");
+        const nw = Math.max(0.25, Math.min(0.45, (w + (right ? -dx : dx) / s) / 1080));
+        onPip(v.edl.layout.pip?.corner || "tr", +nw.toFixed(3));
+      }
+    } else if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
+      if (kind === "caps") onEdl((x) => { x.captions.nudge = Math.max(-120, Math.min(60, Math.round((x.captions.nudge || 0) + dy / s))); return x; }, "Caption height");
       else {
         const list = kind === "text" ? "text_layers" : "stickers";
         onEdl((x) => { const L = x[list][i]; L.x = +Math.max(0, Math.min(1, L.x + dx / W)).toFixed(4); L.y = +Math.max(0, Math.min(1, L.y + dy / H)).toFixed(4); return x; }, kind === "text" ? "Move text" : "Move sticker");
@@ -496,9 +512,20 @@ function CanvasLayers({ v, t, s, sel, setSel, onEdl }: { v: any; t: number; s: n
             style={{ left: L.x * W - w / 2 + d.dx, top: L.y * H - h / 2 + d.dy, width: w, height: h, pointerEvents: "auto" }}
             onMouseDown={(ev) => { ev.preventDefault(); ev.stopPropagation(); setSel({ kind, i }); setDrag({ kind, i, x0: ev.clientX, y0: ev.clientY, dx: 0, dy: 0 }); }} />);
       })}
+      {v.pip_rect && (() => {
+        const [x, y, w, h] = v.pip_rect;
+        const d = drag && drag.kind === "pip" ? drag : { dx: 0, dy: 0 };
+        const right = (e.layout.pip?.corner || "tr").endsWith("r");
+        return (
+          <div className="cv-item cv-pip" title="Drag the facecam to another corner; drag its inner corner to resize"
+            style={{ left: x * s + d.dx, top: y * s + d.dy, width: w * s, height: h * s, pointerEvents: "auto" }}
+            onMouseDown={(ev) => { ev.preventDefault(); ev.stopPropagation(); setDrag({ kind: "pip", i: 0, x0: ev.clientX, y0: ev.clientY, dx: 0, dy: 0 }); }}>
+            <i className={right ? "rs l" : "rs r"} onMouseDown={(ev) => { ev.preventDefault(); ev.stopPropagation(); setDrag({ kind: "pipsize", i: 0, x0: ev.clientX, y0: ev.clientY, dx: 0, dy: 0 }); }} />
+          </div>);
+      })()}
       {e.captions?.enabled !== false && capY != null && (
         <div className="cv-caps" title="Drag up or down to move the captions"
-          style={{ top: (capY + (e.captions?.nudge || 0)) * s - 30 * s + (drag?.kind === "caps" ? drag.dy : 0), pointerEvents: "auto" }}
+          style={{ top: (capY + Math.max(-120, Math.min(60, e.captions?.nudge || 0))) * s - 30 * s + (drag?.kind === "caps" ? drag.dy : 0), pointerEvents: "auto" }}
           onMouseDown={(ev) => { ev.preventDefault(); setDrag({ kind: "caps", i: 0, x0: ev.clientX, y0: ev.clientY, dx: 0, dy: 0 }); }}>⇕ captions</div>)}
     </div>
   );

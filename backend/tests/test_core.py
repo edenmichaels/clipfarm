@@ -13,7 +13,7 @@ import pytest
 
 from clipfarm import compliance, db
 from clipfarm.discovery.ranking import RankInput, clip_profit_score
-from clipfarm.editing.captions import build_ass
+from clipfarm.editing.captions import build_track
 from clipfarm.highlights import dedupe, scorer, signals
 from clipfarm.posting.scheduler import plan_slots
 
@@ -109,8 +109,8 @@ def test_permission_gate(fresh_db):
 # ---- captions / scheduler --------------------------------------------------------------------------
 def test_ass_word_events(tmp_path):
     words = [{"word": w, "start": 10 + i * 0.5, "end": 10.4 + i * 0.5} for i, w in enumerate("one two three four".split())]
-    out = build_ass(words, tmp_path / "c.ass", offset=10)
-    text = out.read_text()
+    out = build_track(words, tmp_path / "c.ass", offset=10, vocab=False).path
+    text = out.read_text(encoding="utf-8")
     starts = {l.split(",")[1] for l in text.splitlines() if l.startswith("Dialogue: 0,")}
     assert len(starts) == 4                # one highlight event per word (a chunk may span two lines)
     assert "0:00:00.00" in text            # offset applied

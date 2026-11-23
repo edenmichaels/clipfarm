@@ -5,9 +5,8 @@ import { api } from "../api";
 
 type Style = any;
 
-const LAYOUT_LABEL: Record<string, string> = { split: "Facecam on top + gameplay", full_reaction: "Streamer full screen",
-  gameplay: "Gameplay only", auto: "Keep the AI reframe" };
-const POS_LABEL: Record<string, string> = { seam: "On the seam", upper: "Upper third", centre: "Centre", lower: "Lower third" };
+const LAYOUT_LABEL: Record<string, string> = { corner: "Gameplay + facecam in a corner", split: "Facecam on top + gameplay",
+  full_reaction: "Streamer full screen", gameplay: "Gameplay only", auto: "Keep the AI layout" };
 const BOX_LABEL: Record<string, string> = { white_box: "White box", black_box: "Black box", outline: "Outline only", none: "No title" };
 
 function ago(iso?: string | null) {
@@ -19,14 +18,16 @@ function ago(iso?: string | null) {
 // A small schematic of the style (not a render): where facecam, captions and title go.
 export function StyleThumb({ s, small }: { s: Style; small?: boolean }) {
   const w = small ? 54 : 72, h = w * 16 / 9;
-  const split = s.layout.mode === "split" || (s.layout.mode === "auto" && s.key !== "clean");
+  const split = s.layout.mode === "split";
+  const corner = s.layout.mode === "corner" || s.layout.mode === "auto";
   const camH = split ? h * s.layout.cam_ratio : 0;
-  const capY = { seam: split ? camH + h * 0.04 : h * 0.64, upper: split ? camH + h * 0.14 : h * 0.3, centre: h * 0.5, lower: h * 0.66 }[s.captions.position as string] ?? h * 0.6;
+  const capY = h * 0.74;                       // captions: one fixed place at the bottom, every style
   return (
     <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} aria-hidden className="style-thumb">
       <rect width={w} height={h} rx={4} fill={s.layout.mode === "full_reaction" ? "#5a4a44" : "#3d4450"} />
       {split && <rect width={w} height={camH} rx={4} fill="#2a3242" />}
       {split && s.layout.seam_line && <rect y={camH - 1} width={w} height={2} fill="#000" />}
+      {corner && <rect x={w * (1 - 0.05 - s.layout.pip_w)} y={h * 0.23} width={w * s.layout.pip_w} height={w * s.layout.pip_w * 0.56} rx={2} fill="#2a3242" stroke="#fff" strokeWidth={0.8} />}
       {s.title.box !== "none" && <rect x={w * 0.14} y={h * 0.09} width={w * 0.72} height={h * 0.06} rx={1}
         fill={s.title.box === "white_box" ? "#fff" : s.title.box === "black_box" ? "#000" : "transparent"}
         stroke={s.title.box === "outline" ? "#fff" : "none"} strokeWidth={1} />}
@@ -44,15 +45,19 @@ function StyleEditor({ s, onChange }: { s: Style; onChange: (s: Style) => void }
       <h3>Layout</h3>
       <label className="field">Layout <select value={s.layout.mode} onChange={(e) => set("layout", "mode", e.target.value)}>
         {Object.entries(LAYOUT_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></label>
-      <label className="field">Facecam height: {Math.round(s.layout.cam_ratio * 100)}% of the video
-        <input type="range" min={0.35} max={0.45} step={0.01} value={s.layout.cam_ratio}
-          onChange={(e) => set("layout", "cam_ratio", +e.target.value)} /></label>
-      <label className="row"><input type="checkbox" checked={s.layout.seam_line} onChange={(e) => set("layout", "seam_line", e.target.checked)} /> Thin line on the seam</label>
+      {(s.layout.mode === "corner" || s.layout.mode === "auto") && <label className="field">Corner facecam size: {Math.round(s.layout.pip_w * 100)}% of the width
+        <input type="range" min={0.3} max={0.38} step={0.01} value={s.layout.pip_w} onChange={(e) => set("layout", "pip_w", +e.target.value)} /></label>}
+      <label className="row"><input type="checkbox" checked={s.layout.focus} onChange={(e) => set("layout", "focus", e.target.checked)} /> Cut to the streamer when they're the moment</label>
+      {s.layout.mode === "split" && <>
+        <label className="field">Facecam height: {Math.round(s.layout.cam_ratio * 100)}% of the video
+          <input type="range" min={0.35} max={0.45} step={0.01} value={s.layout.cam_ratio}
+            onChange={(e) => set("layout", "cam_ratio", +e.target.value)} /></label>
+        <label className="row"><input type="checkbox" checked={s.layout.seam_line} onChange={(e) => set("layout", "seam_line", e.target.checked)} /> Thin line on the seam</label></>}
+      <span className="muted tiny">Nothing ever pans: every shot is one fixed crop.</span>
       <h3>Captions</h3>
-      <label className="field">Position <select value={s.captions.position} onChange={(e) => set("captions", "position", e.target.value)}>
-        {Object.entries(POS_LABEL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select></label>
-      <label className="field">Words on screen <select value={s.captions.words} onChange={(e) => set("captions", "words", +e.target.value)}>
-        {[1, 2, 3].map((n) => <option key={n} value={n}>{n}</option>)}</select></label>
+      <span className="muted tiny">Always static at the bottom, Montserrat, no animation.</span>
+      <label className="field">Words per caption <select value={s.captions.words} onChange={(e) => set("captions", "words", +e.target.value)}>
+        {[1, 2, 3, 4, 5, 6].map((n) => <option key={n} value={n}>{n <= 3 ? `Up to ${n}` : `Up to ${n} (1–2 lines)`}</option>)}</select></label>
       <label className="row"><input type="checkbox" checked={s.captions.highlight} onChange={(e) => set("captions", "highlight", e.target.checked)} /> Highlight the spoken word</label>
       {s.captions.highlight && <label className="field">Highlight colour <input type="color" value={"#" + s.captions.highlight_color}
         onChange={(e) => set("captions", "highlight_color", e.target.value.slice(1).toUpperCase())} /></label>}
@@ -63,15 +68,14 @@ function StyleEditor({ s, onChange }: { s: Style; onChange: (s: Style) => void }
       <label className="row"><input type="checkbox" checked={s.title.whole} onChange={(e) => set("title", "whole", e.target.checked)} /> Show for the whole clip</label>
       {!s.title.whole && <label className="field">Show for {s.title.seconds}s
         <input type="range" min={1} max={8} step={0.5} value={s.title.seconds} onChange={(e) => set("title", "seconds", +e.target.value)} /></label>}
-      <label className="field">Where <select value={s.title.position} onChange={(e) => set("title", "position", e.target.value)}>
-        <option value="top">Top</option><option value="seam">On the seam</option></select></label>
       <h3>Pacing &amp; effects</h3>
-      <label className="field">Zoom strength {Math.round(s.pacing.zoom * 100)}%
-        <input type="range" min={0} max={1} step={0.05} value={s.pacing.zoom} onChange={(e) => set("pacing", "zoom", +e.target.value)} /></label>
+      <label className="row"><input type="checkbox" checked={s.pacing.zoom_cuts} onChange={(e) => set("pacing", "zoom_cuts", e.target.checked)} /> Zoom cuts on the payoff (instant, centred: no animation)</label>
+      {s.pacing.zoom_cuts && <label className="field">Zoom amount {Math.round(s.pacing.zoom * 100)}%
+        <input type="range" min={0} max={1} step={0.05} value={s.pacing.zoom} onChange={(e) => set("pacing", "zoom", +e.target.value)} /></label>}
       <label className="row"><input type="checkbox" checked={s.pacing.cut_silence} onChange={(e) => set("pacing", "cut_silence", e.target.checked)} /> Cut pauses longer than {s.pacing.max_gap}s (never the payoff)</label>
-      {(["flash", "shake", "sfx", "emoji"] as const).map((k) => (
+      {(["flash", "sfx", "emoji"] as const).map((k) => (
         <label key={k} className="row"><input type="checkbox" checked={s.effects[k]} onChange={(e) => set("effects", k, e.target.checked)} />
-          {{ flash: "Flash on the payoff", shake: "Shake on the payoff", sfx: "Sound effects", emoji: "Reaction emojis" }[k]}</label>))}
+          {{ flash: "Flash on the payoff", sfx: "Sound effects", emoji: "Reaction emojis" }[k]}</label>))}
       <label className="row"><input type="checkbox" checked={s.audio.music} onChange={(e) => set("audio", "music", e.target.checked)} /> Music (licensed tracks only)</label>
       {s.audio.music && <label className="field">Music level {s.audio.music_db > 0 ? "+" : ""}{s.audio.music_db} dB
         <input type="range" min={-12} max={6} step={1} value={s.audio.music_db} onChange={(e) => set("audio", "music_db", +e.target.value)} /></label>}
@@ -103,6 +107,9 @@ export function StylesPanel({ cid, current, onApplied, compact }: { cid?: number
   };
   return (
     <div className="stack tight styles-panel">
+      {(d.notices || []).length > 0 && <div className="ed-flag"><span>Updated your saved styles to the new rules (no moving captions, pans or shakes):{" "}
+        {d.notices.map((n: any) => `${n.name} (${n.changes.join("; ")})`).join(" · ")}</span>
+        <button className="btn-quiet" onClick={() => api.post("/styles/notices/dismiss").then(load)}>OK</button></div>}
       <div className="row between"><b>Trending Styles</b>
         <span className="muted small-text" title="When you last added a style reference or saved a style">Style last updated: {ago(d.last_updated)}</span></div>
       <div className={compact ? "style-grid compact" : "style-grid"}>
@@ -201,7 +208,7 @@ export function StyleReferences({ onStyle }: { onStyle?: () => void }) {
       </div>
       {made && <div className="card stack tight"><b>Made “{made.saved?.name}” ({made.method})</b>
         <span className="small-text">Found: {made.found.layout === "split" ? `split, facecam ${Math.round((made.found.seam_y || 0) * 100)}%` : made.found.layout};
-          captions {POS_LABEL[made.found.caption_position] || "not found"}, {made.found.words || "?"} word(s){made.found.highlight_color ? `, highlight #${made.found.highlight_color}` : ", no highlight"};
+          {made.found.words || "?"} word(s) per caption{made.found.highlight_color ? `, highlight #${made.found.highlight_color}` : ", no highlight"};
           title {BOX_LABEL[made.found.title_box] || "not found"}. Tweak it in Styles.</span></div>}
       {msg && <span className="muted small-text" role="status">{msg}</span>}
     </section>

@@ -18,6 +18,7 @@ MAX_VERSIONS = 200
 def blank(source: dict, words: list[dict], start: float, end: float) -> dict:
     return {
         "v": SCHEMA,
+        "framing": "fixed",          # v0.8.5: one fixed crop per shot, no camera moves
         "source": source,                                   # {path, url, start, end, width, height, fps, has_audio}
         "range": [round(start, 3), round(end, 3)],          # source time
         "cuts": [],                                         # [[a, b]] source time
@@ -42,11 +43,39 @@ def blank(source: dict, words: list[dict], start: float, end: float) -> dict:
     }
 
 
+def _upgrade(r: dict) -> dict:
+    """Projects from before v0.8.5 (or an undo back to one): convert pans / animated zooms / shakes to fixed
+    framing in place (no extra undo step) and leave a one-line notice for the Editor."""
+    from . import framing
+    edl = json.loads(r["data"])
+    if edl.get("framing") == framing.MARK:
+        return edl
+    edl, changes = framing.convert(edl)
+    data = json.dumps(edl)
+    db.ex("UPDATE edit_projects SET data=? WHERE id=?", (data, r["id"]))
+    db.ex("UPDATE edit_versions SET data=? WHERE project_id=? AND version=?", (data, r["id"], r["head"]))
+    db.set_setting(f"proxy:{r['clip_id']}", {})          # the old preview still pans: make a new one
+    if (msg := framing.notice(changes)):
+        notes = db.get_setting("edit_notices", {}) or {}
+        notes[str(r["clip_id"])] = msg
+        db.set_setting("edit_notices", notes)
+    return edl
+
+
+def notice(clip_id: int, clear: bool = False) -> str | None:
+    notes = db.get_setting("edit_notices", {}) or {}
+    msg = notes.get(str(clip_id))
+    if clear and msg:
+        notes.pop(str(clip_id))
+        db.set_setting("edit_notices", notes)
+    return msg
+
+
 def get(clip_id: int) -> dict | None:
     r = db.q1("SELECT * FROM edit_projects WHERE clip_id=?", (clip_id,))
     if not r:
         return None
-    return {"id": r["id"], "clip_id": clip_id, "head": r["head"], "edl": json.loads(r["data"]),
+    return {"id": r["id"], "clip_id": clip_id, "head": r["head"], "edl": _upgrade(r),
             "can_undo": r["head"] > 1, "can_redo": bool(db.q1(
                 "SELECT 1 FROM edit_versions WHERE project_id=? AND version>?", (r["id"], r["head"]))),
             "updated_at": r["updated_at"], "status": r["status"]}

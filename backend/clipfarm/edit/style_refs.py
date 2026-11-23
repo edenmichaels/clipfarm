@@ -318,9 +318,7 @@ def style_from(found: dict, llm: dict | None = None, name: str = "From screensho
             s["layout"]["cam_ratio"] = round(found["seam_y"], 3)
     elif lay in ("full_reaction", "gameplay"):
         s["layout"]["mode"] = lay
-    pos = found.get("caption_position") or llm.get("caption_position")
-    if pos in styles.CAPTION_POSITIONS:
-        s["captions"]["position"] = pos
+    # (where captions sit isn't copied: every style uses the one fixed bottom place since v0.8.5)
     words = found.get("words") or llm.get("words_on_screen")
     if words in (1, 2, 3):
         s["captions"]["words"] = int(words)
@@ -336,8 +334,6 @@ def style_from(found: dict, llm: dict | None = None, name: str = "From screensho
         s["title"]["box"] = box
     elif "title_box" in found and not llm:
         s["title"]["box"] = "outline"
-    if found.get("title_position"):
-        s["title"]["position"] = found["title_position"]
     return styles.clean(s, base)
 
 

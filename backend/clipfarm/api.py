@@ -566,26 +566,6 @@ def clip_rerender(cid: int, b: RerenderIn):
     return {"job_id": jid}
 
 
-@app.post("/clips/{cid}/caption-preview", dependencies=A)
-def clip_caption_preview(cid: int, b: RerenderIn):
-    """Caption layout (no render) for the live preview while you nudge or edit words."""
-    import tempfile
-    c = _clip(cid)
-    d = _edit_render_view(cid) or json.loads(c.get("render_spec") or "{}")
-    words = b.words if b.words is not None else json.loads(c.get("words") or "[]")
-    meta = {}
-    if d.get("base") and Path(d["base"]).with_suffix(".json").exists():
-        meta = json.loads(Path(d["base"]).with_suffix(".json").read_text(encoding="utf-8"))
-    tmp = Path(tempfile.mkdtemp()) / "p.ass"
-    tr = capmod.build_track(words, tmp, b.caption_style or d.get("caption_style", "bold_pop"), d.get("words_per_chunk"),
-                            offset=d.get("start", 0.0), layout=d.get("layout") or "crop", src_w=meta.get("src_w", 1920),
-                            src_h=meta.get("src_h", 1080), keep_clear=tuple(d.get("keep_clear") or ()),
-                            nudge=b.caption_nudge if b.caption_nudge is not None else (c.get("caption_nudge") or 0),
-                            uppercase=b.uppercase if b.uppercase is not None else d.get("uppercase"),
-                            profanity=d.get("profanity", "keep"), fillers=d.get("fillers", "remove"))
-    return {"events": tr.events, "preset": capmod.preset(b.caption_style or d.get("caption_style")).key}
-
-
 class FeedbackIn(BaseModel):
     rating: int
     tags: list[str] = []
@@ -718,6 +698,17 @@ def _ep(cid: int) -> dict:
     return p
 
 
+def _pip_rect(e: dict) -> list[int] | None:
+    """Where the corner facecam sits on the 1080x1920 frame (for the Editor's drag handle)."""
+    from .edit import facecam as F
+    lay = e["layout"]
+    if not lay.get("facecam") or not any(k["layout"] == "corner" for k in lay.get("keyframes") or []):
+        return None
+    src = e["source"]
+    return list(F.pip_rect(lay.get("pip"), F.cam_aspect(lay["facecam"], src.get("width", 1920), src.get("height", 1080)),
+                           edit_compile._has_title(e)))
+
+
 def _caption_y(e: dict) -> float | None:
     try:
         tm = e["captions"].get("template")
@@ -735,6 +726,8 @@ def _view(p: dict) -> dict:
             "fillers": edit_tr.filler_indices(e), "silences": edit_tr.silences(e),
             "layout_segments": edit_compile.layout_segments(e),
             "caption_y": _caption_y(e),
+            "notice": edit_project.notice(p["clip_id"]),
+            "pip_rect": _pip_rect(e),
             "rule_fixes": edit_reframe.enforce_rules(e["layout"]["keyframes"], e["rules"].get("onscreen") or [],
                                                      e["layout"].get("facecam"))[1],
             "proxy": proxy.get("path") if proxy.get("head") == p["head"] and proxy.get("path") and Path(proxy["path"]).exists() else None}
@@ -818,8 +811,11 @@ def edit_reframe_auto(cid: int):
     fc = e["layout"].get("facecam")
     from .editing.layout import Box
     lay = edit_reframe.analyse(Path(e["source"]["path"]), e["range"][0], e["range"][1],
-                               facecam=Box(**fc) if fc else None, onscreen=e["rules"].get("onscreen") or [],
-                               speech=[(w["start"], w["end"]) for w in e["captions"]["words"]], detect_cam=fc is None)
+                               facecam=Box(**{k: fc[k] for k in ("x", "y", "w", "h")}) if fc else None,
+                               onscreen=e["rules"].get("onscreen") or [],
+                               speech=[(w["start"], w["end"]) for w in e["captions"]["words"]], detect_cam=fc is None,
+                               words=e["captions"]["words"], has_title=edit_compile._has_title(e),
+                               pip=e["layout"].get("pip"))
     return _view(edit_project.update(cid, lambda x: {**x, "layout": {**x["layout"], **lay}}, "AI reframe"))
 
 
@@ -834,15 +830,17 @@ def edit_facecam(cid: int, body: dict):
 
     def apply(e):
         e["layout"]["facecam"] = box
+        e["layout"]["facecam_source"] = "saved"
+        e["layout"].pop("facecam_ask", None)
         for k in e["layout"]["keyframes"]:
-            if k["layout"] in ("split", "pip") or k.get("cam"):
+            if k["layout"] in ("split", "pip", "corner", "focus", "cam_full") or k.get("cam"):
                 k["cam"] = box
         return e
     out = edit_project.update(cid, apply, "Move facecam")
     if body.get("remember", True):
         c = db.q1("SELECT streamer_id FROM clips WHERE id=?", (cid,))
         if c and c["streamer_id"]:
-            db.set_setting(f"facecam:{c['streamer_id']}", box)
+            db.set_setting(f"facecam:{c['streamer_id']}", {**box, "by": "you"})
     return _view(out)
 
 
@@ -922,53 +920,6 @@ def edit_export(cid: int, body: dict):
 # ---- v0.6: Editor list, scores, rule fixes, fix my clip, batch, trends --------------------------------
 EDITOR_SORT = {"profit": "c.profit_likely DESC NULLS LAST, c.virality DESC", "virality": "c.virality DESC NULLS LAST",
                "newest": "c.id DESC"}
-
-
-@app.get("/edit/{cid}/canvas", dependencies=A)
-def edit_canvas(cid: int):
-    """What the Editor's live preview needs: the cut + reframed base video with no captions (if built), and the
-    caption layout for the current edit, so caption changes show instantly without a render."""
-    import tempfile
-    from .editing import captions as capmod
-    p = _ep(cid)
-    e = p["edl"]
-    try:
-        key = edit_compile.base_key(e)
-    except Exception:                                   # noqa: BLE001
-        key = None
-    base = None
-    m = db.q1("SELECT moment_id FROM clips WHERE id=?", (cid,))
-    dirs = [storage.media_dir() / "edit_cache" / f"c{cid}"] + (
-        [storage.media_dir() / "edit_cache" / f"m{m['moment_id']}"] if m and m["moment_id"] else [])
-    for d in dirs:
-        for suffix in ("p", ""):
-            f = d / f"base_{key}{suffix}.mp4"
-            if key and f.exists():
-                base = f
-                break
-        if base:
-            break
-    meta = json.loads(base.with_suffix(".json").read_text(encoding="utf-8")) if base and base.with_suffix(".json").exists() \
-        else {"layout": next((("crop" if lay in ("speaker", "pip") else lay) for _, lay in edit_compile.layout_segments(e)),
-                             "blur_fill"),
-              "src_w": e["source"].get("width", 1920), "src_h": e["source"].get("height", 1080)}
-    spec = edit_compile.spec_for(e, Path(tempfile.mkdtemp()) / "o.mp4", base or Path("base.mp4"), "proxy")
-    tmpl = spec.template or spec.caption_style
-    events = []
-    if spec.captions_enabled:
-        try:
-            tr = capmod.build_track(spec.words, Path(tempfile.mkdtemp()) / "c.ass", tmpl, spec.words_per_chunk,
-                                    layout_segments=spec.layout_segments, offset=0.0, layout=meta.get("layout", "blur_fill"),
-                                    src_w=meta.get("src_w", 1920), src_h=meta.get("src_h", 1080),
-                                    keep_clear=tuple(spec.keep_clear), nudge=spec.caption_nudge, uppercase=spec.uppercase,
-                                    profanity=spec.profanity, fillers=spec.fillers, emoji=spec.emoji, hook=spec.hook,
-                                    hook_sec=spec.hook_sec, credit=spec.credit, duration=edit_tl.duration(e))
-            events = tr.events
-        except Exception as ex:                         # noqa: BLE001
-            log.warning("caption layout for clip %s failed: %s", cid, ex)
-    style = capmod.template_from(tmpl).as_dict()
-    return {"base": str(base) if base else None, "events": events, "style": style, "duration": edit_tl.duration(e),
-            "head": p["head"]}
 
 
 @app.get("/editor/clips", dependencies=A)
@@ -1410,7 +1361,8 @@ def export_presets():
 def caption_templates():
     from .editing import captions as cm
     return {"templates": edit_templates.all_templates(), "defaults": edit_templates.defaults(),
-            "fonts": [{"family": f, "file": n} for f, n in cm.FONTS.items()], "animations": cm.ANIMATIONS}
+            "fonts": [{"family": f, "file": p.name, "bundled": f in cm.FONTS} for f, p in cm.all_fonts().items()],
+            "font_licence": "Montserrat, Anton and Archivo Black: SIL Open Font License 1.1 (assets/fonts/OFL-*.txt)"}
 
 
 @app.post("/caption-templates", dependencies=A)
@@ -1969,6 +1921,7 @@ from .edit import style_refs as edit_style_refs, styles as edit_styles  # noqa: 
 @app.get("/styles", dependencies=A)
 def styles_list():
     return {"styles": edit_styles.all_styles(), "defaults": edit_styles.defaults(),
+            "notices": db.get_setting("style_notices", []) or [],
             "last_updated": edit_styles.last_updated(), "refs": db.q1("SELECT COUNT(*) n FROM style_refs")["n"],
             "streamers": db.q("SELECT id, COALESCE(display_name, login) name FROM streamers "
                               "WHERE permission_status IN ('allowed','program_member') ORDER BY name LIMIT 200"),
@@ -2184,3 +2137,57 @@ def editor_session_put(body: dict):
     db.set_setting("editor_session", {**(db.get_setting("editor_session", {}) or {}), **keep,
                                       "saved_at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
     return db.get_setting("editor_session")
+
+
+
+# ---- v0.8.5: fixed framing notices ----------------------------------------------------------------------
+@app.post("/edit/{cid}/notice/dismiss", dependencies=A)
+def edit_notice_dismiss(cid: int):
+    edit_project.notice(cid, clear=True)
+    return {"ok": True}
+
+
+
+@app.post("/edit/{cid}/pip", dependencies=A)
+def edit_pip(cid: int, body: dict):
+    """Move / resize the corner facecam: {"corner": "tl|tr|bl|br", "w": 0.25-0.45, "remember": bool}.
+    remember=True makes it the default for this streamer."""
+    from .edit import facecam as F
+    _ep(cid)
+    corner = body.get("corner")
+    if corner not in F.CORNERS:
+        raise HTTPException(400, "corner must be tl, tr, bl or br")
+    w = float(min(F.PIP_RANGE[1], max(F.PIP_RANGE[0], float(body.get("w", F.PIP_W)))))
+    pip = {"corner": corner, "w": round(w, 3), "source": "yours"}
+
+    def go(e):
+        e["layout"]["pip"] = pip
+        return e
+    out = edit_project.update(cid, go, "Move facecam corner")
+    if body.get("remember"):
+        c = db.q1("SELECT streamer_id FROM clips WHERE id=?", (cid,))
+        if c and c["streamer_id"]:
+            db.set_setting(f"pip:{c['streamer_id']}", {"corner": corner, "w": round(w, 3)})
+    return _view(out)
+
+
+
+@app.post("/styles/notices/dismiss", dependencies=A)
+def styles_notices_dismiss():
+    db.set_setting("style_notices", [])
+    return {"ok": True}
+
+
+@app.get("/vocabulary", dependencies=A)
+def vocabulary_get():
+    from .editing import vocab
+    return vocab.get()
+
+
+@app.put("/vocabulary", dependencies=A)
+def vocabulary_put(body: dict):
+    """Your caption vocabulary: {"terms": [...], "fixes": [{"from", "to"}]}."""
+    from .editing import vocab
+    if not isinstance(body.get("terms", []), list) or not isinstance(body.get("fixes", []), list):
+        raise HTTPException(400, "terms and fixes are lists")
+    return vocab.set_(body.get("terms", []), body.get("fixes", []))

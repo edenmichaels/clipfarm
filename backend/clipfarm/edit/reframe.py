@@ -1,15 +1,16 @@
-"""AI reframe to 9:16: scene type per shot -> layout keyframes with smooth camera paths.
+"""AI reframe to 9:16: scene type per shot -> layout keyframes, ONE fixed crop per shot (never a camera move).
 
 Scene types           Default layout
-  facecam+gameplay      split (facecam top, gameplay bottom)
-  gameplay              crop   (smart crop following the action: motion + saliency)
-  people / IRL          speaker (crop following the active speaker: face + voice activity)
+  facecam+gameplay      corner (gameplay fills the frame, facecam in a top corner); "focus" (the streamer fills
+                        the frame) when they're the moment
+  gameplay              crop   (fixed crop centred on the action: motion + saliency)
+  people / IRL          speaker (fixed crop on the main speaker)
   screen / menu         blur_fill (whole frame, nothing lost)
-Also available: pip (full-height gameplay crop with the facecam in a corner).
+Also available: split (facecam top, gameplay bottom), pip (older small corner cam).
 
 Rules: a campaign that needs its overlay visible ("streamer_overlay") gets the whole frame (blur_fill)
 in every shot; one that needs the streamer's face uses split / pip whenever a facecam exists.
-Camera paths use a dead-zone + smoothing + speed limit, so the crop never jitters.
+Nothing ever pans: each shot is one fixed crop, and a layout change is an instant hard cut.
 """
 from __future__ import annotations
 
@@ -18,10 +19,10 @@ from typing import Callable
 
 import numpy as np
 
-from ..editing.layout import Box, detect_facecam
+from ..editing.layout import Box
 from .. import proc
 
-LAYOUTS = ["split", "crop", "speaker", "pip", "blur_fill"]
+LAYOUTS = ["corner", "focus", "split", "crop", "speaker", "pip", "blur_fill"]
 SAMPLE_FPS = 2.0
 
 
@@ -66,22 +67,6 @@ def shot_bounds(frames: list) -> list[int]:
             starts.append(i)
         prev = hist
     return starts
-
-
-def smooth_path(pts: list[tuple[float, float]], dead: float = 0.04, alpha: float = 0.35,
-                max_speed: float = 0.25) -> list[tuple[float, float]]:
-    """Calm camera: ignore small moves (dead-zone), ease towards the target, cap speed (frac/second)."""
-    if not pts:
-        return [(0.0, 0.5)]
-    out = [pts[0]]
-    pos = pts[0][1]
-    for (t0, _), (t1, target) in zip(pts, pts[1:]):
-        if abs(target - pos) > dead:
-            step = alpha * (target - pos)
-            lim = max_speed * max(t1 - t0, 1e-3)
-            pos += float(np.clip(step, -lim, lim))
-        out.append((t1, round(float(np.clip(pos, 0.0, 1.0)), 4)))
-    return out
 
 
 def action_path(frames: list) -> list[tuple[float, float]]:
@@ -157,49 +142,120 @@ def classify(frames: list, facecam: Box | None, faces_fn: Callable = _faces_haar
     return "facecam+gameplay" if facecam else "gameplay"
 
 
-DEFAULT_FOR = {"facecam+gameplay": "split", "gameplay": "crop", "people": "speaker", "screen": "blur_fill"}
+DEFAULT_FOR = {"facecam+gameplay": "corner", "gameplay": "crop", "people": "speaker", "screen": "blur_fill"}
+
+
+def _mask_cam(frames: list, cam: Box | None) -> list:
+    """Frames with the webcam blacked out, so the streamer's movement never pulls the gameplay crop."""
+    if not cam:
+        return frames
+    out = []
+    for t, f in frames:
+        g = f.copy()
+        h, w = g.shape[:2]
+        g[int(cam.y * h):int((cam.y + cam.h) * h) + 1, int(cam.x * w):int((cam.x + cam.w) * w) + 1] = 0
+        out.append((t, g))
+    return out
+
+
+def gameplay_motion(frames: list) -> list[tuple[float, float]]:
+    import cv2
+    out, prev = [], None
+    for t, f in frames:
+        g = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        if prev is not None:
+            out.append((t, float(np.abs(g - prev).mean())))
+        prev = g
+    return out
 
 
 def analyse(path: Path, a: float, b: float, *, facecam: Box | None = None, onscreen: list[str] | None = None,
             speech: list[tuple[float, float]] | None = None, detect_cam: bool = True,
-            faces_fn: Callable = _faces_haar) -> dict:
-    """-> {"facecam": box|None, "keyframes": [{t, layout, scene, cam, path}]} (source time)."""
+            faces_fn: Callable = _faces_haar, words: list[dict] | None = None, has_title: bool = False,
+            pip: dict | None = None, focus: bool = True) -> dict:
+    """-> {"facecam", "facecam_source", "facecam_confidence", "pip", "keyframes": [{t, layout, scene, cam, path}]}
+    (source time). `facecam` = the box you saved for this streamer (wins over detection).
+
+    Every shot gets ONE fixed crop; with a facecam the default is gameplay + facecam in a corner, switching
+    (hard cut) to the streamer when they're the moment."""
+    from . import facecam as F
     onscreen = onscreen or []
+    det, conf = None, 0.0
     if facecam is None and detect_cam:
         try:
-            facecam = detect_facecam(path, a, b)
+            from ..editing.layout import detect_facecam_exact
+            det, conf = detect_facecam_exact(path, a, b)
         except Exception:
-            facecam = None
+            det, conf = None, 0.0
+    box, source = F.resolve(det.__dict__ if det else None, conf, facecam.__dict__ if facecam else None)
+    cam = Box(**box) if box else None
     frames = sample(path, a, b)
+    result = {"facecam": box, "facecam_source": source, "facecam_confidence": round(conf, 2), "pip": None}
     if not frames:
-        return {"facecam": facecam.__dict__ if facecam else None,
-                "keyframes": [{"t": a, "layout": "blur_fill", "scene": "unknown", "cam": None, "path": [[0, 0.5]]}]}
+        return {**result, "keyframes": [{"t": a, "layout": "blur_fill", "scene": "unknown", "cam": None,
+                                         "path": [[0, 0.5]]}]}
+    masked = _mask_cam(frames, cam)
     starts = shot_bounds(frames) + [len(frames)]
     kfs = []
-    for s, e in zip(starts, starts[1:]):
-        sh = frames[s:e]
-        scene = classify(sh, facecam, faces_fn)
+    for s_, e_ in zip(starts, starts[1:]):
+        sh = frames[s_:e_]
+        scene = classify(sh, cam, faces_fn)
         lay = DEFAULT_FOR[scene]
         if "streamer_overlay" in onscreen:
             lay = "blur_fill"                                  # never crop the required overlay
-        elif "streamer_face" in onscreen:
-            lay = "split" if facecam else "blur_fill"
-        if lay == "split" and not facecam:
+        elif "streamer_face" in onscreen and lay in ("crop", "speaker"):
+            lay = "corner" if cam else "blur_fill"
+        if lay in ("corner", "split") and not cam:
             lay = "crop"
         t0 = a if not kfs else sh[0][0]
         if lay == "speaker":
             raw = speaker_path(sh, speech or [], faces_fn)
-        elif lay in ("crop", "pip"):
-            raw = action_path(sh) or [(sh[0][0], 0.5)]
+        elif lay in ("crop", "pip", "corner", "split"):
+            raw = action_path(masked[s_:e_]) or [(sh[0][0], 0.5)]
         else:
             raw = [(sh[0][0], 0.5)]
-        path = [[round(t - t0, 3), x] for t, x in smooth_path(raw)]
-        kf = {"t": round(t0, 3), "layout": lay, "scene": scene, "cam": facecam.__dict__ if facecam else None,
-              "path": path}
+        # ONE fixed crop per shot (no panning, drifting or tracking): the shot's average framing
+        xs = [x for _, x in raw] or [0.5]
+        kf = {"t": round(t0, 3), "layout": lay, "scene": scene, "cam": box, "path": [[0.0, round(sum(xs) / len(xs), 4)]]}
         if kfs and kfs[-1]["layout"] == lay and lay in ("split", "blur_fill"):
             continue                                           # same static layout: no new keyframe
         kfs.append(kf)
-    return {"facecam": facecam.__dict__ if facecam else None, "keyframes": kfs}
+    # the corner: fixed for the whole clip, on the side that hides the least (HUD first, then action)
+    if cam and any(k["layout"] == "corner" for k in kfs):
+        if pip and pip.get("corner"):
+            result["pip"] = {"corner": pip["corner"], "w": float(pip.get("w", F.PIP_W)), "source": "yours"}
+        else:
+            k0 = next(k for k in kfs if k["layout"] == "corner")
+            sw, sh_ = frames[0][1].shape[1], frames[0][1].shape[0]
+            cw = sh_ * 9 / 16
+            cx = min(max(0.0, k0["path"][0][1] * sw - cw / 2), sw - cw)
+            imp = F.importance(masked, cx, cw, box, sw)
+            asp = F.cam_aspect(box, sw, sh_)
+            wf = float((pip or {}).get("w", F.PIP_W))
+            result["pip"] = {"corner": F.choose_corner(imp, asp, has_title, {"w": wf}), "w": wf, "source": "auto"}
+        # focus on the streamer when they ARE the moment (hard cuts at sentence starts, >= 3 s apart)
+        if focus and "streamer_overlay" not in onscreen:
+            plan = F.plan_focus(a, b, words or [], gameplay_motion(masked))
+            kfs = _apply_focus(kfs, plan)
+    result["keyframes"] = kfs
+    return result
+
+
+def _apply_focus(kfs: list[dict], plan: list[tuple[float, str]]) -> list[dict]:
+    """Overlay the focus plan on the shot keyframes: inside a focus stretch, corner shots become focus."""
+    if all(lay == "corner" for _, lay in plan):
+        return kfs
+    pts = sorted({k["t"] for k in kfs} | {t for t, _ in plan})
+    out = []
+    for t in pts:
+        shot = next(k for k in reversed(kfs) if k["t"] <= t + 1e-6) if any(k["t"] <= t + 1e-6 for k in kfs) else kfs[0]
+        want = next(lay for pt, lay in reversed(plan) if pt <= t + 1e-6) if any(pt <= t + 1e-6 for pt, _ in plan) else "corner"
+        lay = "focus" if want == "focus" and shot["layout"] == "corner" else shot["layout"]
+        k = {**shot, "t": round(t, 3), "layout": lay}
+        if out and out[-1]["layout"] == lay and out[-1]["path"] == k["path"]:
+            continue
+        out.append(k)
+    return out
 
 
 def enforce_rules(keyframes: list[dict], onscreen: list[str], facecam: dict | None) -> tuple[list[dict], list[str]]:
@@ -210,11 +266,13 @@ def enforce_rules(keyframes: list[dict], onscreen: list[str], facecam: dict | No
         if "streamer_overlay" in onscreen and k["layout"] != "blur_fill":
             fixed.append(f"{k['layout']} at {k['t']:.1f}s would crop the required overlay -> full frame")
             k["layout"], k["path"] = "blur_fill", [[0, 0.5]]
-        elif "streamer_face" in onscreen and k["layout"] in ("crop", "speaker", "pip") and not (k["layout"] == "pip" and facecam):
-            to = "split" if facecam else "blur_fill"
-            fixed.append(f"{k['layout']} at {k['t']:.1f}s could hide the streamer -> {'split' if facecam else 'full frame'}")
+        elif "streamer_face" in onscreen and (k["layout"] in ("crop", "speaker") or
+                                              (k["layout"] in ("pip", "corner", "focus") and not facecam)):
+            to = "corner" if facecam else "blur_fill"
+            fixed.append(f"{k['layout']} at {k['t']:.1f}s could hide the streamer -> "
+                         f"{'facecam in the corner' if facecam else 'full frame'}")
             k["layout"] = to
-            if to == "split":
+            if to == "corner":
                 k["cam"] = facecam
             else:
                 k["path"] = [[0, 0.5]]

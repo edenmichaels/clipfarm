@@ -1,5 +1,80 @@
 # ClipFarm changelog
 
+## 0.8.5: steady framing, a proper facecam corner, and static captions
+
+The moment picker was already good; this update makes the edits look like a real clipper made them.
+(The Companion work moves to 0.9.x.)
+
+### Framing: nothing pans any more
+- Every shot uses **one fixed crop**. A layout change is an instant hard cut.
+- Removed: auto panning, drifting, tracking moves and sliding crops, in auto-edit and in every style.
+- **Zooms are off by default.** Switch on "Zoom cuts" (in a style, or Settings › Editing) and they're instant cuts to a centred zoom and back. No animated zoom, Ken Burns or shake.
+- Screen shake and whip transitions are gone from every style.
+- **Old projects** are converted to one steady crop per shot (their average framing), with a one-line notice in the Editor.
+
+### Facecam
+- **Exact webcam crop:** the detector snaps to the inside of the webcam border, so there are no overlays, alerts or borders in the crop.
+  - If the detector isn't sure, ClipFarm uses the box you saved for that streamer.
+  - If there's no saved box, the Editor asks once ("Draw the facecam") and remembers it for that streamer.
+- **New default layout, "Streamer Corner":** gameplay full frame plus the facecam in a corner (about 34 % wide) with a thin border, rounded corners and a soft shadow.
+  - Top-left or top-right is picked per clip (whichever covers less important detail) and then stays put.
+  - It stays inside the safe zone and never covers captions, the title or the credit.
+  - Drag it to the other corner or resize it in the Editor, then "Save as my default for this streamer".
+- **Focus on the streamer:** when they're the moment (talking, a big reaction, quiet gameplay), the clip hard-cuts to the full facecam.
+  - Cuts happen at sentence starts, never mid-word, at least ~3 s apart.
+  - They show as markers on the timeline that you can move or delete.
+- **No facecam:** gameplay only, one fixed crop per shot.
+- **Split layout** is still there as an option, with no panning.
+
+### Captions: rebuilt
+- **One fixed place:** centred near the bottom (baseline at 77 % down), 840 px wide, max 2 lines. They never move with the layout and never overlap the facecam.
+- **No motion:** no pop, bounce, scale, slide, typewriter or fade. The spoken word turns yellow (or switch highlighting off). 1–3 words per caption by default, up to 6 words / 2 lines if you choose.
+- **Look:** Montserrat Black, uppercase, ~86 px cap height, white with a 9 px black outline and a soft shadow.
+  - Montserrat is bundled under the SIL Open Font License (licence file included).
+  - You can add your own licensed fonts (Komika Axis, The Bold Font, Anton, Bebas Neue) from a fonts folder in Settings; ClipFarm doesn't bundle them.
+  - The title uses the same font, fixed at the top, no animation.
+- **Timing:**
+  - captions follow Whisper's word timings and break at phrases;
+  - nothing shows during silence;
+  - no gaps or overlaps;
+  - nothing is shorter than 0.3 s.
+- **Vocabulary:** an editable list in Settings, pre-filled with your campaign streamers' names and GTA 6 terms. Whisper is primed with it and captions are corrected with it.
+- The profanity setting works as before.
+- **Preview and export use the same caption renderer.**
+
+### Styles
+- Every built-in style follows these rules. "Streamer Corner" is the default when a facecam is found.
+- Your saved custom styles are converted (animated captions and pans become static). The Styles page lists which ones changed.
+
+### Removed code paths
+- The old caption system:
+  - pop, bounce, karaoke and typewriter animations;
+  - caption positions (Placement, POSITIONS, position_y);
+  - shrinking long captions (layout_chunk);
+  - the old ASS builder (build_ass);
+  - placement by layout segments.
+- The `/edit/{id}/canvas` and `/clips/{id}/caption-preview` routes; the preview uses the export renderer.
+- Beat and punch zoom pulses (punch_zoom), automatic shakes and whips, and pan smoothing (smooth_path).
+
+### Database
+- **Migration v12:**
+  - converts saved edit projects to fixed framing;
+  - converts saved custom styles and records which ones changed;
+  - marks auto-detected facecam boxes so they're re-checked, while boxes you drew stay as they are.
+
+### Also fixed
+- The daily post limit counted in UTC, so it reset at 10 am in Brisbane. It now uses local time.
+
+### Proven by tests
+`tests/test_v085.py` covers:
+- every style keeps each shot still, and zoom cuts are instant;
+- caption baseline and centre within ±0.5 % in every layout;
+- glyphs don't change size or position between frames;
+- no overlap with the facecam, title or safe zone;
+- preview == export;
+- Montserrat and its licence;
+- migration v12.
+
 ## 0.8.4 (step 5): full audit
 
 The full bug table is in `docs/reports/v0.8-audit.md`. It lists 15 issues, each with its area, problem, cause, fix and test.

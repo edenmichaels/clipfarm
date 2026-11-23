@@ -1,7 +1,7 @@
 """Render one vertical short in two passes.
 
 Pass 1, base (slow, once per clip): cut -> reframe to 1080x1920 (split / crop / blur_fill) -> original audio.
-Pass 2, finish (fast, repeatable): punch-in zoom + zoom pulses on the music's beats -> captions, hook and
+Pass 2, finish (fast, repeatable): optional instant zoom cuts -> captions, hook and
 credit (libass) -> optional emoji -> progress bar; audio = stream audio (with bleeps) + music, ducked
 under speech and swelling on reactions, then loudness-normalised to -14 LUFS (measured, then applied).
 
@@ -43,12 +43,10 @@ class RenderSpec:
     profanity: str = "keep"              # keep | mask | bleep
     fillers: str = "remove"              # keep | remove
     emoji: bool = False
-    keep_clear: tuple[str, ...] = ()     # campaign on-screen rules, e.g. ("streamer_overlay",)
     hook: str | None = None
     hook_sec: float = 2.2
     credit: str | None = None
     progress_bar: bool = True
-    punch_zoom: bool = True
     # music (licensed tracks only -- see clipfarm/music); None = original audio only
     music: Path | None = None
     music_offset: float = 0.0            # seconds into the track at clip t=0
@@ -60,12 +58,10 @@ class RenderSpec:
     swell_db: float = 4.0                # lift on reactions / action
     speech: list[tuple[float, float]] = field(default_factory=list)    # clip time
     swells: list[tuple[float, float]] = field(default_factory=list)    # clip time
-    beats: list[float] = field(default_factory=list)                   # clip time, zoom pulses
     target_lufs: float = -14.0
     # v0.5 edit-project extras (all clip time)
     template: dict | None = None         # full caption template (overrides caption_style)
     captions_enabled: bool = True
-    layout_segments: list[tuple[float, str]] = field(default_factory=list)
     zooms: list[dict] = field(default_factory=list)        # [{t, amount, dur, kind: punch|pulse}]
     flashes: list[tuple[float, float]] = field(default_factory=list)
     shakes: list[tuple[float, float]] = field(default_factory=list)
@@ -86,11 +82,8 @@ class RenderSpec:
     logo: dict | None = None             # {path, pos: tl|tr|bl|br, opacity, size}
     cards: list[dict] = field(default_factory=list)        # [{text, start, end, bg, fg}] intro/outro cards
     progress_color: str = "FFE500"
-    credit_pos: str | None = None        # top | bottom (None = automatic)
-    caption_position: str | None = None  # Style: seam | upper | centre | lower (None = layout default)
-    cam_h: int = 640                     # facecam height in the split layout (Style: 35-45 % of 1920)
-    title_box: str = "outline"           # Style title look: white_box | black_box | outline | none
-    title_pos: str | None = None         # top | seam (None = layout default)
+    credit_pos: str | None = None        # brand: top | bottom (None = top)
+    title_box: str = "outline"           # title look: white_box | black_box | outline | none (fixed at the top)
     # v0.8.3 Editor layers (all in output time)
     text_layers: list[dict] = field(default_factory=list)   # [{text,start,end,x,y (0-1),size,color,box,rotate}]
     stickers: list[dict] = field(default_factory=list)      # image stickers [{path,start,end,x,y (0-1),size,rotate}]
@@ -273,23 +266,18 @@ def integrated_lufs(path: Path) -> float:
 
 # ---------------------------------------------------------------- pass 2
 def _zoom_expr(spec: RenderSpec) -> str | None:
+    """Zooms are INSTANT cuts to a centred, fixed zoom and back (v0.8.5): no ramps, pulses or Ken Burns.
+    Off unless you add zooms (Effects, or a style with "Zoom cuts" on)."""
     parts = []
-    if spec.punch_zoom:
-        parts.append("if(lt(t,1.5),0.04*t,0.06)")
-    for b in spec.beats[:8]:
-        parts.append(f"0.035*exp(-pow((t-{b:.3f})/0.09,2))")
     for z in spec.zooms[:24]:
         amt, t0, d = float(z.get("amount", 0.12)), float(z["t"]), max(0.2, float(z.get("dur", 1.2)))
         if amt >= 1.0:          # older projects stored a scale factor (1.16 = +16 %); it used to zoom to 216 %
             amt -= 1.0
         amt = max(0.0, min(0.6, amt))
-        if z.get("kind") == "pulse":
-            parts.append(f"{amt:.3f}*exp(-pow((t-{t0:.3f})/0.1,2))")
-        else:   # punch-in: snap in, hold, ease out
-            parts.append(f"{amt:.3f}*if(between(t,{t0:.3f},{t0 + d:.3f}),min(1,(t-{t0:.3f})/0.08),"
-                         f"if(between(t,{t0 + d:.3f},{t0 + d + 0.3:.3f}),1-(t-{t0 + d:.3f})/0.3,0))")
-    for a, b in spec.shakes[:12]:
-        parts.append(f"0.05*between(t,{a:.3f},{b:.3f})")      # room for the shake
+        if amt > 0:
+            parts.append(f"{amt:.3f}*between(t,{t0:.3f},{t0 + d:.3f})")
+    for a, b in spec.shakes[:12]:              # only if you add a shake yourself (off in every style)
+        parts.append(f"0.05*between(t,{a:.3f},{b:.3f})")
     if not parts:
         return None
     z = "1+" + "+".join(parts)
@@ -366,17 +354,12 @@ def color_filter(color: dict | None, transitions: list[dict]) -> str | None:
 
 
 def track_for(spec: RenderSpec, meta: dict, out: Path):
-    """The caption/title/text-layer track for a render (also used by the Editor to place its caption handle)."""
-    dur = meta["duration"]
-    return build_track(spec.words if spec.captions_enabled else [], out,
-                       spec.template or spec.caption_style, spec.words_per_chunk, layout_segments=spec.layout_segments,
-                       offset=spec.start, layout=meta["layout"], src_w=meta.get("src_w", 1920),
-                       src_h=meta.get("src_h", 1080), keep_clear=tuple(spec.keep_clear),
-                       nudge=spec.caption_nudge, uppercase=spec.uppercase, profanity=spec.profanity,
-                       fillers=spec.fillers, emoji=spec.emoji, hook=spec.hook, hook_sec=spec.hook_sec,
-                       credit=spec.credit, duration=dur, credit_pos=spec.credit_pos, cam_h=spec.cam_h,
-                       position=spec.caption_position, title_box=spec.title_box, title_pos=spec.title_pos,
-                       text_layers=spec.text_layers)
+    """The caption/title/text-layer track for a render -- the ONE caption renderer (Editor stills, proxy, export)."""
+    return build_track(spec.words if spec.captions_enabled else [], out, spec.template or spec.caption_style,
+                       spec.words_per_chunk, offset=spec.start, nudge=spec.caption_nudge, uppercase=spec.uppercase,
+                       profanity=spec.profanity, fillers=spec.fillers, emoji=spec.emoji, hook=spec.hook,
+                       hook_sec=spec.hook_sec, credit=spec.credit, duration=meta["duration"],
+                       title_box=spec.title_box, text_layers=spec.text_layers, credit_pos=spec.credit_pos)
 
 
 def finish(spec: RenderSpec, base: Path, meta: dict, out: Path | None = None, music: bool = True,
@@ -505,11 +488,11 @@ def finish(spec: RenderSpec, base: Path, meta: dict, out: Path | None = None, mu
                 raise RuntimeError(f"FFmpeg frame failed: {res.stderr[-800:]}")
             return {"path": str(out), "t": t, "events": track.events, "title": track.title}
         if spec.srt_out:
-            ev = track.events if spec.captions_enabled else build_track(
+            caps = (track if spec.captions_enabled else build_track(
                 spec.words, work / "srt.ass", spec.template or spec.caption_style, spec.words_per_chunk,
-                offset=spec.start, layout=meta["layout"], src_w=meta.get("src_w", 1920), src_h=meta.get("src_h", 1080),
-                uppercase=False, profanity=spec.profanity, fillers=spec.fillers).events
-            write_srt(ev, spec.srt_out)
+                offset=spec.start, uppercase=False, profanity=spec.profanity, fillers=spec.fillers,
+                duration=meta["duration"])).captions
+            write_srt(caps, spec.srt_out)
         af = (f"loudnorm=I={spec.target_lufs}:TP=-1.5:LRA=11:linear=true:measured_I={ln['input_i']}:"
               f"measured_TP={ln['input_tp']}:measured_LRA={ln['input_lra']}:measured_thresh={ln['input_thresh']}:"
               f"offset={ln['target_offset']},aresample=48000")
@@ -537,25 +520,17 @@ def finish(spec: RenderSpec, base: Path, meta: dict, out: Path | None = None, mu
             "music": str(spec.music) if music and spec.music else None, **meta}
 
 
-def write_srt(events: list[dict], out: Path) -> Path:
-    """Captions as a separate .srt (export presets that don't burn them in)."""
+def write_srt(captions: list[dict], out: Path) -> Path:
+    """Captions as a separate .srt (export presets that don't burn them in): one block per caption."""
     def ts(t):
         ms = int(round(t * 1000))
         h, r = divmod(ms, 3600000)
         m, r = divmod(r, 60000)
         sec, ms = divmod(r, 1000)
         return f"{h:02d}:{m:02d}:{sec:02d},{ms:03d}"
-    blocks, seen = [], set()
-    for e in events:
-        text = "\n".join(" ".join(r) for r in e["rows"])
-        key = (text, e["y"])
-        if key in seen and blocks and blocks[-1][2] == text:
-            blocks[-1][1] = e["end"]
-            continue
-        seen.add(key)
-        blocks.append([e["start"], e["end"], text])
-    out.write_text("\n".join(f"{i + 1}\n{ts(a)} --> {ts(b)}\n{t}\n" for i, (a, b, t) in enumerate(blocks)),
-                   encoding="utf-8")
+    body = "\n".join(f"{i}\n{ts(c['start'])} --> {ts(c['end'])}\n{c['text'].replace(' / ', chr(10))}\n"
+                     for i, c in enumerate(captions, 1))
+    out.write_text(body, encoding="utf-8")
     return out
 
 

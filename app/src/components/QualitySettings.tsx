@@ -27,7 +27,7 @@ export function CaptionSettings() {
   return (
     <section className="card stack" style={{ maxWidth: 720 }}>
       <h2>Captions</h2>
-      <span className="muted">1–3 words at a time, the spoken word highlighted, centred and kept clear of the TikTok / Reels / Shorts buttons. Change any clip in the Editor.</span>
+      <span className="muted">The standard streamer-clip look: Montserrat, UPPERCASE, white with a thick black outline, 1–3 words at a time, the spoken word in colour. One fixed place at the bottom for every clip and layout, clear of the TikTok / Reels / Shorts buttons, and no animation.</span>
       <div className="field">Default style
         <div className="cards2" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
           {presets.map((p) => (
@@ -51,8 +51,41 @@ export function CaptionSettings() {
       <label className="line">Emoji on keywords (😂 🔥 💀)
         <select value={cfg.emoji ? "on" : "off"} onChange={(e) => save({ emoji: e.target.value === "on" })}>
           <option value="off">Off</option><option value="on">On</option></select></label>
+      <label className="line">Your fonts folder (optional)
+        <input placeholder="e.g. C:\\Fonts\\ClipFarm" defaultValue={cfg.fonts_dir || ""} onBlur={(e) => save({ fonts_dir: e.target.value.trim() || null })} /></label>
+      <span className="muted small-text">Montserrat is bundled (SIL Open Font License). To use Komika Axis, The Bold Font, Bebas Neue or others, put font files you have a licence for in this folder; they then show up in the caption font list. ClipFarm never bundles a font without a confirmed licence.</span>
       {msg && <span className={msg === "Saved" ? "ok-text" : "bad-text"}>{msg}</span>}
+      <Vocabulary />
     </section>
+  );
+}
+
+function Vocabulary() {
+  const [v, setV] = useState<any>(null);
+  const [terms, setTerms] = useState("");
+  const [fixes, setFixes] = useState("");
+  const [msg, setMsg] = useState("");
+  useEffect(() => {
+    api.get("/vocabulary").then((r) => {
+      setV(r); setTerms(r.terms.join("\n")); setFixes(r.fixes.map((f: any) => `${f.from} -> ${f.to}`).join("\n"));
+    }).catch((e) => setMsg(e.message));
+  }, []);
+  if (!v) return <p className="muted">{msg || "Loading…"}</p>;
+  const save = () => api.put("/vocabulary", {
+    terms: terms.split("\n").map((x) => x.trim()).filter(Boolean),
+    fixes: fixes.split("\n").map((x) => x.split("->")).filter((p) => p.length === 2).map(([a, b]) => ({ from: a.trim(), to: b.trim() })),
+  }).then((r) => { setV(r); setMsg(`Saved ${r.terms.length} terms and ${r.fixes.length} fixes. Captions use them from the next preview or export.`); })
+    .catch((e) => setMsg(e.message));
+  return (
+    <div className="stack tight">
+      <h3>Vocabulary</h3>
+      <span className="muted small-text">Names, game terms and slang spelled your way. Whisper gets them as a hint, and captions are corrected with them (close misspellings too). It started with your streamers' names and common GTA 6 terms.</span>
+      <div className="grid2">
+        <label className="field">Terms (one per line)<textarea rows={8} value={terms} onChange={(e) => setTerms(e.target.value)} /></label>
+        <label className="field">Fixes ("wrong -&gt; right", one per line)<textarea rows={8} value={fixes} placeholder={"vice sitty -> Vice City\nkreek craft -> KreekCraft"} onChange={(e) => setFixes(e.target.value)} /></label>
+      </div>
+      <div className="row" style={{ gap: 8 }}><button onClick={save}>Save vocabulary</button>{msg && <span className="muted small-text">{msg}</span>}</div>
+    </div>
   );
 }
 

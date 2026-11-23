@@ -2,7 +2,7 @@
 // layout keyframe, sound, B-roll, volume key) plus clip-wide panels: Colour & crop, Audio keys, Facecam, Sequence.
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
-import { fmt, keptOf, toSrc, type Edl, type View } from "./EditorParts";
+import { LAYOUTS, fmt, keptOf, toSrc, type Edl, type View } from "./EditorParts";
 import type { Sel } from "./EditorTimeline";
 
 type OnEdl = (fn: (e: Edl) => Edl, label: string) => void;
@@ -127,7 +127,7 @@ export function SelectionInspector({ v, sel, setSel, onEdl, t }: { v: View; sel:
     <div className="card stack tight insp">
       <b>Transition at {fmt(local.t)}</b>
       <select value={local.kind} onChange={(ev) => set("kind", ev.target.value, "Transition", 0)} aria-label="Transition">
-        <option value="fade">Dip to black</option><option value="flash">Flash</option><option value="zoom">Zoom punch</option><option value="whip">Whip (zoom + shake)</option></select>
+        <option value="fade">Dip to black</option><option value="flash">Flash</option><option value="zoom">Zoom cut (instant)</option></select>
       <Num label="Length" value={local.dur ?? 0.4} min={0.1} max={1.5} step={0.05} unit="s" onChange={(n) => set("dur", n, "Transition length")} />
       <button className="btn-danger" onClick={() => remove("Delete transition")}>Delete</button>
     </div>
@@ -135,7 +135,7 @@ export function SelectionInspector({ v, sel, setSel, onEdl, t }: { v: View; sel:
   if (sel.kind === "zoom") return (
     <div className="card stack tight insp">
       <b>Zoom</b>
-      <select value={local.kind} onChange={(ev) => set("kind", ev.target.value, "Zoom kind", 0)} aria-label="Zoom kind"><option value="punch">Punch-in</option><option value="pulse">Pulse</option></select>
+      <span className="muted tiny">An instant cut to a centred zoom and back (no animation).</span>
       <Num label="Amount" value={local.amount ?? 0.12} min={0.03} max={0.5} step={0.01} onChange={(n) => set("amount", n, "Zoom amount")} />
       <Num label="Length" value={local.dur ?? 1} min={0.2} max={4} step={0.1} unit="s" onChange={(n) => set("dur", n, "Zoom length")} />
       <button className="btn-danger" onClick={() => remove("Delete zoom")}>Delete</button>
@@ -145,7 +145,8 @@ export function SelectionInspector({ v, sel, setSel, onEdl, t }: { v: View; sel:
     <div className="card stack tight insp">
       <b>Layout from here</b>
       <select value={local.layout} onChange={(ev) => set("layout", ev.target.value, "Layout", 0)} aria-label="Layout">
-        {[["split", "Facecam + gameplay"], ["cam_full", "Streamer full screen"], ["crop", "Gameplay crop"], ["blur_fill", "Full frame (blurred bars)"], ["pip", "Picture in picture"], ["speaker", "Speaker"]].map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select>
+        {LAYOUTS.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select>
+      <span className="muted tiny">The layout switches here with an instant cut (◆ on the timeline: drag to move it).</span>
       {sel.i > 0 && <button className="btn-danger" onClick={() => remove("Delete layout change")}>Delete</button>}
     </div>
   );
@@ -221,7 +222,7 @@ export function AudioKeysPanel({ v, onEdl, t }: { v: View; onEdl: OnEdl; t: numb
 }
 
 /** Drag the facecam box on the source picture; it's used by every split / picture-in-picture / full-reaction part. */
-export function FacecamEditor({ v, onEdl }: { v: View; onEdl: OnEdl }) {
+export function FacecamEditor({ v, onSaved }: { v: View; onSaved?: (view: any) => void }) {
   const e = v.edl;
   const [box, setBox] = useState<any>(e.layout?.facecam || { x: 0.72, y: 0.04, w: 0.26, h: 0.3 });
   const [t, setT] = useState(+(e.range[0] + 1).toFixed(1));
@@ -239,16 +240,14 @@ export function FacecamEditor({ v, onEdl }: { v: View; onEdl: OnEdl }) {
     const p = rel(ev), dx = p.x - drag.p.x, dy = p.y - drag.p.y, b = drag.b;
     setBox(clamp(drag.mode === "move" ? { ...b, x: b.x + dx, y: b.y + dy } : { ...b, w: b.w + dx, h: b.h + dy }));
   };
-  const save = () => onEdl((x) => {
-    const cam = { x: +box.x.toFixed(4), y: +box.y.toFixed(4), w: +box.w.toFixed(4), h: +box.h.toFixed(4) };
-    x.layout.facecam = cam;
-    x.layout.keyframes = (x.layout.keyframes || []).map((k: any) => (["split", "pip", "cam_full"].includes(k.layout) ? { ...k, cam } : k));
-    return x;
-  }, "Facecam position");
+  const [msg, setMsg] = useState("");
+  const save = () => api.post(`/edit/${v.clip_id}/facecam`, { x: +box.x.toFixed(4), y: +box.y.toFixed(4), w: +box.w.toFixed(4),
+    h: +box.h.toFixed(4), remember: true }).then((r) => { onSaved?.(r); setMsg("Saved: used for this streamer from now on."); })
+    .catch((e) => setMsg(e.message));
   return (
     <div className="stack tight">
       <h3>Facecam</h3>
-      <span className="muted tiny">Drag the box over the streamer's camera (corner to resize). Used by every split, picture-in-picture and full-reaction part.</span>
+      <span className="muted tiny">Drag the box exactly over the streamer's webcam, inside any border or alert frame (corner to resize). It's remembered for this streamer.</span>
       <div className="fc-frame" ref={ref} onMouseMove={move} onMouseUp={() => setDrag(null)} onMouseLeave={() => setDrag(null)}>
         <img src={api.sourceFrameUrl(v.clip_id, t)} alt="Source frame" draggable={false} />
         <div className="fc-box" style={{ left: `${box.x * 100}%`, top: `${box.y * 100}%`, width: `${box.w * 100}%`, height: `${box.h * 100}%` }}
@@ -258,6 +257,7 @@ export function FacecamEditor({ v, onEdl }: { v: View; onEdl: OnEdl }) {
       </div>
       <Num label="Source time" value={t} min={e.range[0]} max={e.range[1]} step={0.5} unit="s" onChange={setT} />
       <button className="btn" onClick={save}>Use this facecam box</button>
+      {msg && <span className="muted tiny" role="status">{msg}</span>}
     </div>
   );
 }

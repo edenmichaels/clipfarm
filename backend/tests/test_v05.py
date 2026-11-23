@@ -154,41 +154,38 @@ def test_exports_match_platform_presets(fresh_db, tmp_path, preset):
     EC.PRESETS.pop("_tiny")
 
 
-# ---- captions: every template x layout -----------------------------------------------------------------
+# ---- captions: every template (v0.8.5: the same fixed place in every layout) ------------------------------
 @needs_ffmpeg
 @pytest.mark.parametrize("tmpl", [*C.PRESETS, {"base": "bold_pop", "family": "Anton", "em": 120, "animation": "bounce"},
                                   {"base": "minimal", "family": "Montserrat ExtraBold", "y": 0.55, "max_words": 2}])
-@pytest.mark.parametrize("layout", ["crop", "split", "blur_fill", "speaker", "pip"])
-def test_caption_centred_every_template_and_layout(tmp_path, tmpl, layout):
+def test_caption_centred_every_template(tmp_path, tmpl):
     import cv2
     ws = [{"word": w, "start": 1 + i * 0.5, "end": 1.4 + i * 0.5} for i, w in enumerate("NO WAY HE ACTUALLY WON".split())]
-    tr = C.build_track(ws, tmp_path / "c.ass", tmpl, layout_segments=[(0, layout)])
+    tr = C.build_track(ws, tmp_path / "c.ass", tmpl, vocab=False)
     shutil.copytree(C.fonts_dir(), tmp_path / "fonts", dirs_exist_ok=True)
+    bottoms = set()
     for ev in tr.events[::2]:
         subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=0x808080:s=1080x1920:d=6", "-vf",
                         "ass=c.ass:fontsdir=fonts", "-ss", f"{ev['start'] + 0.12:.2f}", "-frames:v", "1", "f.png"],
                        cwd=tmp_path, check=True)
         img = cv2.imread(str(tmp_path / "f.png")).astype(int)
         ys, xs = np.nonzero(np.abs(img - 128).sum(axis=2) > 40)
-        assert abs((xs.min() + xs.max()) / 2 - 540) / 1080 <= 0.02, (tmpl, layout, ev["word"])
+        assert abs((xs.min() + xs.max()) / 2 - 540) / 1080 <= 0.01, (tmpl, ev["word"])
         assert C.SAFE["left"] - 10 <= xs.min() and xs.max() <= C.SAFE["right"] + 10
-        assert C.SAFE["top"] - 5 <= ys.min() and ys.max() <= C.SAFE["bottom"] + 10
-        if layout == "split":
-            assert ys.min() >= 560
+        assert 1100 <= ys.min() and ys.max() <= C.SAFE["bottom"]
+        bottoms.add(int(ys.max()) // 4)
+    assert len(bottoms) <= 2                                       # one baseline (±4 px of anti-aliasing)
 
 
-def test_template_validation_and_animations(tmp_path):
+def test_template_validation_and_no_animations(tmp_path):
     t = C.template_from({"base": "bold_pop", "text": "#ff00ff", "highlight": "nonsense", "em": 999, "family": "Comic Sans",
                          "animation": "spin", "max_words": 9})
     assert t.text == "FF00FF" and t.highlight == "FFE600" and t.em == 140 and t.family == "Montserrat Black"
-    assert t.animation == "pop" and t.max_words == 3
+    assert t.max_words == 6 and not hasattr(t, "animation")
     ws = [{"word": w, "start": i * 0.4, "end": i * 0.4 + 0.3} for i, w in enumerate("a b c".split())]
-    tw = C.build_track(ws, tmp_path / "t.ass", {"base": "bold_pop", "animation": "typewriter"}).path.read_text()
-    assert "\\alpha&HFF&" in tw                                   # later words hidden until spoken
-    ka = C.build_track(ws, tmp_path / "k.ass", {"base": "bold_pop", "animation": "karaoke"}).path.read_text()
-    assert ka.count("&H0000E6FF&") > 3                              # spoken words stay highlighted
-    no = C.build_track(ws, tmp_path / "n.ass", {"base": "bold_pop", "animation": "none"}).path.read_text()
-    assert "\\fscx118" not in no
+    for anim in ("typewriter", "karaoke", "bounce", "pop"):     # old saved templates: drawn static now
+        txt = C.build_track(ws, tmp_path / f"{anim}.ass", {"base": "bold_pop", "animation": anim}, vocab=False).path.read_text()
+        assert "\\alpha&HFF&" not in txt and "\\fscx118" not in txt and "\\t(" not in txt
 
 
 def test_user_templates_and_defaults(fresh_db):
@@ -219,24 +216,20 @@ def test_translation_keeps_timing(monkeypatch):
 
 # ---- reframe ---------------------------------------------------------------------------------------
 @needs_ffmpeg
-def test_reframe_follows_the_action_smoothly(tmp_path):
-    """A white square moving left -> right on a dark game: the crop keeps it in frame, without jitter."""
+def test_reframe_frames_the_action_without_moving(tmp_path):
+    """A white square moving left -> right on a dark game: one fixed crop on where the action is (v0.8.5: the
+    crop never pans to follow it)."""
     src = tmp_path / "act.mp4"
     subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=0x202020:s=1920x1080:r=30:d=10",
                     "-f", "lavfi", "-i", "color=c=white:s=120x120:r=30:d=10", "-filter_complex",
-                    "[0][1]overlay=x='100+t*160':y=480", "-c:v", "libx264", "-preset", "ultrafast", str(src)], check=True)
+                    "[0][1]overlay=x='700+t*50':y=480", "-c:v", "libx264", "-preset", "ultrafast", str(src)], check=True)
     lay = reframe.analyse(src, 0, 10, detect_cam=False)
     kf = lay["keyframes"][0]
-    assert kf["layout"] == "crop"
-    crop_w = 1080 * 9 / 16 / 1920                                  # crop width as a fraction of the source
-    inside = 0
-    for t in np.arange(1, 9.5, 0.5):
-        cx = np.interp(t - kf["t"], [p[0] for p in kf["path"]], [p[1] for p in kf["path"]])
-        sq = (100 + t * 160 + 60) / 1920
-        inside += abs(sq - cx) < crop_w / 2
-    assert inside / len(np.arange(1, 9.5, 0.5)) >= 0.9
-    steps = np.abs(np.diff([p[1] for p in kf["path"]]))
-    assert steps.max() <= 0.25 / reframe.SAMPLE_FPS + 1e-6            # speed-limited: no jumps
+    assert kf["layout"] == "crop" and len(kf["path"]) == 1          # one fixed crop
+    crop_w = 1080 * 9 / 16 / 1920
+    cx = kf["path"][0][1]
+    inside = [abs((700 + t * 50 + 60) / 1920 - cx) < crop_w / 2 for t in np.arange(1, 9.5, 0.5)]
+    assert sum(inside) / len(inside) >= 0.9
 
 
 @needs_ffmpeg
@@ -250,7 +243,7 @@ def test_reframe_never_crops_a_required_overlay(tmp_path):
     assert kfs[0]["layout"] == "blur_fill" and fixed
     kfs, fixed = reframe.enforce_rules([{"t": 0, "layout": "speaker", "path": [[0, .3]]}], ["streamer_face"],
                                        {"x": .7, "y": 0, "w": .3, "h": .3})
-    assert kfs[0]["layout"] == "split" and kfs[0]["cam"]
+    assert kfs[0]["layout"] == "corner" and kfs[0]["cam"]          # v0.8.5: facecam in the corner
 
 
 def test_speaker_tracking_picks_who_is_talking():

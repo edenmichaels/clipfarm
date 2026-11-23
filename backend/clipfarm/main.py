@@ -104,7 +104,7 @@ def self_test(out_path: str) -> int:
         frames = []
         for name, ws in (("with", cw), ("without", [])):
             rr = render(RenderSpec(flat, 0, 4, work / f"cap {name}.mp4", layout="crop", words=ws, quality="fast",
-                                   punch_zoom=False, progress_bar=False))
+                                   progress_bar=False))
             raw = proc.run([ffmpeg_bin(), "-v", "error", "-ss", "1.5", "-i", rr["path"], "-frames:v", "1",
                                   "-f", "rawvideo", "-pix_fmt", "gray", "-"], capture_output=True, check=True).stdout
             frames.append(np.frombuffer(raw, np.uint8).reshape(1920, 1080).astype(int))

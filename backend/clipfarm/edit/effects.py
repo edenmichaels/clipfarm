@@ -14,7 +14,7 @@ from .. import db
 from . import timeline as T
 
 REACTION = re.compile(r"^(no+|what+|bro+|yo+|oh+|omg|wow+|wait|dude|holy|yes+|let'?s|go+|nah+|why|how)$", re.I)
-PLAN = {   # moment type: (zoom amount at payoff, flash, shake, emoji, sfx at payoff, sfx before payoff)
+PLAN = {   # moment type: (zoom amount at payoff, flash, shake [unused: never shake], emoji, sfx at payoff, sfx before)
     "Funny": (0.16, False, False, "😂", "pop", None),
     "Action/Explosion": (0.24, True, True, "💥", "boom", "whoosh"),
     "Rage/Reaction": (0.2, False, True, "😱", "impact", None),
@@ -36,9 +36,19 @@ def _snap(t_src: float, edl: dict, beats_out: list[float], window: float = 0.3) 
     return T.to_src(edl, b) if abs(b - o) <= window else t_src
 
 
+def zoom_cuts_on(edl: dict) -> bool:
+    """Automatic zoom cuts are OFF unless you switch them on (in the clip's style or Settings › Editing)."""
+    p = edl.get("pacing") or {}
+    if "zoom_cuts" in p:
+        return bool(p["zoom_cuts"])
+    return bool((db.get_setting("editing", {}) or {}).get("zoom_cuts", False))
+
+
 def auto_effects(edl: dict, *, emoji: bool = True, sfx: bool = True, broll: bool = True,
                  max_extra_zooms: int = 2) -> dict:
+    """v0.8.5: no shake ever, and zooms only when zoom cuts are on (then they're instant cuts, see render)."""
     e = copy.deepcopy(edl)
+    zooms_on = zoom_cuts_on(e)
     for k in ("zooms", "overlays", "sfx", "broll"):
         e[k] = [x for x in e.get(k, []) if not x.get("auto")]
     peak = e["moment"].get("peak")
@@ -60,11 +70,10 @@ def auto_effects(edl: dict, *, emoji: bool = True, sfx: bool = True, broll: bool
 
     if peak is not None and a <= peak <= b:
         tp = _snap(peak, e, beats)
-        e["zooms"].append({"t": round(tp, 3), "kind": "punch", "amount": zoom, "dur": 0.6, "auto": True})
+        if zooms_on:
+            e["zooms"].append({"t": round(tp, 3), "kind": "punch", "amount": zoom, "dur": 0.6, "auto": True})
         if flash:
             e["overlays"].append({"kind": "flash", "t": round(tp, 3), "dur": 0.12, "auto": True})
-        if shake:
-            e["overlays"].append({"kind": "shake", "t": round(tp, 3), "dur": 0.45, "auto": True})
         if emoji and emo:
             e["overlays"].append({"kind": "emoji", "emoji": emo, "t": round(tp + 0.1, 3), "dur": 1.2, "auto": True})
         add_sfx(fx_hit, tp, -6.0 if fx_hit == "boom" else -9.0)
@@ -76,7 +85,7 @@ def auto_effects(edl: dict, *, emoji: bool = True, sfx: bool = True, broll: bool
     taken = [z["t"] for z in e["zooms"]]
     extra = 0
     for w in sorted(T.words_out(e), key=lambda x: x["start"]):
-        if extra >= max_extra_zooms:
+        if not zooms_on or extra >= max_extra_zooms:
             break
         if not REACTION.match(re.sub(r"[^\w']", "", w["word"])):
             continue

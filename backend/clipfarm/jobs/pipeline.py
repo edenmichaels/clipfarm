@@ -401,8 +401,8 @@ def render_moment(payload: dict, ctx: JobContext) -> None:
 def spec_json(spec: RenderSpec, result: dict) -> dict:
     """Everything needed to re-render the clip the same way from its base (Review: nudge, fix a word...)."""
     keep = ("start", "end", "caption_style", "words_per_chunk", "caption_nudge", "uppercase", "profanity", "fillers",
-            "emoji", "keep_clear", "hook", "hook_sec", "credit", "progress_bar", "punch_zoom", "music_offset",
-            "music_entry", "music_delay", "music_track_lufs", "duck_db", "speech", "swells", "beats", "quality", "fps")
+            "emoji", "hook", "hook_sec", "credit", "progress_bar", "music_offset",
+            "music_entry", "music_delay", "music_track_lufs", "duck_db", "speech", "swells", "quality", "fps")
     d = {k: getattr(spec, k) for k in keep}
     d["music"] = str(spec.music) if spec.music else None
     d["base"] = result.get("base")
@@ -442,10 +442,9 @@ def spec_from_clip(c: dict, changes: dict | None = None) -> RenderSpec:
     spec = RenderSpec(source=Path(d["base"]), start=d["start"], end=d["end"], out=Path(c["file_path"]),
                       layout=d.get("layout") or "crop", words=words, base=Path(d["base"]),
                       **{k: d[k] for k in ("caption_style", "words_per_chunk", "uppercase", "profanity", "fillers",
-                                           "emoji", "hook", "hook_sec", "credit", "progress_bar", "punch_zoom",
+                                           "emoji", "hook", "hook_sec", "credit", "progress_bar",
                                            "music_offset", "music_entry", "music_delay", "music_track_lufs",
-                                           "duck_db", "beats", "quality", "fps") if k in d})
-    spec.keep_clear = tuple(d.get("keep_clear") or ())
+                                           "duck_db", "quality", "fps") if k in d})
     spec.speech = [tuple(x) for x in d.get("speech") or []]
     spec.swells = [tuple(x) for x in d.get("swells") or []]
     spec.caption_nudge = float(ch.get("caption_nudge", d.get("caption_nudge", 0)) or 0)
@@ -646,7 +645,7 @@ def post_due(payload: dict, ctx: JobContext) -> None:
         db.ex("UPDATE posts SET status='uploading' WHERE id=? AND status='scheduled'", (post["id"],))
         try:
             res = posting.post(post["platform"], post["account_id"], clip)
-            db.ex("UPDATE posts SET status='posted', posted_at=datetime('now'), url=?, external_id=? WHERE id=?",
+            db.ex("UPDATE posts SET status='posted', posted_at=datetime('now','localtime'), url=?, external_id=? WHERE id=?",
                   (res["url"], res["external_id"], post["id"]))
             create_submission_item(post["id"])
             emit("posted", clip_id=clip["id"], url=res["url"])

@@ -360,9 +360,62 @@ def _v11(conn: sqlite3.Connection) -> None:
     """)
 
 
+# ---- v12: fixed framing + static captions (v0.8.5) --------------------------------------------------------
+def _get(conn: sqlite3.Connection, key: str, default=None):
+    r = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    return json.loads(r[0]) if r else default
+
+
+def _set(conn: sqlite3.Connection, key: str, value) -> None:
+    conn.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                 (key, json.dumps(value)))
+
+
+def _v12(conn: sqlite3.Connection) -> None:
+    """Every edit project: pans / animated zooms / shakes -> one fixed crop per shot (with a one-line notice on
+    the clip). Your saved styles: moving captions, shakes and animated zooms -> the static versions (listed once
+    in the Styles tab). Facecam boxes saved automatically before are marked as guesses (a box you draw wins)."""
+    from .edit import framing, styles
+    notes = _get(conn, "edit_notices", {}) or {}
+    for pid, cid, head, data in conn.execute("SELECT id, clip_id, head, data FROM edit_projects").fetchall():
+        try:
+            edl = json.loads(data)
+        except ValueError:
+            continue
+        if edl.get("framing") == framing.MARK:
+            continue
+        new, changes = framing.convert(edl)
+        blob = json.dumps(new)
+        conn.execute("UPDATE edit_projects SET data=? WHERE id=?", (blob, pid))
+        conn.execute("UPDATE edit_versions SET data=? WHERE project_id=? AND version=?", (blob, pid, head))
+        if (msg := framing.notice(changes)):
+            notes[str(cid)] = msg
+    _set(conn, "edit_notices", notes)
+    changed = []
+    if "styles" in {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}:
+        for sid, name, data in conn.execute("SELECT id, name, data FROM styles").fetchall():
+            try:
+                old = json.loads(data)
+            except ValueError:
+                continue
+            new, what = styles.convert_saved(old)
+            if what:
+                changed.append({"name": name, "changes": what})
+            conn.execute("UPDATE styles SET data=?, updated_at=datetime('now') WHERE id=?", (json.dumps(new), sid))
+    if changed:
+        _set(conn, "style_notices", changed)
+    for key, value in conn.execute("SELECT key, value FROM settings WHERE key LIKE 'facecam:%'").fetchall():
+        try:
+            box = json.loads(value)
+        except ValueError:
+            continue
+        if isinstance(box, dict) and "by" not in box:
+            _set(conn, key, {**box, "by": "auto"})
+
+
 MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [(2, _v2), (3, _v3), (4, _v4), (5, _v5), (6, _v6),
                                                                       (7, _v7), (8, _v8), (9, _v9), (10, _v10),
-                                                                      (11, _v11)]
+                                                                      (11, _v11), (12, _v12)]
 LATEST = MIGRATIONS[-1][0]
 
 
