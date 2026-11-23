@@ -201,7 +201,7 @@ def test_dataset_never_fetches_tiktok_or_instagram():
     for f in ("highlights/viral_data.py", "highlights/events.py", "providers/twitch.py", "providers/youtube.py"):
         src = (PKG / f).read_text(encoding="utf-8").lower()
         assert not re.search(r"https?://[^\s\"']*(tiktok|instagram)", src), f
-    urls = set(re.findall(r"https://([a-z0-9.-]+)", (PKG / "highlights" / "viral_data.py").read_text()))
+    urls = set(re.findall(r"https://([a-z0-9.-]+)", (PKG / "highlights" / "viral_data.py").read_text(encoding="utf-8")))
     assert urls <= set(viral_data.ALLOWED_HOSTS) | {"creativecommons.org"}, urls
 
 

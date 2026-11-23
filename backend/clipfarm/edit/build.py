@@ -12,7 +12,7 @@ from .. import db
 from ..editing.ffmpeg_util import probe
 from ..editing.layout import Box
 from ..music import pick as music_pick
-from . import project, reframe, templates
+from . import project, reframe, styles, templates
 from . import timeline as T
 
 
@@ -24,7 +24,8 @@ def source_info(path: Path) -> dict:
 
 def auto_edit(*, media: Path, start: float, end: float, words: list[dict], streamer: dict, program: dict | None,
               req: dict, settings: dict, moment: dict, hook: str | None, credit: str | None,
-              account_ids: list[int], payoff: float | None, url: str | None = None) -> dict:
+              account_ids: list[int], payoff: float | None, url: str | None = None,
+              category: str | None = None, style: str | None = None) -> dict:
     src = source_info(media)
     src["url"] = url
     e = project.blank(src, words, max(0.0, start), min(end, src["end"]))
@@ -62,6 +63,18 @@ def auto_edit(*, media: Path, start: float, end: float, words: list[dict], strea
     e["progress_bar"] = settings.get("progress_bar", True)
     # music
     plan_music(e, account_ids, settings, program, seed=moment.get("id"))
+    # Trending Style: clip's own -> campaign -> account -> streamer -> global -> automatic
+    if style or (db.get_setting("styles", {}) or {}).get("auto", True):
+        key, why = (style, "clip") if style else styles.default_for(
+            program_id=program["id"] if program else None, account_ids=account_ids, streamer_id=streamer.get("id"),
+            has_facecam=bool(lay["facecam"]), category=category)
+        tmpl = e["captions"]["template"]
+        e = styles.apply(e, key)
+        e["style"]["source"] = why
+        d = templates.defaults()
+        if (program and d.get(f"program:{program['id']}")) or any(d.get(f"account:{a}") for a in account_ids) \
+                or d.get("global"):
+            e["captions"]["template"] = tmpl          # an explicit caption-template default still wins
     return e
 
 

@@ -507,7 +507,7 @@ def test_v07_routes(client, tmp_path):
     w = call(client, "PUT", "/virality/weights", json={"weights": {"hook": 1}})
     assert abs(sum(w["virality_global"].values()) - 1) < 0.02
     w = call(client, "POST", "/virality/weights/reset", json={})
-    assert w["virality_global"]["hook"] == 0.25
+    assert w["virality_global"]["hook"] == 0.20
 
 
 def test_v071_engine_and_source_routes(client, tmp_path, monkeypatch):
@@ -576,6 +576,55 @@ def test_v08_viral_routes_and_tag_filter(client, tmp_path):
     assert call(client, "GET", "/editor/clips?tag=explosion")[0]["moment_tags"] == ["explosion", "police"]
     assert call(client, "GET", "/editor/clips?tag=boat") == []
     assert call(client, "GET", "/editor/clips?tag=explosion&reaction=scream") == []
+
+
+def test_v08_styles_and_style_refs(client, tmp_path):
+    import base64
+    import io
+    import subprocess
+    from PIL import Image
+    st = call(client, "GET", "/styles")
+    assert [x["key"] for x in st["styles"]][:5] == ["streamer_split", "full_reaction", "gameplay_only",
+                                                     "meme_high_energy", "clean"]
+    assert st["fields"]["layout.cam_ratio"] == [0.35, 0.45]
+    mine = dict(st["styles"][0], name="Mine")
+    mine["layout"]["cam_ratio"] = 0.43
+    saved = call(client, "POST", "/styles", json={"name": "Mine", "style": mine})
+    assert saved["key"].startswith("user:") and saved["layout"]["cam_ratio"] == 0.43
+    assert call(client, "PUT", "/styles/defaults", json={"scope": "streamer:1", "key": saved["key"]})["defaults"] == \
+        {"streamer:1": saved["key"]}
+    call(client, "PUT", "/styles/defaults", json={"scope": "streamer:1", "key": "nope"}, expect=400)
+    buf = io.BytesIO()
+    Image.new("RGB", (540, 960), (90, 90, 90)).save(buf, "PNG")
+    data = base64.b64encode(buf.getvalue()).decode()
+    ref = call(client, "POST", "/style-refs", json={"data": data, "notes": "split w/ seam caps", "tags": ["fail"]})
+    call(client, "POST", "/style-refs", json={"data": "bm90IGFuIGltYWdl"}, expect=400)
+    rid = ref["id"]
+    assert call(client, "GET", "/style-refs")["refs"][0]["notes"] == "split w/ seam caps"
+    assert call(client, "PUT", f"/style-refs/{rid}", route="/style-refs/{rid}", json={"tags": ["rage"]})["tags"] == ["rage"]
+    r = client.get(f"/style-refs/{rid}/image", headers=H)
+    assert r.status_code == 200 and r.content[:4] == b"\x89PNG"
+    COVERED.add(("GET", "/style-refs/{rid}/image"))
+    made = call(client, "POST", f"/style-refs/{rid}/make-style", route="/style-refs/{rid}/make-style",
+                json={"save": True, "name": "From ref"})
+    assert made["saved"]["name"] == "From ref" and made["method"] == "image analysis"
+    assert call(client, "POST", "/styles/from-image", json={"data": data})["style"]["layout"]["mode"]
+    # apply a style to a clip's edit project
+    src = tmp_path / "src.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=1920x1080:r=30:d=12", "-f", "lavfi",
+                    "-i", "sine=f=300:d=12", "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac",
+                    str(src)], check=True)
+    _, prog, cid, _ = _linked_clip(tmp_path)
+    db.ex("UPDATE clips SET source_path=? WHERE id=?", (str(src), cid))
+    call(client, "GET", f"/edit/{cid}", route="/edit/{cid}")
+    v = call(client, "POST", f"/edit/{cid}/style", route="/edit/{cid}/style", json={"key": "meme_high_energy"})
+    assert v["edl"]["style"] == {"key": "meme_high_energy", "name": "Meme / High Energy", "source": "clip"}
+    v = call(client, "POST", f"/edit/{cid}/style", route="/edit/{cid}/style", json={"style": {**mine, "name": "Tweak"}})
+    assert v["edl"]["layout"]["cam_h"] == 826
+    call(client, "POST", f"/edit/{cid}/style", route="/edit/{cid}/style", json={"key": "bogus"}, expect=400)
+    call(client, "DELETE", f"/style-refs/{rid}", route="/style-refs/{rid}")
+    call(client, "DELETE", f"/styles/{saved['id']}", route="/styles/{sid}")
+    assert all(x["key"] != saved["key"] for x in call(client, "GET", "/styles")["styles"])
 
 
 def test_every_route_is_covered():

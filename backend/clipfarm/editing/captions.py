@@ -252,6 +252,19 @@ def placement(layout: str, src_w: int = 1920, src_h: int = 1080, keep_clear: tup
     return p
 
 
+POSITIONS = ("seam", "upper", "centre", "lower")
+
+
+def position_y(position: str, layout: str, cam_h: int, pl: Placement) -> float:
+    """Centre y of a Style caption position. Split layouts keep every position under the facecam."""
+    if layout == "split":
+        return {"seam": cam_h + 70, "upper": cam_h + 260, "centre": (cam_h + SAFE["bottom"]) / 2,
+                "lower": H * 0.70}[position]
+    if position == "seam":            # no seam on this layout: the lower third is the closest match
+        position = "lower"
+    return {"upper": H * 0.30, "centre": H * 0.50, "lower": H * 0.64}[position]
+
+
 # ---- layout of one chunk -------------------------------------------------------------------------------
 @dataclass
 class Line:
@@ -346,6 +359,7 @@ class CaptionTrack:
     bleeps: list[tuple[float, float]] = field(default_factory=list)
     emojis: list[dict] = field(default_factory=list)       # {"code","start","end","x","y","size"}
     events: list[dict] = field(default_factory=list)       # {"start","end","word","x","y","w","h"} for tests/preview
+    title: dict | None = None                              # {"text","box","y","h","end"} where the title went
 
 
 def build_ass(words: list[dict], out: Path, style_name: str = DEFAULT, words_per_chunk: int | None = None,
@@ -366,7 +380,8 @@ def build_track(words: list[dict], out: Path, style_name: str = DEFAULT, words_p
                 profanity: str = "keep", fillers: str = "remove", emoji: bool = False, hook: str | None = None,
                 hook_sec: float = 2.2, credit: str | None = None, duration: float | None = None,
                 cam_h: int = 640, layout_segments: list[tuple[float, str]] | None = None,
-                credit_pos: str | None = None) -> CaptionTrack:
+                credit_pos: str | None = None, position: str | None = None, title_box: str = "outline",
+                title_pos: str | None = None) -> CaptionTrack:
     """words: [{"word","start","end"}] in source time; `offset` is subtracted so they line up with the clip.
     style_name: a preset key or a template dict. layout_segments: [(clip time, layout)] when the layout
     changes mid-clip -- each caption uses the placement of the layout on screen when it appears."""
@@ -385,10 +400,19 @@ def build_track(words: list[dict], out: Path, style_name: str = DEFAULT, words_p
             t1 = segs[i + 1][0] if i + 1 < len(segs) else max(total, t0)
             span[name] = span.get(name, 0.0) + max(0.0, min(t1, total) - max(t0, 0.0))
         layout = max(span, key=lambda k: span[k]) if span else layout
-    lay0 = "crop" if layout in ("speaker", "pip") else layout
+    lay0 = "crop" if layout in ("speaker", "pip", "cam_full") else layout
     pl = placement(lay0, src_w, src_h, tuple(keep_clear), nudge, cam_h)
-    if pr.y is not None and lay0 != "split":
+    if position in POSITIONS:
+        # a Style's caption position: one of four fixed spots (the split layout keeps them off the facecam)
+        pl.y = position_y(position, lay0, cam_h, pl) + nudge
+    elif pr.y is not None and lay0 != "split":
         pl.y = pr.y * H + nudge
+    if title_pos == "top":
+        pl.hook_y = SAFE["top"] + 60
+    elif title_pos == "seam" and lay0 == "split":
+        pl.hook_y = cam_h
+    if lay0 == "split" and title_pos == "seam" and position in (None, "seam"):
+        pl.y = cam_h + 230 + nudge         # the title owns the seam; captions sit just under it
     # Fix the centre once so that the tallest block (2 lines at full size) fits the region; every chunk then shares
     # exactly this centre, whether it has one line or two.
     lo, hi = pl.region
@@ -414,6 +438,8 @@ YCbCr Matrix: None
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Cap,{pr.family},{fs:.1f},{_c(pr.text)},{_c(pr.highlight)},{_c(pr.outline)},{_c('000000', pr.shadow_alpha)},0,0,0,0,100,100,0,0,1,{pr.outline_px},{pr.shadow_px},5,0,0,0,1
 Style: Hook,{pr.family},{ass_size(pr.family, 74):.1f},{_c('FFFFFF')},{_c(pr.highlight)},{_c('000000')},{_c('000000', 90)},0,0,0,0,100,100,0,0,1,8,5,5,0,0,0,1
+Style: HookWhiteBox,{pr.family},{ass_size(pr.family, 64):.1f},{_c('111111')},{_c('111111')},{_c('FFFFFF')},{_c('000000', 200)},0,0,0,0,100,100,0,0,3,18,0,5,0,0,0,1
+Style: HookBlackBox,{pr.family},{ass_size(pr.family, 64):.1f},{_c('FFFFFF')},{_c('FFFFFF')},{_c('000000', 30)},{_c('000000', 200)},0,0,0,0,100,100,0,0,3,18,0,5,0,0,0,1
 Style: Credit,Montserrat ExtraBold,{ass_size('Montserrat ExtraBold', 34):.1f},{_c('FFFFFF', 40)},{_c('FFFFFF')},{_c('000000', 60)},{_c('000000', 160)},0,0,0,0,100,100,0,0,1,3,0,5,0,0,0,1
 
 [Events]
@@ -511,15 +537,25 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 size = int(blk.em * 1.1)
                 emojis.append({"code": code, "start": start, "end": max(end, start + 0.6), "size": size,
                                "x": 540 - size // 2, "y": int(blk.y - blk.height / 2 - size - 12)})
-    if hook:
-        hb = layout_chunk([{"word": t} for t in hook.split()], Preset("hook", "", pr.family, 74, upper, "FFFFFF",
+    title = None
+    if hook and title_box != "none":
+        boxed = title_box in ("white_box", "black_box")
+        em = 64 if boxed else 74
+        hb = layout_chunk([{"word": t} for t in hook.split()], Preset("hook", "", pr.family, em, upper, "FFFFFF",
                           pr.highlight, "000000", 8, 5, 90, 100, 99), Placement(y=pl.hook_y), upper)
+        if boxed:       # the box adds 2x18 px padding per line; keep the whole title inside the safe area
+            hb.line_h += 36
+            top = hb.y - hb.height / 2
+            hb.y += max(0.0, SAFE["top"] - top) - max(0.0, hb.y + hb.height / 2 - SAFE["bottom"])
         hfs = ass_size(pr.family, hb.em)
         hy0 = hb.y - hb.height / 2 + hb.line_h / 2
+        sty = {"white_box": "HookWhiteBox", "black_box": "HookBlackBox"}.get(title_box, "Hook")
+        anim = "" if boxed else "\\fscx118\\fscy118\\t(0,140,\\fscx100\\fscy100)"
         for li, line in enumerate(hb.lines):
             txt = " ".join(_esc(_word_text(w, upper)) for w in line)
-            lines.append(f"Dialogue: 1,{_ts(0)},{_ts(hook_sec)},Hook,,0,0,0,,{{\\an5\\pos(540,{hy0 + li * hb.line_h:.0f})"
-                         f"\\fs{hfs:.1f}\\blur1.5\\q2\\fscx118\\fscy118\\t(0,140,\\fscx100\\fscy100)\\fad(0,180)}}{txt}")
+            lines.append(f"Dialogue: 1,{_ts(0)},{_ts(hook_sec)},{sty},,0,0,0,,{{\\an5\\pos(540,{hy0 + li * hb.line_h:.0f})"
+                         f"\\fs{hfs:.1f}{'' if boxed else chr(92) + 'blur1.5'}\\q2{anim}\\fad(0,180)}}{txt}")
+        title = {"text": hook, "box": title_box, "y": round(hb.y), "h": round(hb.height), "end": hook_sec}
     if credit:
         end = duration if duration else 3600
         cy = {"top": SAFE["top"] + 26, "bottom": SAFE["bottom"] - 30}.get(credit_pos or "", pl.credit_y)
@@ -527,4 +563,4 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                      f"{_esc(credit)}")
     out.write_text(header + "\n".join(lines) + "\n", encoding="utf-8")
     out.with_suffix(".events.json").write_text(json.dumps(events), encoding="utf-8")
-    return CaptionTrack(out, bleeps, emojis, events)
+    return CaptionTrack(out, bleeps, emojis, events, title)

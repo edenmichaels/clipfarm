@@ -13,13 +13,14 @@ import Programs from "./Programs";
 import Health from "./Health";
 import Logs from "./Logs";
 import { CaptionSettings, HighlightSettings, MusicSettings } from "../components/QualitySettings";
+import { StyleReferences, StylesPanel } from "../components/Styles";
 import { BrandSettings, LearningSettings, LibrarySettings, ViralModelSettings } from "../components/StudioSettings";
 
-export const TABS = ["General", "Accounts", "Connections", "Campaigns", "Captions", "Highlights", "Music", "Brand", "Posting",
+export const TABS = ["General", "Accounts", "Connections", "Campaigns", "Captions", "Styles", "Highlights", "Music", "Brand", "Posting",
   "Rewards programs", "Backup", "Setup health", "Logs", "Rules"];
 // Tabs that save themselves (no "Save settings" button).
 const SELF_SAVING = ["Connections", "Accounts", "Backup", "Campaigns", "Rewards programs", "Setup health", "Logs",
-  "Captions", "Highlights", "Music", "Brand"];
+  "Captions", "Styles", "Highlights", "Music", "Brand"];
 const ACCENTS = ["#ffd400", "#3ccf7a", "#4da3ff", "#ff5a7a"];
 
 export default function Settings({ initialTab, go }: { initialTab?: string; go: (p: Page, tab?: string) => void }) {
@@ -156,6 +157,7 @@ export default function Settings({ initialTab, go }: { initialTab?: string; go: 
       {tab === "Highlights" && <div className="stack" style={{ maxWidth: 760 }}><HighlightSettings /><ViralModelSettings /><LearningSettings /></div>}
       {tab === "Music" && <div className="stack" style={{ maxWidth: 760 }}><MusicSettings /><LibrarySettings /></div>}
       {tab === "Brand" && <BrandSettings />}
+      {tab === "Styles" && <div className="stack" style={{ maxWidth: 900 }}><StylesPanel /><StyleReferences /></div>}
     </div>
   );
 }

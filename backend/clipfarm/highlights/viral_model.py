@@ -251,6 +251,16 @@ def trend_tags(game_id: int | None, days: int = 7) -> dict[str, float]:
     for r in rows:
         for t in json.loads(r["tags"]):
             counts[t] = counts.get(t, 0) + 1
+    # your style references count too: tags you put on screenshots of clips you like (e.g. "fail", "rage")
+    try:
+        from .events import TAGS
+        from ..edit import style_refs
+        for t, n in style_refs.tag_counts().items():
+            key = t.replace(" ", "_")
+            if key in TAGS:
+                counts[key] = counts.get(key, 0) + min(n, 3)
+    except Exception:                      # noqa: BLE001  (no references table yet / no DB)
+        pass
     if not counts:
         return {}
     top = max(counts.values())

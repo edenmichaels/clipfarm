@@ -347,8 +347,22 @@ def _v10(conn: sqlite3.Connection) -> None:
         _add(conn, "moments", col, decl)
 
 
+# ---- v11: Trending Styles (saved styles) and your own style references (screenshots + notes) --------------
+def _v11(conn: sqlite3.Connection) -> None:
+    _script(conn, """
+    CREATE TABLE IF NOT EXISTS styles(
+        id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, data TEXT NOT NULL, ref_id INTEGER,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')));
+    CREATE TABLE IF NOT EXISTS style_refs(
+        id INTEGER PRIMARY KEY, image_path TEXT, notes TEXT, tags TEXT, source_note TEXT, analysis TEXT,
+        style_id INTEGER REFERENCES styles(id) ON DELETE SET NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')));
+    """)
+
+
 MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [(2, _v2), (3, _v3), (4, _v4), (5, _v5), (6, _v6),
-                                                                      (7, _v7), (8, _v8), (9, _v9), (10, _v10)]
+                                                                      (7, _v7), (8, _v8), (9, _v9), (10, _v10),
+                                                                      (11, _v11)]
 LATEST = MIGRATIONS[-1][0]
 
 

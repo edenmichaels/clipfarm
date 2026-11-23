@@ -1,5 +1,76 @@
 # ClipFarm changelog
 
+## 0.8.2 (step 3): Trending Styles
+
+### Five ready-made looks, picked for you
+A **style** sets the whole look of a clip in one go: the layout, the captions, the title, the pacing, the effects and the music level.
+- **Streamer Split:** the facecam sits on top, taking 35–45% of the height, with the gameplay below and a clean seam between them. Captions sit on the seam, 1–3 words at a time, with the spoken word in yellow. A white-box title shows from the first frame.
+- **Full Reaction:** the streamer fills the screen. Use it for IRL, Just Chatting and big reactions.
+- **Gameplay Only:** no facecam. Captions go in the lower third, with an outline title.
+- **Meme / High Energy:** one word at a time and hard punch-in zooms. A flash, a shake and sound effects hit on the payoff.
+- **Clean:** minimal captions with no highlight, no title, a gentle zoom and nothing flashy.
+
+Which style a clip gets, checked in this order:
+1. the clip's own choice;
+2. the campaign's default;
+3. the account's default;
+4. the streamer's default;
+5. your global default;
+6. automatic: Streamer Split when a facecam is found, Full Reaction for Just Chatting/IRL, otherwise Gameplay Only.
+
+An explicit caption-template default you already set still wins over the style's captions.
+
+### Tweak everything, save your own
+- Every part of a style is adjustable:
+  - **Layout:** the layout, the facecam height (35–45%) and the seam line.
+  - **Captions:** position (seam, upper, centre or lower), words on screen (1–3), highlight on/off and its colour, and UPPERCASE.
+  - **Title:** the look (white box, black box, outline or none), the whole clip or the first 1–8 s, and top or seam.
+  - **Pacing:** zoom strength and pause cutting. Pause cutting never touches the payoff or a tagged event.
+  - **Effects:** flash, shake, SFX and emojis.
+  - **Audio:** music on/off and its level.
+- Save any style as your own, and set it as the default for a streamer, an account, a campaign or everything.
+- Editor › **Style**: apply a style to the open clip. You can undo it like any other edit.
+- Campaign rules still win: if a campaign requires the overlay on screen, the full frame is kept whatever the style says.
+
+### Style references (your own screenshots, never scraped)
+- Settings › Styles › **Style references**: paste, drop or pick a screenshot, then add notes and tags. Each reference keeps the date you added it, and **"Style last updated"** shows how fresh your references are.
+- **Make a style from this** reads a screenshot and fills in a style you can then tweak:
+  - Image analysis finds the facecam/gameplay seam and its height, where the captions sit, how many words are on screen, the highlight colour, and a white or black title box.
+  - If you've set up a local vision model, it fills in what pixels can't tell, such as meme energy or uppercase.
+- Tags on your references, such as fail or rage, also feed this week's trending events in the moment finder.
+
+### Under the hood
+- **Migration v11:** new `styles` and `style_refs` tables.
+- **New API routes:**
+  - `/styles` (GET and POST), `DELETE /styles/{sid}` and `PUT /styles/defaults`;
+  - `POST /edit/{cid}/style`;
+  - `/style-refs` (GET and POST), `PUT` and `DELETE /style-refs/{rid}`, `GET /style-refs/{rid}/image` and `POST /style-refs/{rid}/make-style`;
+  - `POST /styles/from-image`.
+- **Render changes:**
+  - the split facecam height is configurable;
+  - a new `cam_full` layout;
+  - an optional seam line;
+  - libass box styles for titles;
+  - a whole-clip title option;
+  - caption positions.
+- **Windows CI fixes:**
+  - The zoom crop no longer fails on newer FFmpeg builds.
+  - The caption-centre test no longer depends on font metrics.
+- **Tests:** `test_v08_styles.py` has 27 tests. They cover:
+  - every style with a facecam, without one, and with a campaign overlay rule;
+  - the split ratio landing exactly on the seam;
+  - validation;
+  - the default resolution order;
+  - pause cuts that keep the payoff;
+  - effects;
+  - making a style from a split screenshot and from a gameplay screenshot;
+  - merging the vision model's answer;
+  - the reference library;
+  - auto-edit picking the style.
+
+  Contract tests cover every new route.
+- `docs/reports/v0.8-styles-before-after.png` shows the v0.8.1 default next to each style.
+
 ## 0.8.1 (step 2): viral moment detection that learns from what actually goes viral
 
 ### How moments are picked now

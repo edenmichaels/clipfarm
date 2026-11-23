@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, aud, MOMENT_EMOJI, PLATFORM_LABEL, waitForJob } from "../api";
 import type { Page } from "../App";
+import { StylesPanel } from "../components/Styles";
 import {
   CaptionsPanel, EffectsPanel, HookPanel, LayoutPanel, MusicPanel, Preview, RulesPanel, Timeline, TranscriptPanel,
   keptOf, toSrc, useCaptionFonts,
@@ -14,7 +15,7 @@ export const TAG_LABEL: Record<string, string> = { explosion: "Explosion", crash
   police: "Police / wanted / arrest", death: "Death / wasted", stunt: "Stunt / flip / jump", fall: "Fall / ragdoll",
   npc: "NPC fight / reaction", vehicle_steal: "Vehicle steal", plane: "Plane / heli", boat: "Boat", chase: "Chase",
   fail: "Fail / glitch", easter_egg: "Easter egg / animal / myth", money: "Money / heist" };
-const TABS = ["Transcript", "Captions", "Layout", "Hook & Title", "Music & Audio", "Effects", "Campaign rules"];
+const TABS = ["Style", "Transcript", "Captions", "Layout", "Hook & Title", "Music & Audio", "Effects", "Campaign rules"];
 const FEEDBACK_TAGS = ["not funny", "too slow", "cut too early", "cut too late", "boring game part", "wrong moment",
   "bad captions", "wrong music", "bad framing", "great moment", "great timing"];
 
@@ -354,6 +355,7 @@ function Workspace({ clip, simple, onChanged, go, setMsg }: { clip: any; simple:
                 <button key={x} role="tab" aria-selected={tab === x} className={tab === x ? "tab on" : "tab"} onClick={() => setTab(x)}>
                   {x}{x === "Campaign rules" && flags.length ? ` (${flags.length})` : ""}</button>))}</div>
               <div className="ed-panel">
+                {tab === "Style" && <StylesPanel compact cid={cid} current={v.edl.style?.key} onApplied={show} />}
                 {tab === "Transcript" && <TranscriptPanel v={v} seek={seek} op={op} t={t} />}
                 {tab === "Captions" && <CaptionsPanel v={v} onEdl={onEdl} templates={templates} fonts={fonts}
                   reload={() => { api.get(`/edit/${cid}`).then(show); api.get("/caption-templates").then(setTemplates); }} />}

@@ -32,16 +32,26 @@ PRESETS = {   # export presets per platform
 
 
 # ---- layouts as filter graphs with named pads --------------------------------------------------------
-def piece_graph(lay: str, inp: str, out: str, sw: int, sh: int, cam: dict | None, path: list) -> str:
+def piece_graph(lay: str, inp: str, out: str, sw: int, sh: int, cam: dict | None, path: list,
+                cam_h: int = 640, seam_line: bool = False) -> str:
     keys = [(float(t), float(x)) for t, x in (path or [[0, 0.5]])]
+    if lay == "cam_full" and cam:
+        # Full Reaction: the facecam fills the screen (scaled up to cover 1080x1920, centred on the cam box)
+        fx, fy, fw, fh = int(cam["x"] * sw), int(cam["y"] * sh), int(cam["w"] * sw), int(cam["h"] * sh)
+        return (f"[{inp}]crop={max(2, fw // 2 * 2)}:{max(2, fh // 2 * 2)}:{fx}:{fy},"
+                f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},setsar=1[{out}]")
+    if lay == "cam_full":
+        lay = "crop"
     if lay == "split" and cam:
-        cam_h, game_h = 640, H - 640
+        cam_h = max(560, min(900, int(cam_h) // 2 * 2))
+        game_h = H - cam_h
+        seam = f",drawbox=x=0:y={cam_h - 3}:w={W}:h=6:color=black@0.85:t=fill" if seam_line else ""
         fx, fy, fw, fh = int(cam["x"] * sw), int(cam["y"] * sh), int(cam["w"] * sw), int(cam["h"] * sh)
         gw = min(sw, int(sh * W / game_h)) // 2 * 2
         return (f"[{inp}]split=2[{out}a][{out}b];"
                 f"[{out}a]crop={fw}:{fh}:{fx}:{fy},scale={W}:{cam_h}:force_original_aspect_ratio=increase,crop={W}:{cam_h}[{out}c];"
                 f"[{out}b]crop={gw}:{sh}:'{L._lerp_expr(keys, sw, gw)}':0,scale={W}:{game_h}:force_original_aspect_ratio=increase,"
-                f"crop={W}:{game_h}[{out}g];[{out}c][{out}g]vstack=inputs=2,setsar=1[{out}]")
+                f"crop={W}:{game_h}[{out}g];[{out}c][{out}g]vstack=inputs=2,setsar=1{seam}[{out}]")
     if lay in ("crop", "speaker") or (lay == "pip" and not cam):
         cw = min(sw, int(sh * 9 / 16)) // 2 * 2
         return f"[{inp}]crop={cw}:{sh}:'{L._lerp_expr(keys, sw, cw)}':0,scale={W}:{H},setsar=1[{out}]"
@@ -75,7 +85,9 @@ def pieces(edl: dict) -> list[tuple[float, float, dict]]:
 def base_key(edl: dict) -> str:
     src = Path(edl["source"]["path"])
     stat = f"{src.stat().st_size}:{int(src.stat().st_mtime)}" if src.exists() else "missing"
-    blob = json.dumps({"src": str(src), "stat": stat, "pieces": [(a, b, k.get("layout"), k.get("cam"), k.get("path"),
+    lay = edl.get("layout") or {}
+    blob = json.dumps({"src": str(src), "stat": stat, "cam_h": lay.get("cam_h", 640), "seam": bool(lay.get("seam_line")),
+                       "pieces": [(a, b, k.get("layout"), k.get("cam"), k.get("path"),
                        k.get("t")) for a, b, k in pieces(edl)]}, sort_keys=True)
     return hashlib.sha1(blob.encode()).hexdigest()[:16]
 
@@ -98,7 +110,8 @@ def render_base(edl: dict, cache: Path, quality: str = "export") -> tuple[Path, 
         rel = [[float(t) - (a - kf["t"]), x] for t, x in (kf.get("path") or [[0, 0.5]])]
         rel = [[max(0.0, t), x] for t, x in rel] or [[0, 0.5]]
         g.append(f"[0:v]trim=start={a - ss:.3f}:end={b - ss:.3f},setpts=PTS-STARTPTS[s{i}]")
-        g.append(piece_graph(kf["layout"], f"s{i}", f"v{i}", src["width"], src["height"], kf.get("cam"), rel))
+        g.append(piece_graph(kf["layout"], f"s{i}", f"v{i}", src["width"], src["height"], kf.get("cam"), rel,
+                             int(edl["layout"].get("cam_h", 640)), bool(edl["layout"].get("seam_line"))))
         pads.append(f"[v{i}]")
         if src.get("has_audio", True):
             g.append(f"[0:a]atrim=start={a - ss:.3f}:end={b - ss:.3f},asetpts=PTS-STARTPTS[a{i}]")
@@ -119,7 +132,7 @@ def render_base(edl: dict, cache: Path, quality: str = "export") -> tuple[Path, 
     if res.returncode != 0:
         raise RuntimeError(f"FFmpeg failed (edit base): {res.stderr[-1500:]}")
     first = ps[0][2]["layout"]
-    meta = {"layout": "crop" if first in ("speaker", "pip") else first, "src_w": src["width"], "src_h": src["height"],
+    meta = {"layout": "crop" if first in ("speaker", "pip", "cam_full") else first, "src_w": src["width"], "src_h": src["height"],
             "has_audio": has_a, "duration": round(sum(b - a for a, b, _ in ps), 3), "key": key}
     meta_p.write_text(json.dumps(meta), encoding="utf-8")
     return out, meta
@@ -201,12 +214,21 @@ def spec_for(edl: dict, out: Path, base: Path, quality: str = "export", music: b
     peak_out = T.to_out(edl, peak) if peak is not None else None
     swells = [(max(0.0, peak_out - 0.3), min(dur, peak_out + 2.0))] if peak_out is not None else []
     rules = edl["rules"]
+    hk = edl["hook"]
+    ov = cap.get("style_overrides") or {}
+    if ov:
+        from . import templates as _tm
+        template = {**(template or _tm.get(cap.get("template") if isinstance(cap.get("template"), str) else None)), **ov}
     return RenderSpec(
         source=base, start=0.0, end=dur, out=out, layout="crop", words=words, base=base,
         template=template, caption_style=cap.get("template") if isinstance(cap.get("template"), str) else "bold_pop",
         captions_enabled=cap.get("enabled", True) and edl["export"].get("captions", "burned") == "burned",
         caption_nudge=float(cap.get("nudge", 0)), keep_clear=tuple(rules.get("onscreen") or ()),
-        hook=edl["hook"].get("text"), hook_sec=float(edl["hook"].get("sec", 2.2)),
+        hook=None if hk.get("hidden") else hk.get("text"),
+        hook_sec=dur if hk.get("whole") else float(hk.get("sec", 2.2)),
+        title_box=hk.get("box") or "outline", title_pos=hk.get("position"),
+        caption_position=cap.get("position"), cam_h=int(edl["layout"].get("cam_h", 640)),
+        words_per_chunk=cap.get("words_per_chunk"), emoji=bool(cap.get("emoji")),
         credit=None if edl.get("credit_hidden") else rules.get("credit"),
         progress_bar=edl.get("progress_bar", True), punch_zoom=False,
         layout_segments=layout_segments(edl), zooms=zooms, flashes=fl, shakes=sh, sfx=sfx,

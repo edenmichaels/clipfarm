@@ -542,7 +542,7 @@ def _edit_render_view(cid: int) -> dict | None:
     first = (e["layout"]["keyframes"] or [{"layout": "blur_fill"}])[0]["layout"]
     return {"base": str(base) if base.exists() else (e["source"]["path"] if Path(e["source"]["path"]).exists() else None),
             "start": e["range"][0], "caption_style": tmpl if isinstance(tmpl, str) else "bold_pop",
-            "layout": "crop" if first in ("speaker", "pip") else first, "keep_clear": e["rules"].get("onscreen"),
+            "layout": "crop" if first in ("speaker", "pip", "cam_full") else first, "keep_clear": e["rules"].get("onscreen"),
             "music": e["music"].get("path") if e["music"].get("enabled") else None}
 
 
@@ -1949,3 +1949,122 @@ def earnings():
     model = db.get_setting("fitted_model")
     return {"usd_to_aud": rate, "by_status": by_status, "est_vs_actual": forecast.estimated_vs_actual(),
             "projected": projected, "model": model or {"fitted": False}}
+
+
+# ---- v0.8.2: Trending Styles + your style references -------------------------------------------------
+from .edit import style_refs as edit_style_refs, styles as edit_styles  # noqa: E402
+
+
+@app.get("/styles", dependencies=A)
+def styles_list():
+    return {"styles": edit_styles.all_styles(), "defaults": edit_styles.defaults(),
+            "last_updated": edit_styles.last_updated(), "refs": db.q1("SELECT COUNT(*) n FROM style_refs")["n"],
+            "streamers": db.q("SELECT id, COALESCE(display_name, login) name FROM streamers "
+                              "WHERE permission_status IN ('allowed','program_member') ORDER BY name LIMIT 200"),
+            "fields": {k: (v if isinstance(v, list) else (list(v) if isinstance(v, tuple) else v.__name__))
+                       for k, v in edit_styles.FIELDS.items()}}
+
+
+@app.post("/styles", dependencies=A)
+def styles_save(body: dict):
+    if not isinstance(body.get("style"), dict):
+        raise HTTPException(400, "style is required")
+    return edit_styles.save(body.get("name") or body["style"].get("name") or "My style", body["style"],
+                            body.get("id"), body.get("ref_id"))
+
+
+@app.delete("/styles/{sid}", dependencies=A)
+def styles_delete(sid: int):
+    edit_styles.delete(sid)
+    return {"ok": True}
+
+
+@app.put("/styles/defaults", dependencies=A)
+def styles_default(body: dict):
+    key = body.get("key")
+    if key and not (key in edit_styles.BUILTINS or (key.startswith("user:") and db.q1(
+            "SELECT 1 FROM styles WHERE id=?", (int(key.split(":")[1]),)))):
+        raise HTTPException(400, "unknown style")
+    try:
+        return {"defaults": edit_styles.set_default(body.get("scope") or "global", key)}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/edit/{cid}/style", dependencies=A)
+def edit_apply_style(cid: int, body: dict):
+    """Apply a style to one clip: {"key": "streamer_split"} or a full/partial {"style": {...}} (tweaked here)."""
+    _ep(cid)
+    st = body.get("style") if isinstance(body.get("style"), dict) else (body.get("key") or edit_styles.DEFAULT)
+    if isinstance(st, str) and not (st in edit_styles.BUILTINS or st.startswith("user:")):
+        raise HTTPException(400, "unknown style")
+    name = st["name"] if isinstance(st, dict) and st.get("name") else edit_styles.get(st)["name"] if isinstance(st, str) else "Custom"
+
+    def go(e):
+        e = edit_styles.apply(e, st)
+        e["style"]["source"] = "clip"
+        return e
+    return _view(edit_project.update(cid, go, f"Style: {name}"))
+
+
+@app.get("/style-refs", dependencies=A)
+def style_refs_list():
+    return {"refs": edit_style_refs.all_refs(), "last_updated": edit_styles.last_updated(),
+            "tags": edit_style_refs.tag_counts()}
+
+
+@app.post("/style-refs", dependencies=A)
+def style_refs_add(body: dict):
+    """Add one of YOUR screenshots: {"data": base64 image, "notes", "tags": [...], "source_note"}. Not scraped."""
+    try:
+        raw = base64.b64decode(body.get("data") or "", validate=False)
+        return edit_style_refs.add(raw, body.get("notes") or "", body.get("tags") or [], body.get("source_note") or "")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.put("/style-refs/{rid}", dependencies=A)
+def style_refs_update(rid: int, body: dict):
+    r = edit_style_refs.update(rid, body.get("notes"), body.get("tags"))
+    if not r:
+        raise HTTPException(404, "Reference not found.")
+    return r
+
+
+@app.delete("/style-refs/{rid}", dependencies=A)
+def style_refs_delete(rid: int):
+    edit_style_refs.delete(rid)
+    return {"ok": True}
+
+
+@app.get("/style-refs/{rid}/image", dependencies=A)
+def style_refs_image(rid: int):
+    r = edit_style_refs.get(rid)
+    if not r or not r.get("image_path") or not Path(r["image_path"]).exists():
+        raise HTTPException(404, "Reference not found.")
+    return FileResponse(r["image_path"], media_type="image/png")
+
+
+@app.post("/style-refs/{rid}/make-style", dependencies=A)
+def style_refs_make(rid: int, body: dict | None = None):
+    """'Make a style from this'. {"save": true, "name": ...} also saves it as one of your styles."""
+    body = body or {}
+    try:
+        res = edit_style_refs.make_style_for_ref(rid, body.get("name"))
+    except KeyError:
+        raise HTTPException(404, "Reference not found.")
+    if body.get("save"):
+        saved = edit_styles.save(res["style"]["name"], res["style"], ref_id=rid)
+        db.ex("UPDATE style_refs SET style_id=? WHERE id=?", (saved["id"], rid))
+        res["saved"] = saved
+    return res
+
+
+@app.post("/styles/from-image", dependencies=A)
+def styles_from_image(body: dict):
+    """Analyse a screenshot without adding it to the library: {"data": base64, "name"}."""
+    raw = base64.b64decode(body.get("data") or "", validate=False)
+    try:
+        return edit_style_refs.make_style(raw, body.get("name") or "From screenshot")
+    except Exception as e:                                # noqa: BLE001
+        raise HTTPException(400, f"Couldn't read that image: {e}")

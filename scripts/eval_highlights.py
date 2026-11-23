@@ -147,4 +147,4 @@ report.with_suffix(".json").write_text(json.dumps({
     "after_traps": [{"vod": t["vod"], "segment": t["segment"], "start": t["start"]} for t in a["traps"]],
     "v03": results["v0.3"]["precision"], "type_accuracy": type_acc,
     "rows": {k: r["rows"] for k, r in results.items()}}, indent=1, default=float))
-print("\n".join(lines[:14]))
+print("\n".join(lines))

@@ -87,6 +87,10 @@ class RenderSpec:
     cards: list[dict] = field(default_factory=list)        # [{text, start, end, bg, fg}] intro/outro cards
     progress_color: str = "FFE500"
     credit_pos: str | None = None        # top | bottom (None = automatic)
+    caption_position: str | None = None  # Style: seam | upper | centre | lower (None = layout default)
+    cam_h: int = 640                     # facecam height in the split layout (Style: 35-45 % of 1920)
+    title_box: str = "outline"           # Style title look: white_box | black_box | outline | none
+    title_pos: str | None = None         # top | seam (None = layout default)
     fps: int = 30
 
 
@@ -304,7 +308,8 @@ def finish(spec: RenderSpec, base: Path, meta: dict, out: Path | None = None, mu
                             src_h=meta.get("src_h", 1080), keep_clear=tuple(spec.keep_clear),
                             nudge=spec.caption_nudge, uppercase=spec.uppercase, profanity=spec.profanity,
                             fillers=spec.fillers, emoji=spec.emoji, hook=spec.hook, hook_sec=spec.hook_sec,
-                            credit=spec.credit, duration=dur, credit_pos=spec.credit_pos)
+                            credit=spec.credit, duration=dur, credit_pos=spec.credit_pos, cam_h=spec.cam_h,
+                            position=spec.caption_position, title_box=spec.title_box, title_pos=spec.title_pos)
         if frame_at is None:
             shutil.copy2(track.path, out.with_suffix(".ass"))
             shutil.copy2(track.path.with_suffix(".events.json"), out.with_suffix(".events.json"))
@@ -397,7 +402,7 @@ def finish(spec: RenderSpec, base: Path, meta: dict, out: Path | None = None, mu
                               "-update", "1", str(out)], cwd=work)
             if res.returncode != 0 or not out.exists():
                 raise RuntimeError(f"FFmpeg frame failed: {res.stderr[-800:]}")
-            return {"path": str(out), "t": t, "events": track.events}
+            return {"path": str(out), "t": t, "events": track.events, "title": track.title}
         if spec.srt_out:
             ev = track.events if spec.captions_enabled else build_track(
                 spec.words, work / "srt.ass", spec.template or spec.caption_style, spec.words_per_chunk,
@@ -427,7 +432,7 @@ def finish(spec: RenderSpec, base: Path, meta: dict, out: Path | None = None, mu
     _run([ffmpeg_bin(), "-y", "-v", "error", "-ss", "1.0", "-i", str(out), "-frames:v", "1", "-vf", "scale=360:-2",
           str(thumb)])
     return {"path": str(out), "thumb": str(thumb) if thumb.exists() else None, "encoder": codec, "duration": dur,
-            "sha256": sha256(out), "events": track.events, "bleeps": track.bleeps,
+            "sha256": sha256(out), "events": track.events, "title": track.title, "bleeps": track.bleeps,
             "music": str(spec.music) if music and spec.music else None, **meta}
 
 

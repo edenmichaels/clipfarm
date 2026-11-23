@@ -343,7 +343,7 @@ def render_moment(payload: dict, ctx: JobContext) -> None:
                                    "why": json.loads(m.get("contributions") or "[]"),
                                    "setup_start": (lambda v: None if v is None else round(v - offset, 2))(
                                        json.loads(m.get("signals") or "{}").get("setup_start"))},
-        hook=pkg["hook"], credit=credit, account_ids=acct_ids, payoff=payoff)
+        hook=pkg["hook"], credit=credit, account_ids=acct_ids, payoff=payoff, category=game["name"])
     if why_off := edl["music"].get("why_off"):
         rule_notes.append(why_off)
     edl = finish_auto_edit(edl, transcript, streamer["display_name"], game["name"], mtype, req["tags"],
@@ -476,7 +476,9 @@ def finish_auto_edit(edl: dict, transcript: str, streamer: str, game: str, mtype
     fx = db.get_setting("effects", {}) or {}
     if fx.get("auto", True):
         try:
-            edl = edit_effects.auto_effects(edl, emoji=fx.get("emoji", True), sfx=fx.get("sfx", True),
+            sf = edl.get("style_fx") or {}          # the clip's Trending Style can switch emoji / SFX off
+            edl = edit_effects.auto_effects(edl, emoji=fx.get("emoji", True) and sf.get("emoji", True),
+                                            sfx=fx.get("sfx", True) and sf.get("sfx", True),
                                             broll=fx.get("broll", True))
         except Exception as e:                            # noqa: BLE001
             db.log("warn", "pipeline", f"Auto effects failed: {e}")
