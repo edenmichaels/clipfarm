@@ -248,7 +248,7 @@ jobs:
 
       - name: Take screenshots
         env:
-          BEFORE_REF: fae2193
+          BEFORE_REF: e8aada9
         run: |
           set -e
           shoot() {   # $1 = before|after, $2 = checkout folder

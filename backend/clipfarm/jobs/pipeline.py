@@ -512,13 +512,15 @@ def export_edit(clip_id: int, *, preset: str | None = None, music: bool = True, 
 
 @handler("export_edit")
 def export_edit_job(payload: dict, ctx: JobContext) -> None:
+    head = (edit_project.get(payload["clip_id"]) or {}).get("head")     # the version this render shows
     res = export_edit(payload["clip_id"], preset=payload.get("preset"), music=payload.get("music", True),
                       quality=payload.get("quality", "export"),
                       out=Path(payload["out"]) if payload.get("out") else None)
     if payload.get("quality") == "proxy":
-        db.ex("UPDATE edit_projects SET updated_at=updated_at WHERE clip_id=?", (payload["clip_id"],))
-        db.set_setting(f"proxy:{payload['clip_id']}", {"path": res["path"], "head": (edit_project.get(payload["clip_id"]) or {}).get("head")})
-    emit("clip_ready", clip_id=payload["clip_id"], title="", streamer="Exported" if payload.get("quality") != "proxy" else "Preview")
+        db.set_setting(f"proxy:{payload['clip_id']}", {"path": res["path"], "head": head})
+        emit("preview_ready", clip_id=payload["clip_id"], head=head)       # no desktop notification for previews
+        return
+    emit("clip_ready", clip_id=payload["clip_id"], title="", streamer="Exported")
 
 
 @handler("rerender_clip")

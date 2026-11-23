@@ -1,6 +1,7 @@
 """Stage 3: the LLM rates a shortlisted moment's transcript (Ollama or the configured endpoint).
 
-Returns {"funny": 0-10, "hype": 0-10, "stop_scroll": 0-10, "type": one of TYPES, "reason": str},
+Returns {"funny", "chaos", "shock", "serious": 0-10, "type": one of TYPES, "reason": str} (serious = sad, serious,
+emotional or calm, which counts AGAINST the moment),
 or None when no model answers (the other signals carry the score).
 """
 from __future__ import annotations
@@ -9,13 +10,17 @@ from ..llm.client import LLMUnavailable, complete_json
 from .detect import TYPES
 
 SYSTEM = (
-    "You rate moments from gaming livestreams for short-form clips (TikTok, Shorts, Reels). Given the "
-    "transcript and what the sound/chat detectors heard, return JSON: "
-    '{"funny": 0-10, "hype": 0-10, "stop_scroll": 0-10, "type": one of '
+    "You rate moments from gaming livestreams for short-form clips (TikTok, Shorts, Reels). What goes viral is "
+    "ENTERTAINMENT: comedy and chaos driven by the streamer's reaction (laughing, screaming, disbelief), fails, "
+    "absurd or unexpected things, NPCs fighting back, spectacle WITH a big reaction. Sad, serious, emotional, "
+    "calm, explaining, story/RP dialogue, menus, loading, reading chat and driving around do NOT go viral. "
+    "Given the transcript and what the sound/chat detectors heard, return JSON: "
+    '{"funny": 0-10, "chaos": 0-10, "shock": 0-10, "serious": 0-10, "type": one of '
     + ", ".join(f'"{t}"' for t in TYPES) +
-    ', "reason": "one short line"}. funny = would viewers laugh; hype = shocking, intense or exciting; '
-    "stop_scroll = would a viewer stop scrolling for this. Calm chatting, menus, reading chat, loading or "
-    "waiting score 0-2. Be strict: most moments are 3-6. Base it only on what's given; don't invent events.")
+    ', "reason": "one short line"}. funny = would viewers laugh; chaos = absurd, chaotic, a fail or things going '
+    "wrong; shock = genuinely surprising or unexpected; serious = sad, serious, emotional, calm or explaining "
+    "(high serious means NOT entertaining). Be strict: most moments are 2-5. Base it only on what's given; "
+    "don't invent events.")
 
 
 def rate(transcript: str, detected: str, streamer: str, game: str) -> dict | None:
@@ -26,7 +31,8 @@ def rate(transcript: str, detected: str, streamer: str, game: str) -> dict | Non
     except (LLMUnavailable, ValueError, KeyError):
         return None
     try:
-        r = {k: max(0.0, min(10.0, float(out.get(k, 0)))) for k in ("funny", "hype", "stop_scroll")}
+        r = {k: max(0.0, min(10.0, float(out.get(k, 0)))) for k in ("funny", "chaos", "shock", "serious")}
+        r["hype"] = r["chaos"]                       # older callers read "hype"
     except (TypeError, ValueError):
         return None
     r["type"] = out.get("type") if out.get("type") in TYPES else None

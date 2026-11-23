@@ -242,3 +242,16 @@ def render(edl: dict, out: Path, cache: Path, quality: str = "export", music: bo
     res = finish(spec, base, meta, out=out, music=music)
     res.update({"base": str(base), "preset": preset, "srt": str(spec.srt_out) if spec.srt_out else None})
     return res
+
+
+def render_frame(edl: dict, t_out: float, out: Path, cache: Path, quality: str = "proxy",
+                 template: dict | None = None) -> dict:
+    """One still frame of the edit at output time t, through the exact export chain (same zoom, same libass
+    captions, same overlays). The Editor shows this while the playable preview is being rebuilt."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    e = json.loads(json.dumps(edl))
+    e["export"] = {**e.get("export", {}), "captions": "burned"}
+    base, meta = render_base(e, cache, quality)
+    spec = spec_for(e, out, base, quality, True, template)
+    spec.scale_to = None                      # stills are compared with the export at full 1080x1920
+    return finish(spec, base, meta, out=out, frame_at=t_out)

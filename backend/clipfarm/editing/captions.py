@@ -92,6 +92,7 @@ class Preset:
     max_words: int
     blur: float = 1.5      # softens the outline and shadow edge
     animation: str = "pop"           # pop | bounce | karaoke | typewriter | none
+    highlight_on: bool = True        # False = "no highlight": the active word stays the text colour
     y: float | None = None           # vertical centre as a fraction of the height (None = layout default)
     emoji: bool = False
 
@@ -102,7 +103,7 @@ class Preset:
 
 ANIMATIONS = ["pop", "bounce", "karaoke", "typewriter", "none"]
 TEMPLATE_FIELDS = ["family", "em", "uppercase", "text", "highlight", "outline", "outline_px", "shadow_px",
-                   "shadow_alpha", "pop", "max_words", "blur", "animation", "y", "emoji"]
+                   "shadow_alpha", "pop", "max_words", "blur", "animation", "y", "emoji", "highlight_on"]
 
 
 def template_from(t: dict | str | None) -> Preset:
@@ -122,6 +123,7 @@ def template_from(t: dict | str | None) -> Preset:
         v = str(vals[c]).lstrip("#").upper()
         vals[c] = v if re.fullmatch(r"[0-9A-F]{6}", v) else getattr(base, c)
     vals["em"] = float(min(140, max(40, float(vals["em"]))))
+    vals["highlight_on"] = bool(vals.get("highlight_on", True))
     vals["max_words"] = int(min(3, max(1, int(vals["max_words"]))))
     vals["outline_px"] = float(min(16, max(0, float(vals["outline_px"]))))
     vals["shadow_px"] = float(min(16, max(0, float(vals["shadow_px"]))))
@@ -372,16 +374,31 @@ def build_track(words: list[dict], out: Path, style_name: str = DEFAULT, words_p
     upper = pr.uppercase if uppercase is None else uppercase
     emoji = emoji or pr.emoji
 
+    # ONE caption position for the whole clip. (It used to follow the layout on screen at each chunk, so when the
+    # AI reframe switched split <-> crop mid-clip the captions jumped between the seam and the lower third.)
+    # The position comes from the layout that's on screen longest.
+    segs = sorted(layout_segments or [], key=lambda x: x[0])
+    if segs:
+        total = duration or max((float(w["end"]) - offset for w in words), default=0.0) or 1.0
+        span: dict[str, float] = {}
+        for i, (t0, name) in enumerate(segs):
+            t1 = segs[i + 1][0] if i + 1 < len(segs) else max(total, t0)
+            span[name] = span.get(name, 0.0) + max(0.0, min(t1, total) - max(t0, 0.0))
+        layout = max(span, key=lambda k: span[k]) if span else layout
+    lay0 = "crop" if layout in ("speaker", "pip") else layout
+    pl = placement(lay0, src_w, src_h, tuple(keep_clear), nudge, cam_h)
+    if pr.y is not None and lay0 != "split":
+        pl.y = pr.y * H + nudge
+    # Fix the centre once so that the tallest block (2 lines at full size) fits the region; every chunk then shares
+    # exactly this centre, whether it has one line or two.
+    lo, hi = pl.region
+    tall = min(pr.em * 1.12 * min(2, pl.max_lines), hi - lo)   # chunks shrink to fit a short region
+    pl.y = max(lo + tall / 2, min(hi - tall / 2, pl.y))
+    pl.y = max(SAFE["top"] + tall / 2, min(SAFE["bottom"] - tall / 2, pl.y))
+    fixed_y = pl.y
+
     def place_for(t: float) -> Placement:
-        lay = layout
-        for t0, name in (layout_segments or []):
-            if t >= t0 - 1e-3:
-                lay = name
-        p = placement("crop" if lay in ("speaker", "pip") else lay, src_w, src_h, tuple(keep_clear), nudge, cam_h)
-        if pr.y is not None and lay != "split":
-            p.y = pr.y * H + nudge
-        return p
-    pl = place_for(0.0)
+        return pl
     fs = ass_size(pr.family, pr.em)
     header = f"""[Script Info]
 ScriptType: v4.00+
@@ -431,6 +448,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             chunk_end = min(chunk_end, duration)
         cpl = place_for(chunk[0]["start"])
         blk = layout_chunk(chunk, pr, cpl, upper)
+        blk.y = fixed_y                              # never re-centred per chunk
         cfs = ass_size(pr.family, blk.em)
         first_y = blk.y - blk.height / 2 + blk.line_h / 2
         for j, cur in enumerate(chunk):
@@ -440,25 +458,37 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             rows = []
             order = [w for line in blk.lines for w in line]
             cur_i = order.index(cur)
+            a = pr.animation
+            if a == "pop" and pr.pop > 100:
+                anim = f"\\fscx{pr.pop}\\fscy{pr.pop}\\t(0,90,\\fscx100\\fscy100)"
+            elif a == "bounce":
+                anim = (f"\\fscx{max(100, pr.pop - 6)}\\fscy78\\t(0,70,\\fscy{pr.pop + 8})"
+                        f"\\t(70,150,\\fscx100\\fscy100)")
+            else:
+                anim = ""
+            hi_c = pr.highlight if pr.highlight_on else pr.text
+            pop_word = None                               # (text, x, y) of the active word, drawn on its own layer
             for li, line in enumerate(blk.lines):
                 parts = []
-                for w in line:
+                y = first_y + li * blk.line_h
+                for wj, w in enumerate(line):
                     txt = _esc(_word_text(w, upper))
                     wi = order.index(w)
-                    a = pr.animation
                     if a == "typewriter" and wi > cur_i:
                         parts.append(f"{{\\alpha&HFF&}}{txt}{{\\alpha&H00&}}")     # not typed yet (keeps layout)
+                    elif w is cur and anim:
+                        # The line keeps an invisible copy (so nothing else moves); the visible word is a
+                        # separate event centred on that copy and scaled around its own centre.
+                        parts.append(f"{{\\alpha&HFF&}}{txt}{{\\alpha&H00&}}")
+                        line_txt = " ".join(_word_text(x, upper) for x in line)
+                        before = " ".join(_word_text(x, upper) for x in line[:wj])
+                        lw = text_width(line_txt, pr.family, blk.em)
+                        x0 = 540 - lw / 2 + (text_width(before + " ", pr.family, blk.em) if before else 0.0)
+                        pop_word = (txt, x0 + text_width(_word_text(w, upper), pr.family, blk.em) / 2, y)
                     elif w is cur:
-                        if a == "pop" and pr.pop > 100:
-                            anim = f"\\fscx{pr.pop}\\fscy{pr.pop}\\t(0,90,\\fscx100\\fscy100)"
-                        elif a == "bounce":
-                            anim = (f"\\fscx{max(100, pr.pop - 6)}\\fscy78\\t(0,70,\\fscy{pr.pop + 8})"
-                                    f"\\t(70,150,\\fscx100\\fscy100)")
-                        else:
-                            anim = ""
-                        parts.append(f"{{\\c{_c(pr.highlight)}{anim}}}{txt}{{\\c{_c(pr.text)}\\fscx100\\fscy100}}")
+                        parts.append(f"{{\\c{_c(hi_c)}}}{txt}{{\\c{_c(pr.text)}}}")
                     elif a == "karaoke" and wi < cur_i:
-                        parts.append(f"{{\\c{_c(pr.highlight)}}}{txt}{{\\c{_c(pr.text)}}}")   # already sung
+                        parts.append(f"{{\\c{_c(hi_c)}}}{txt}{{\\c{_c(pr.text)}}}")   # already sung
                     else:
                         parts.append(txt)
                 rows.append(" ".join(parts))
@@ -467,6 +497,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 y = first_y + li * blk.line_h
                 lines.append(f"Dialogue: 0,{_ts(start)},{_ts(end)},Cap,,0,0,0,,"
                              f"{{\\an5\\pos(540,{y:.0f})\\fs{cfs:.1f}{blur}\\q2}}{row}")
+            if pop_word:
+                ptxt, px, py = pop_word
+                lines.append(f"Dialogue: 1,{_ts(start)},{_ts(end)},Cap,,0,0,0,,"
+                             f"{{\\an5\\pos({px:.0f},{py:.0f})\\fs{cfs:.1f}{blur}\\q2\\c{_c(hi_c)}{anim}}}{ptxt}")
             events.append({"start": round(start, 3), "end": round(end, 3), "word": cur["word"], "x": 540,
                            "y": round(blk.y), "em": round(blk.em, 1), "lines": len(blk.lines),
                            "line_h": round(blk.line_h, 1),

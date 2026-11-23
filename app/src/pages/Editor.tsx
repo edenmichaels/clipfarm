@@ -136,11 +136,10 @@ function Workspace({ clip, simple, onChanged, go, setMsg }: { clip: any; simple:
   const cid = clip.id;
   const [v, setV] = useState<any>(null);
   const [score, setScore] = useState<any>(null);
-  const [canvas, setCanvas] = useState<any>(null);
+  const [buildingNow, setBuilding] = useState(false);
   const [tab, setTab] = useState(TABS[0]);
   const [t, setT] = useState(0);
-  const [zone, setZone] = useState<string | null>(readPref("ed.zone", "tiktok") || null);
-  const [quality, setQuality] = useState("fast");
+  const [zone, setZone] = useState<string | null>(readPref("ed.zone2", "") || null);
   const [busy, setBusy] = useState("");
   const [splits, setSplits] = useState<number[]>([]);
   const [sel, setSel] = useState<[number, number] | null>(null);
@@ -153,29 +152,34 @@ function Workspace({ clip, simple, onChanged, go, setMsg }: { clip: any; simple:
   const [loadErr, setLoadErr] = useState("");
   const fonts = useCaptionFonts();
   const vid = useRef<HTMLVideoElement>(null);
-  const building = useRef(false);
+  const building = useRef<{ current: boolean; again: boolean }>({ current: false, again: false }).current;
 
-  const loadCanvas = useCallback(async (head?: number) => {
+  // Rebuild the playable preview (same renderer as export) after every change; one at a time.
+  const rebuild = useCallback(async () => {
+    if (building.current) { building.again = true; return; }
+    building.current = true;
+    setBuilding(true);
     try {
-      const c = await api.get(`/edit/${cid}/canvas`);
-      setCanvas(c);
-      if (!c.base && !building.current) {                    // build the low-res base once, in the background
-        building.current = true;
+      do {
+        building.again = false;
         const { job_id } = await api.post(`/edit/${cid}/preview`);
-        waitForJob(job_id).then(() => { building.current = false; loadCanvas(head); }).catch(() => { building.current = false; });
-      }
-    } catch (e: any) { setMsg(e.message); }
+        await waitForJob(job_id);
+      } while (building.again);
+      const r = await api.get(`/edit/${cid}`);
+      setV(r);
+    } catch (e: any) { setMsg(`Preview: ${e.message}`); }
+    finally { building.current = false; setBuilding(false); }
   }, [cid]);
   const rescore = () => api.post(`/edit/${cid}/score`).then(setScore).catch(() => {});
-  const show = (r: any) => { setV(r); rescore(); loadCanvas(r.head); onChanged(); };
+  const show = (r: any) => { setV(r); rescore(); if (!r.proxy) rebuild(); onChanged(); };
   useEffect(() => {
-    api.get(`/edit/${cid}`).then((r) => { setV(r); setPreset(r.edl.export?.preset || "tiktok"); loadCanvas(r.head); }).catch((e) => setLoadErr(e.message));
+    api.get(`/edit/${cid}`).then((r) => { setV(r); setPreset(r.edl.export?.preset || "tiktok"); if (!r.proxy) rebuild(); }).catch((e) => setLoadErr(e.message));
     rescore();
     api.get("/caption-templates").then(setTemplates).catch(() => {});
     api.get("/music/tracks").then((r) => setTracks(r.tracks || [])).catch(() => {});
     api.get("/brand-templates").then((r) => setBrands(r.templates || [])).catch(() => {});
   }, [cid]);
-  useEffect(() => writePref("ed.zone", zone || ""), [zone]);
+  useEffect(() => writePref("ed.zone2", zone || ""), [zone]);
 
   const run = async (label: string, p: Promise<any>) => {
     setBusy(label);
@@ -246,15 +250,12 @@ function Workspace({ clip, simple, onChanged, go, setMsg }: { clip: any; simple:
   const vir = score?.virality;
   const pr = score?.profit;
   const flags: any[] = score?.flags || [];
-  const fallback = clip.file_path;
 
   return (
     <section className="ed-work">
       <div className="ed-top row wrap">
         <button onClick={undo} title="Undo (Ctrl+Z)" aria-label="Undo">↶</button>
         <button onClick={redo} title="Redo (Ctrl+Y)" aria-label="Redo">↷</button>
-        {!simple && <select value={quality} onChange={(e) => setQuality(e.target.value)} aria-label="Preview quality">
-          <option value="fast">Preview: fast (live captions)</option><option value="final">Preview: final render</option></select>}
         {!simple && <select defaultValue="" onChange={(e) => { const k = e.target.value; e.target.value = ""; k && onEdl((x) => { x.captions.template = k; return x; }, `Template: ${k}`); }} aria-label="Apply template">
           <option value="">Apply template…</option>{(templates?.templates || []).map((x: any) => <option key={x.key} value={x.key}>{x.name}</option>)}</select>}
         {!simple && brands.length > 0 && <select value={v.edl.brand?.id ?? ""} onChange={(e) => post(`/edit/${cid}/brand`, { brand_template_id: e.target.value ? Number(e.target.value) : null })} aria-label="Brand template">
@@ -288,7 +289,7 @@ function Workspace({ clip, simple, onChanged, go, setMsg }: { clip: any; simple:
 
       <div className="ed-main">
         <div className="ed-centre">
-          <Preview v={v} canvas={quality === "fast" ? canvas : null} videoRef={vid} t={t} setT={setT} zone={zone} fallback={fallback} />
+          <Preview v={v} videoRef={vid} t={t} setT={setT} zone={zone} building={buildingNow} />
           <div className="row wrap" style={{ gap: 6, justifyContent: "center" }}>
             {["tiktok", "reels", "shorts"].map((z) => <button key={z} className={zone === z ? "pill-btn on small" : "pill-btn small"} onClick={() => setZone(zone === z ? null : z)}>{z === "tiktok" ? "TikTok" : z === "reels" ? "Reels" : "Shorts"} zone</button>)}
           </div>

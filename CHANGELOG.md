@@ -1,5 +1,29 @@
 # ClipFarm changelog
 
+## 0.8.0 (step 1 of the editor rebuild): red box, moving captions, wrong moments
+
+### Fixed
+- **Red box around every video.** It was the Editor's safe-zone guide: a red striped overlay that was switched on
+  by default. It was never in your exported files (a new test checks every layout × caption style for red or
+  guide-line pixels). Guides are now off by default and drawn as a thin neutral dashed outline labelled "guide
+  only".
+- **Captions jumping around.**
+  - Captions used to move whenever the AI reframe switched layout mid-clip (split ↔ crop ↔ speaker), and when a
+    caption changed between one and two lines. Each clip now has **one fixed caption position**.
+  - The pop animation now scales only the spoken word, around its own centre; the rest of the line never moves.
+- **The preview now matches the export exactly.** The Editor preview is drawn by the same renderer as the export
+  (FFmpeg + libass): a low-res render of your current edit, plus exact stills of the current frame while it
+  updates.
+- **Sad or random moments being picked.**
+  - The AI rating used to reward "emotional" and "scroll-stopping" talk. It now rewards funny, chaotic and
+    surprising moments, and counts sad or serious talk against a moment.
+  - Chat sending "F / o7 / Sadge" no longer counts as hype.
+  - GTA street crowd noise no longer counts as cheering, and calm driving no longer counts as action.
+  - Crying and sighing are now detected and penalised.
+  - Details and measurements: `docs/reports/v0.8-step1-root-causes.md`.
+- Previews no longer pop up a "clip ready" desktop notification.
+- A preview rendered while you kept editing was wrongly marked as up to date.
+
 ## 0.7.1: no more flashing console windows, no retry loops, proper pause and quit
 
 ### Fixed

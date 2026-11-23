@@ -28,15 +28,21 @@ WIN, HOP, NFFT = 400, 160, 512
 PATCH, PATCH_HOP = 96, 48
 
 GROUPS: dict[str, list[str]] = {
+    # v0.8 fixes: "Crowd" (GTA street ambience) no longer counts as cheering; "Car passing by"/revving/engines are
+    # calm driving (a penalty), not action; "Burst, pop", "Bang" and "Thump, thud" fired on music drums and
+    # footsteps; crying/sighing are now heard (sad = penalty).
     "laughter": ["Laughter", "Giggle", "Belly laugh", "Chuckle, chortle", "Snicker", "Baby laughter"],
     "scream": ["Screaming", "Shout", "Yell", "Bellow", "Whoop", "Gasp", "Children shouting", "Battle cry"],
-    "cheer": ["Cheering", "Applause", "Crowd", "Clapping"],
-    "explosion": ["Explosion", "Boom", "Burst, pop", "Fireworks", "Eruption", "Artillery fire"],
+    "cheer": ["Cheering", "Applause", "Clapping"],
+    "explosion": ["Explosion", "Boom", "Fireworks", "Eruption", "Artillery fire"],
     "gunshot": ["Gunshot, gunfire", "Machine gun", "Fusillade", "Cap gun"],
-    "crash": ["Smash, crash", "Shatter", "Breaking", "Glass", "Bang", "Thump, thud"],
-    "vehicle": ["Skidding", "Tire squeal", "Police car (siren)", "Siren", "Emergency vehicle",
-                "Ambulance (siren)", "Fire engine, fire truck (siren)", "Vehicle horn, car horn, honking",
-                "Car passing by", "Race car, auto racing", "Revving"],
+    "crash": ["Smash, crash", "Shatter", "Breaking", "Glass"],
+    "vehicle": ["Skidding", "Tire squeal", "Vehicle horn, car horn, honking"],
+    "siren": ["Police car (siren)", "Siren", "Emergency vehicle", "Ambulance (siren)",
+              "Fire engine, fire truck (siren)"],
+    "driving": ["Car passing by", "Accelerating, revving, vroom", "Engine", "Vehicle", "Car", "Motor vehicle (road)",
+                "Traffic noise, roadway noise", "Idling", "Race car, auto racing", "Revving"],
+    "sad": ["Crying, sobbing", "Whimper", "Sigh", "Baby cry, infant cry", "Wail, moan", "Groan"],
     "speech": ["Speech", "Conversation", "Narration, monologue"],
     "music": ["Music", "Background music", "Video game music", "Soundtrack music", "Theme music",
               "Electronic music", "Pop music", "Hip hop music"],

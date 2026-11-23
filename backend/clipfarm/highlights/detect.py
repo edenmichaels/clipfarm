@@ -85,10 +85,11 @@ def components(s: Signals, focus: str = "balanced") -> tuple[dict[str, np.ndarra
         z = np.zeros(n, np.float32)
         laugh = _rel(ev.get("laughter", z))
         action = _rel(_maxr([ev.get("explosion", z), ev.get("gunshot", z), ev.get("crash", z),
-                             0.7 * ev.get("vehicle", z)], n))
+                             0.7 * ev.get("vehicle", z), 0.4 * ev.get("siren", z)], n))
         react = _rel(np.maximum(ev.get("scream", z), ev.get("cheer", z)))
         parts.update(laugh=laugh, action=action, scream=_rel(ev.get("scream", z)), cheer=_rel(ev.get("cheer", z)),
-                     speech=ev.get("speech", z), music=ev.get("music", z), silence=ev.get("silence", z))
+                     speech=ev.get("speech", z), music=ev.get("music", z), silence=ev.get("silence", z),
+                     driving=ev.get("driving", z), sad=ev.get("sad", z))
         a = np.clip(_maxr([fw * laugh * 1.15, aw * action, 0.9 * react], n), 0, 1)
         comp["audio_events"] = np.clip(smooth(a, 2) * loud_boost, 0, 1).astype(np.float32)
     if s.chat and s.chat.get("rate") is not None and s.chat["rate"].sum() > 0:
@@ -107,9 +108,13 @@ def components(s: Signals, focus: str = "balanced") -> tuple[dict[str, np.ndarra
             c = c * (1 - np.clip((share - 0.08) * 4, 0, 1))
             parts["announce"] = share.astype(np.float32)
         comp["chat"] = np.clip(c, 0, 1).astype(np.float32)
-        tot = ch["laugh"] + ch["hype"] + ch["clip"] + ch["fail"] + 1e-6
+        sad = ch.get("sad", np.zeros(n, np.float32))
+        tot = ch["laugh"] + ch["hype"] + ch["clip"] + ch["fail"] + sad + 1e-6
+        # Chat busy with condolences ("F", "o7", "Sadge") is reacting to something sad: it isn't hype.
+        sad_share = sad / tot
+        comp["chat"] = np.clip(comp["chat"] * (1 - np.clip((sad_share - 0.2) * 2.5, 0, 1)), 0, 1).astype(np.float32)
         parts.update(chat_laugh=ch["laugh"] / tot, chat_hype=ch["hype"] / tot, chat_fail=ch["fail"] / tot,
-                     chat_rate_z=rate_z.astype(np.float32))
+                     chat_sad=sad_share.astype(np.float32), chat_rate_z=rate_z.astype(np.float32))
     if s.visual and s.visual.get("motion") is not None:
         vi = {k: _fit(v, n) for k, v in s.visual.items()}
         covered = vi["motion"] > 0
@@ -148,6 +153,14 @@ def penalty(parts: dict[str, np.ndarray], comp: dict[str, np.ndarray], n: int) -
         pens.append(smooth(calm, 9) * 0.7)
     if "silence" in parts:
         pens.append(parts["silence"] * 0.8)
+    if "driving" in parts:
+        # Calm driving: engine/road noise with no reactions and no action.
+        pens.append(smooth(np.clip(parts["driving"] * 1.5, 0, 1) * (1 - excited), 9) * 0.75)
+    funny = np.clip(parts.get("laugh", z) * 2 + parts.get("chat_laugh", z), 0, 1)
+    sadness = _maxr([parts.get("sad", z) * 1.5, parts.get("chat_sad", z) * 1.2], n)
+    if sadness.any():
+        # Sad / serious moments (crying, sighing, chat sending condolences) don't go viral.
+        pens.append(np.clip(smooth(sadness, 5), 0, 1) * (1 - funny) * 0.95)
     if not pens:
         return z
     return np.clip(smooth(_maxr(pens, n), 5), 0, 1).astype(np.float32)
@@ -273,9 +286,15 @@ def rescore_with_llm(m: Moment, rating: dict | None, weights: dict[str, float] |
     if not rating:
         return m
     w = {**DEFAULT_WEIGHTS, **(weights or {})}["llm"]
-    llm = max(rating.get("funny", 0), rating.get("hype", 0), rating.get("stop_scroll", 0)) / 10
+    # Entertainment, not emotion: funny/chaotic/shocking count; sad/serious/calm/explaining counts AGAINST.
+    # (This used to be max(funny, hype, stop_scroll), and "stop_scroll"/"intense" rewarded emotional talk.)
+    fun = max(rating.get("funny", 0), rating.get("chaos", rating.get("hype", 0)) * 0.9, rating.get("shock", 0) * 0.8)
+    serious = rating.get("serious", 0)
+    llm = float(np.clip((fun - 0.8 * serious) / 10, 0, 1))
     m.signals["llm"] = round(llm, 3)
     m.score = round((1 - w) * m.score + w * llm, 3)
+    if serious >= 6 and fun < 5:
+        m.score = round(m.score * 0.5, 3)        # sad/serious talk is never a top pick
     if rating.get("type") in TYPES:
         m.type = rating["type"]
     if rating.get("reason"):

@@ -54,12 +54,17 @@ export const SAFE: Record<string, { label: string; top: number; bottom: number; 
   shorts: { label: "Shorts", top: 180, bottom: 1500, left: 60, right: 960 },
 };
 
-export function Preview({ v, canvas, videoRef, t, setT, zone, fallback }: {
-  v: View; canvas: any; videoRef: { current: HTMLVideoElement | null }; t: number; setT: (x: number) => void;
-  zone: string | null; fallback: string | null;
+export function Preview({ v, videoRef, t, setT, zone, building }: {
+  v: View; videoRef: { current: HTMLVideoElement | null }; t: number; setT: (x: number) => void;
+  zone: string | null; building: boolean;
 }) {
+  // Everything you see here is drawn by the same renderer as the export (FFmpeg + libass):
+  // - the playable preview is a low-res render of the current version;
+  // - while that's being rebuilt after an edit, a still of the current frame is shown instead.
+  // Guides (safe zones) are drawn on top in the page only and are never part of a render.
   const wrap = useRef<HTMLDivElement>(null);
   const [w, setW] = useState(300);
+  const [still, setStill] = useState(0);
   useEffect(() => {
     const el = wrap.current;
     if (!el) return;
@@ -68,46 +73,25 @@ export function Preview({ v, canvas, videoRef, t, setT, zone, fallback }: {
     return () => ro.disconnect();
   }, []);
   const s = w / 1080;
-  const src = canvas?.base ? api.mediaUrl(canvas.base) : fallback ? api.mediaUrl(fallback) : null;
-  const live = !!canvas?.base;
-  const ev = live ? (canvas.events || []).filter((e: any) => e.start <= t && t < e.end) : [];
-  const st = canvas?.style || {};
+  const live = !!v?.proxy;
+  // stills: refresh at most every 250 ms while scrubbing
+  useEffect(() => { if (live) return; const id = setTimeout(() => setStill(Math.round(t * 4) / 4), 250); return () => clearTimeout(id); }, [t, live]);
   const z = zone ? SAFE[zone] : null;
   return (
     <div className="ed-preview" ref={wrap}>
-      {src ? (
-        <video ref={videoRef} src={src} playsInline onTimeUpdate={(e) => setT((e.target as HTMLVideoElement).currentTime)}
+      {live ? (
+        <video ref={videoRef} src={api.mediaUrl(v.proxy)} playsInline onTimeUpdate={(e) => setT((e.target as HTMLVideoElement).currentTime)}
           onClick={(e) => { const el = e.target as HTMLVideoElement; el.paused ? el.play() : el.pause(); }} />
-      ) : <div className="ed-empty muted">Building the preview…</div>}
-      {ev.map((e: any, i: number) => (
-        <div key={i} className={`ed-cap anim-${e.animation || "pop"}`} style={{
-          left: e.x * s, top: e.y * s, fontFamily: `"CF ${st.family}", Impact, sans-serif`, fontSize: e.em * s,
-          lineHeight: `${(e.line_h || e.em * 1.12) * s}px`, color: hex(st.text),
-          WebkitTextStroke: `${Math.max(1, (st.outline_px || 6) * s)}px ${hex(st.outline)}`,
-          textShadow: st.shadow_px ? `0 ${st.shadow_px * s}px ${st.shadow_px * s * 1.5}px rgba(0,0,0,.6)` : undefined,
-        }}>
-          {(e.rows || [[e.word]]).map((row: string[], r: number) => (
-            <div key={r}>{row.map((wd, k) => (
-              <span key={k} style={{ color: e.hi?.[r]?.[k] ? hex(st.highlight) : undefined, paintOrder: "stroke fill" }}>{wd}{k < row.length - 1 ? " " : ""}</span>
-            ))}</div>
-          ))}
-        </div>
-      ))}
-      {live && v?.edl?.hook?.text && t < (v.edl.hook.sec || 2.2) && (
-        <div className="ed-cap ed-hook" style={{
-          left: 540 * s, top: 380 * s, fontFamily: `"CF ${st.family}", Impact, sans-serif`, fontSize: 74 * s, color: "#fff",
-          WebkitTextStroke: `${Math.max(1, 8 * s)}px #000`, whiteSpace: "normal", width: 800 * s,
-        }}>{st.uppercase ? String(v.edl.hook.text).toUpperCase() : v.edl.hook.text}</div>
+      ) : (
+        <img className="ed-still" alt="Preview frame" src={api.frameUrl(v.clip_id, still, v.head)} />
       )}
       {z && (
-        <div className="ed-safe" aria-hidden>
-          <div style={{ top: 0, height: z.top * s, left: 0, right: 0 }} />
-          <div style={{ top: z.bottom * s, bottom: 0, left: 0, right: 0 }} />
-          <div style={{ top: z.top * s, height: (z.bottom - z.top) * s, left: z.right * s, right: 0 }} />
-          <span>{z.label} safe zone</span>
+        <div className="ed-guide" aria-hidden title="Guide only: never part of the video">
+          <div className="ed-guide-box" style={{ top: z.top * s, left: z.left * s, width: (z.right - z.left) * s, height: (z.bottom - z.top) * s }} />
+          <span>{z.label} safe area (guide only)</span>
         </div>
       )}
-      {!live && src && <span className="ed-badge">Rendered file{canvas ? " (updating preview…)" : ""}</span>}
+      {!live && <span className="ed-badge">{building ? "Updating preview…" : "Still frame"}</span>}
       <span className="ed-time">{fmt(t)} / {fmt(v?.duration || 0)}</span>
     </div>
   );

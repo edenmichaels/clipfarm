@@ -57,7 +57,7 @@ def detect_encoders() -> list[dict]:
         cmd = [ffmpeg_bin(), "-v", "error", "-f", "lavfi", "-i", "color=black:s=256x256:d=0.1",
                "-frames:v", "1", "-c:v", codec, "-f", "null", "-"]
         try:
-            ok = proc.run(cmd, capture_output=True, timeout=20).returncode == 0
+            ok = proc.run(cmd, capture_output=True, timeout=20, log_errors=False).returncode == 0
         except (subprocess.TimeoutExpired, OSError):
             ok = False
         out.append({"codec": codec, "label": label, "available": ok})

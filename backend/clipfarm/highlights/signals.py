@@ -68,7 +68,11 @@ LAUGH_TOKENS = {"kekw", "lul", "lulw", "omegalul", "lmao", "lmfao", "lol", "lolo
 HYPE_TOKENS2 = {"pog", "pogchamp", "poggers", "pogu", "w", "ww", "www", "insane", "holy", "noway", "omg", "wtf",
                 "🔥", "clutch", "goated", "sheesh", "monkaw", "monkas", "pogcrazy", "ez", "gg", "letsgo", "lets"}
 CLIP_TOKENS = {"clip", "clipit", "clipped", "clipthat"}
-FAIL_TOKENS = {"l", "ll", "rip", "fail", "noo", "nooo", "sadge", "f", "omegalul", "classic", "bruh", "throw", "throwing"}
+FAIL_TOKENS = {"l", "ll", "fail", "noo", "nooo", "omegalul", "classic", "bruh", "throw", "throwing", "bozo"}
+# Condolences / sad chat ("F", "o7", "Sadge", "rip"): chat is reacting to something sad, which doesn't go viral.
+# (These used to count as "fail" reactions, so sad moments scored as hype.)
+SAD_TOKENS = {"f", "ff", "o7", "sadge", "rip", "pepehands", "biblethump", "feelsbadman", "sadcat", "🥺", "😢", "💔",
+              "condolences", "prayers", "rip"}
 # Chat during subs, gifted subs, raids, follows, bits and giveaways is about the event, not the gameplay.
 ANNOUNCE = re.compile(r"\b(sub(s|bed|scribed|scriber|scribing)?|gift(ed|ing|s)?|raid(ed|ers?)?|follow(ed|s)?|"
                       r"prime|bits|cheer\d+|donat\w*|tier ?[123]|giveaway|hype ?train|resub)\b", re.I)
@@ -77,7 +81,8 @@ _PHRASES = {"no way": "hype", "clip it": "clip", "clip that": "clip", "lets go":
 
 def chat_reactions(messages: list[tuple[float, str]], duration_sec: int) -> dict[str, np.ndarray]:
     """Per-second counts of laugh / hype / clip / fail reactions plus messages per second."""
-    out = {k: np.zeros(duration_sec, dtype=np.float32) for k in ("rate", "laugh", "hype", "clip", "fail", "announce")}
+    out = {k: np.zeros(duration_sec, dtype=np.float32) for k in ("rate", "laugh", "hype", "clip", "fail", "announce",
+                                                                 "sad")}
     for t, text in messages:
         i = int(t)
         if not 0 <= i < duration_sec:
@@ -98,6 +103,8 @@ def chat_reactions(messages: list[tuple[float, str]], duration_sec: int) -> dict
                 kinds.add("clip")
             if tok in FAIL_TOKENS:
                 kinds.add("fail")
+            if tok in SAD_TOKENS:
+                kinds.add("sad")
         for ph, kind in _PHRASES.items():
             if ph in low:
                 kinds.add(kind)

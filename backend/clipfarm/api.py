@@ -865,9 +865,31 @@ def edit_preview(cid: int):
     """Fast low-res preview render of the current edit (background job)."""
     _ep(cid)
     c = db.q1("SELECT project_id FROM clips WHERE id=?", (cid,))
+    queued = db.q1("""SELECT id FROM jobs WHERE kind='export_edit' AND status='queued'
+                      AND json_extract(payload,'$.clip_id')=? AND json_extract(payload,'$.quality')='proxy'""", (cid,))
+    if queued:                      # one waiting preview is enough: it renders the latest version when it runs
+        return {"job_id": queued["id"]}
     out = storage.media_dir() / "edit_cache" / f"c{cid}" / "preview.mp4"
     return {"job_id": eng.enqueue("export_edit", {"clip_id": cid, "quality": "proxy", "out": str(out)},
                                   c["project_id"], priority=0)}
+
+
+@app.get("/edit/{cid}/frame", dependencies=A)
+def edit_frame(cid: int, t: float = 0.0):
+    """A still of the current edit at time t, drawn by the export renderer (same captions, zooms, overlays)."""
+    from fastapi.responses import FileResponse
+    p = _ep(cid)
+    d = storage.media_dir() / "edit_cache" / f"c{cid}" / "frames"
+    d.mkdir(parents=True, exist_ok=True)
+    out = d / f"h{p['head']}_{max(0.0, t):.2f}.png"
+    if not out.exists():
+        for old in sorted(d.glob("*.png"), key=lambda f: f.stat().st_mtime)[:-40]:      # keep the cache small
+            old.unlink(missing_ok=True)
+        try:
+            edit_compile.render_frame(p["edl"], t, out, storage.media_dir() / "edit_cache" / f"c{cid}")
+        except Exception as e:                      # noqa: BLE001
+            raise HTTPException(500, f"Couldn't draw the preview frame: {e}")
+    return FileResponse(out, media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
 @app.post("/edit/{cid}/export", dependencies=A)

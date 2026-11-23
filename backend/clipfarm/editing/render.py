@@ -282,7 +282,11 @@ def _zoom_expr(spec: RenderSpec) -> str | None:
             f"crop=1080:1920:x='max(0,min(iw-1080,(iw-1080)/2+{sx}))':y='max(0,min(ih-1920,(ih-1920)/2+{sy}))'")
 
 
-def finish(spec: RenderSpec, base: Path, meta: dict, out: Path | None = None, music: bool = True) -> dict:
+def finish(spec: RenderSpec, base: Path, meta: dict, out: Path | None = None, music: bool = True,
+           frame_at: float | None = None) -> dict:
+    """The final pass: zoom/shake, captions (libass), emojis, flashes, B-roll, logo, cards, progress bar, audio mix.
+    frame_at=t renders ONE still frame (PNG at `out`) through exactly the same video chain, so the Editor's
+    preview and the export can't differ."""
     out = Path(out or spec.out).resolve()       # FFmpeg runs in a temp folder, so paths must be absolute
     base = Path(base).resolve()
     dur = meta["duration"]
@@ -298,14 +302,19 @@ def finish(spec: RenderSpec, base: Path, meta: dict, out: Path | None = None, mu
                             nudge=spec.caption_nudge, uppercase=spec.uppercase, profanity=spec.profanity,
                             fillers=spec.fillers, emoji=spec.emoji, hook=spec.hook, hook_sec=spec.hook_sec,
                             credit=spec.credit, duration=dur, credit_pos=spec.credit_pos)
-        shutil.copy2(track.path, out.with_suffix(".ass"))
-        shutil.copy2(track.path.with_suffix(".events.json"), out.with_suffix(".events.json"))
-        mspec = spec if music else RenderSpec(**{**spec.__dict__, "music": None})
-        mix = build_audio(mspec, base, meta, track.bleeps, work)
-        ln = measure_loudness(mix)
-
-        cmd = [ffmpeg_bin(), "-y", "-v", "error", "-i", str(base), "-i", str(mix)]
-        chain, last, n_in = [], "0:v", 2
+        if frame_at is None:
+            shutil.copy2(track.path, out.with_suffix(".ass"))
+            shutil.copy2(track.path.with_suffix(".events.json"), out.with_suffix(".events.json"))
+            mspec = spec if music else RenderSpec(**{**spec.__dict__, "music": None})
+            mix = build_audio(mspec, base, meta, track.bleeps, work)
+            ln = measure_loudness(mix)
+            cmd = [ffmpeg_bin(), "-y", "-v", "error", "-i", str(base), "-i", str(mix)]
+            chain, last, n_in = [], "0:v", 2
+        else:
+            # seek the input but keep its timestamps, so every timed filter (captions, overlays) sees the real t
+            t = max(0.0, min(float(frame_at), dur - 0.02))
+            cmd = [ffmpeg_bin(), "-y", "-v", "error", "-ss", f"{t:.3f}", "-copyts", "-i", str(base)]
+            chain, last, n_in = [], "0:v", 1
 
         def add(f: str):
             nonlocal last
@@ -380,6 +389,12 @@ def finish(spec: RenderSpec, base: Path, meta: dict, out: Path | None = None, mu
             add(f"[pbar]overlay=x='-w+w*t/{dur:.3f}':y=H-h:eof_action=pass")
         if spec.scale_to:
             add(f"scale={spec.scale_to[0]}:{spec.scale_to[1]}")
+        if frame_at is not None:
+            res = _run(cmd + ["-filter_complex", ";".join(chain), "-map", f"[{last}]", "-frames:v", "1",
+                              "-update", "1", str(out)], cwd=work)
+            if res.returncode != 0 or not out.exists():
+                raise RuntimeError(f"FFmpeg frame failed: {res.stderr[-800:]}")
+            return {"path": str(out), "t": t, "events": track.events}
         if spec.srt_out:
             ev = track.events if spec.captions_enabled else build_track(
                 spec.words, work / "srt.ass", spec.template or spec.caption_style, spec.words_per_chunk,

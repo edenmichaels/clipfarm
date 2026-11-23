@@ -105,6 +105,7 @@ export const api = {
   put: <T = any>(p: string, b: unknown) => req<T>("PUT", p, b),
   patch: <T = any>(p: string, b: unknown) => req<T>("PATCH", p, b),
   del: <T = any>(p: string) => req<T>("DELETE", p),
+  frameUrl: (cid: number, t: number, head: number) => `${base}/edit/${cid}/frame?t=${t.toFixed(2)}&h=${head}&token=${token}`,
   mediaUrl: (path: string) => `${base}/media?path=${encodeURIComponent(path)}&token=${token}`,
   fontUrl: (file: string) => `${base}/fonts/${encodeURIComponent(file)}`,
   events: () => new EventSource(`${base}/events?token=${token}`),
