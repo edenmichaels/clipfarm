@@ -129,11 +129,13 @@ def test_pop_scales_only_the_active_word_around_its_own_centre(fresh_db, tmp_pat
     assert base and pops
     assert all("\\fscx" not in ln for ln in base)                     # the line itself never scales
     assert all("\\fscx" in ln and "\\an5\\pos(" in ln for ln in pops)  # the word scales around its own centre
-    ys = sorted({int(ln.split("\\pos(")[1].split(",")[1].split(")")[0]) for ln in base})
-    # one fixed centre: 1-line chunks sit on it, 2-line chunks put their rows symmetrically around it
-    centre = ys[len(ys) // 2] if len(ys) == 3 else ys[0]
-    half = abs(ys[-1] - centre)
-    assert len(ys) <= 3 and all(abs(y - centre) <= 2 or abs(abs(y - centre) - half) <= 2 for y in ys)
+    # one fixed centre: every chunk's rows (1 or 2 lines, any font metrics) are centred on the same y
+    rows = {}
+    for ln in base:
+        start = ln.split(",")[1]
+        rows.setdefault(start, set()).add(int(ln.split("\\pos(")[1].split(",")[1].split(")")[0]))
+    centres = [sum(v) / len(v) for v in rows.values()]
+    assert max(centres) - min(centres) <= 3, sorted(centres)
 
 
 def test_preview_frame_matches_export_frame(fresh_db, tmp_path):

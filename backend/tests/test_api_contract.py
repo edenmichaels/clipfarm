@@ -416,7 +416,7 @@ def test_v06_editor_routes(client, tmp_path):
         cid))
     v = call(client, "GET", f"/edit/{cid}", route="/edit/{cid}")
     assert "#DylanPage" in v["edl"]["rules"]["tags"]
-    fr = client.get(f"/edit/{cid}/frame?t=1.0")
+    fr = client.get(f"/edit/{cid}/frame?t=1.0", headers=H)
     assert fr.status_code == 200 and fr.headers["content-type"] == "image/png" and fr.content[:4] == b"\x89PNG"
     COVERED.add(("GET", "/edit/{cid}/frame"))
     cv = call(client, "GET", f"/edit/{cid}/canvas", route="/edit/{cid}/canvas")

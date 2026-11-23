@@ -278,8 +278,11 @@ def _zoom_expr(spec: RenderSpec) -> str | None:
     z = "1+" + "+".join(parts)
     sx = "+".join(f"between(t,{a:.3f},{b:.3f})*18*sin(t*71)" for a, b in spec.shakes[:12]) or "0"
     sy = "+".join(f"between(t,{a:.3f},{b:.3f})*14*cos(t*83)" for a, b in spec.shakes[:12]) or "0"
-    return (f"scale=w='trunc(1080*({z})/2)*2':h=-2:eval=frame,"
-            f"crop=1080:1920:x='max(0,min(iw-1080,(iw-1080)/2+{sx}))':y='max(0,min(ih-1920,(ih-1920)/2+{sy}))'")
+    # both sides computed explicitly (no -2 rounding), never below 1080x1920, and a final fixed-size scale so
+    # FFmpeg builds that size the crop from a different first frame can't fail with "too big" (seen on Windows)
+    return (f"scale=w='max(1080,trunc(1080*({z})/2)*2)':h='max(1920,trunc(1920*({z})/2)*2)':eval=frame,"
+            f"crop=w='min(iw,1080)':h='min(ih,1920)':x='max(0,min(iw-1080,(iw-1080)/2+{sx}))':"
+            f"y='max(0,min(ih-1920,(ih-1920)/2+{sy}))',scale=1080:1920")
 
 
 def finish(spec: RenderSpec, base: Path, meta: dict, out: Path | None = None, music: bool = True,
