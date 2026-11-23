@@ -1,29 +1,38 @@
 // Editor building blocks: live 9:16 preview with caption overlay + safe zones, the multi-track timeline,
 // and the right-hand panels (Transcript, Captions, Layout, Hook & Title, Music & Audio, Effects, Campaign rules).
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, waitForJob } from "../api";
 
 export type View = any;
 export type Edl = any;
 
 // ---- time mapping (source <-> output), same rules as the engine's timeline.py ----------------------------
-export function keptOf(v: View): [number, number][] { return (v?.kept || []) as [number, number][]; }
-export function toOut(kept: [number, number][], src: number): number | null {
-  let acc = 0;
-  for (const [a, b] of kept) {
-    if (src < a) return null;
-    if (src <= b) return acc + (src - a);
-    acc += b - a;
+// Segments come from the engine: {item, a, b, speed, hold, out_a, out_b}. Item 0 is the main clip; holds are
+// freeze frames; speed != 1 is a speed ramp; items 1.. are appended clips.
+export type Seg = { item: number; a: number; b: number; speed: number; hold: number; out_a: number; out_b: number };
+export function keptOf(v: View): Seg[] {
+  if (v?.segments) return v.segments as Seg[];
+  let acc = 0;      // older engine: plain kept ranges
+  return ((v?.kept || []) as [number, number][]).map(([a, b]) => { const s = { item: 0, a, b, speed: 1, hold: 0, out_a: acc, out_b: acc + b - a }; acc += b - a; return s; });
+}
+export function toOut(segs: Seg[], src: number, item = 0): number | null {
+  for (const s of segs) {
+    if (s.item === item && !s.hold && s.a <= src && src <= s.b) return s.out_a + (src - s.a) / s.speed;
   }
   return null;
 }
-export function toSrc(kept: [number, number][], out: number): number {
-  let acc = 0;
-  for (const [a, b] of kept) {
-    if (out <= acc + (b - a)) return a + Math.max(0, out - acc);
-    acc += b - a;
+export function toSrc(segs: Seg[], out: number): number {
+  let last = 0;
+  for (const s of segs) {
+    if (s.item !== 0) continue;
+    if (out <= s.out_b) return s.hold ? s.a : s.a + Math.max(0, out - s.out_a) * s.speed;
+    last = s.b;
   }
-  return kept.length ? kept[kept.length - 1][1] : 0;
+  return last;
+}
+/** The segment under an output time. */
+export function segAt(segs: Seg[], out: number): Seg | null {
+  return segs.find((s) => out >= s.out_a && out < s.out_b) || segs[segs.length - 1] || null;
 }
 export const fmt = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
 // Reaction emojis we bundle images for (Noto Emoji, Apache 2.0).
@@ -54,9 +63,9 @@ export const SAFE: Record<string, { label: string; top: number; bottom: number; 
   shorts: { label: "Shorts", top: 180, bottom: 1500, left: 60, right: 960 },
 };
 
-export function Preview({ v, videoRef, t, setT, zone, building }: {
+export function Preview({ v, videoRef, t, setT, zone, building, overlay }: {
   v: View; videoRef: { current: HTMLVideoElement | null }; t: number; setT: (x: number) => void;
-  zone: string | null; building: boolean;
+  zone: string | null; building: boolean; overlay?: (scale: number) => any;
 }) {
   // Everything you see here is drawn by the same renderer as the export (FFmpeg + libass):
   // - the playable preview is a low-res render of the current version;
@@ -91,122 +100,9 @@ export function Preview({ v, videoRef, t, setT, zone, building }: {
           <span>{z.label} safe area (guide only)</span>
         </div>
       )}
+      {overlay?.(s)}
       {!live && <span className="ed-badge">{building ? "Updating preview…" : "Still frame"}</span>}
       <span className="ed-time">{fmt(t)} / {fmt(v?.duration || 0)}</span>
-    </div>
-  );
-}
-
-// ---- timeline ------------------------------------------------------------------------------------------
-export function Timeline({ v, t, seek, splits, sel, setSel, onEdl, onRange }: {
-  v: View; t: number; seek: (x: number) => void; splits: number[];
-  sel: [number, number] | null; setSel: (s: [number, number] | null) => void;
-  onEdl: (fn: (e: Edl) => Edl, label: string) => void; onRange: (a: number, b: number) => void;
-}) {
-  const ref = useRef<HTMLDivElement>(null);
-  const [w, setW] = useState(600);
-  const [drag, setDrag] = useState<any>(null);
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const ro = new ResizeObserver(() => setW(el.clientWidth));
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-  const e: Edl = v.edl;
-  const kept = keptOf(v);
-  const dur = Math.max(0.1, v.duration || 0);
-  const px = w / dur;
-  const xOf = (out: number) => out * px;
-  const outAt = (clientX: number) => {
-    const r = ref.current!.getBoundingClientRect();
-    return Math.max(0, Math.min(dur, (clientX - r.left) / px));
-  };
-  // video segments in output time, subdivided by splits
-  const segs = useMemo(() => {
-    const out: [number, number][] = [];
-    let acc = 0;
-    for (const [a, b] of kept) {
-      const len = b - a;
-      const cuts = splits.filter((s) => s > acc + 0.05 && s < acc + len - 0.05).sort((x, y) => x - y);
-      let s0 = acc;
-      for (const c of cuts) { out.push([s0, c]); s0 = c; }
-      out.push([s0, acc + len]);
-      acc += len;
-    }
-    return out;
-  }, [v.kept, splits]);
-  const kfs = (e.layout?.keyframes || []).map((k: any, i: number) => ({ i, out: toOut(kept, k.t) ?? (i === 0 ? 0 : null), layout: k.layout }))
-    .filter((k: any) => k.out != null);
-  const zooms = (e.zooms || []).map((z: any, i: number) => ({ i, out: toOut(kept, z.t), kind: z.kind })).filter((z: any) => z.out != null);
-  const sfx = (e.sfx || []).map((x: any, i: number) => ({ i, out: toOut(kept, x.t), name: x.id })).filter((x: any) => x.out != null);
-  const evtags = (e.moment?.tags || []).map((x: any, i: number) => ({ i, out: toOut(kept, x.t), tag: x.tag })).filter((x: any) => x.out != null);
-  const broll = (e.broll || []).map((x: any, i: number) => ({ i, out: toOut(kept, x.t), dur: x.dur || 2 })).filter((x: any) => x.out != null);
-  const m = e.music || {};
-  const musicOn = m.enabled && m.path && !e.rules?.no_music;
-
-  const onMove = (ev: { clientX: number }) => {
-    if (!drag) return;
-    setDrag({ ...drag, out: outAt(ev.clientX) });
-  };
-  const onUp = () => {
-    if (!drag) return;
-    const o = drag.out;
-    if (drag.kind === "start") onRange(o <= 0.01 ? e.range[0] - (drag.start - drag.out) : toSrc(kept, o), e.range[1]);
-    else if (drag.kind === "end") onRange(e.range[0], o >= dur - 0.01 ? e.range[1] + (o - dur) : toSrc(kept, o));
-    else if (drag.kind === "kf") onEdl((x) => { x.layout.keyframes[drag.i].t = +toSrc(kept, o).toFixed(3); x.layout.keyframes.sort((a: any, b: any) => a.t - b.t); return x; }, "Move layout keyframe");
-    else if (drag.kind === "zoom") onEdl((x) => { x.zooms[drag.i].t = +toSrc(kept, o).toFixed(3); return x; }, "Move zoom");
-    else if (drag.kind === "seek") seek(o);
-    setDrag(null);
-  };
-  const start = (kind: string, extra: any = {}) => (ev: { clientX: number; stopPropagation: () => void }) => {
-    ev.stopPropagation();
-    setDrag({ kind, out: outAt(ev.clientX), start: outAt(ev.clientX), ...extra });
-  };
-  const ticks = [];
-  const step = dur > 120 ? 15 : dur > 40 ? 5 : 2;
-  for (let s = 0; s <= dur; s += step) ticks.push(s);
-  return (
-    <div className="ed-timeline" onMouseMove={onMove} onMouseUp={onUp} onMouseLeave={onUp}>
-      <div className="ed-labels">{["", "Video", "Captions", "Music", "SFX", "B-roll"].map((l) => <span key={l}>{l}</span>)}</div>
-      <div className="ed-tracks" ref={ref} onMouseDown={start("seek")}>
-        <div className="ed-ruler">{ticks.map((s) => <span key={s} style={{ left: xOf(s) }}>{fmt(s)}</span>)}</div>
-        <div className="ed-track video">
-          {segs.map(([a, b], i) => (
-            <div key={i} className={sel && sel[0] === a ? "seg on" : "seg"} style={{ left: xOf(a), width: Math.max(2, xOf(b) - xOf(a)) }}
-              onMouseDown={(ev) => { ev.stopPropagation(); setSel(sel && sel[0] === a ? null : [a, b]); seek(a); }}
-              title={`${fmt(a)}–${fmt(b)} · click to select, Delete to remove`} />
-          ))}
-          <div className="handle l" onMouseDown={start("start")} title="Drag to change the start" />
-          <div className="handle r" onMouseDown={start("end")} title="Drag to change the end" />
-          {kfs.map((k: any) => (
-            <div key={`k${k.i}`} className="kf layout" style={{ left: xOf(drag?.kind === "kf" && drag.i === k.i ? drag.out : k.out) }}
-              title={`Layout: ${k.layout} (drag to move)`} onMouseDown={k.i === 0 ? undefined : start("kf", { i: k.i })}>◆</div>
-          ))}
-          {evtags.map((x: any) => (
-            <div key={`t${x.i}`} className="kf evtag" style={{ left: xOf(x.out) }} title={`What happened: ${x.tag.replace("_", " ")}`}>▼</div>
-          ))}
-          {zooms.map((z: any) => (
-            <div key={`z${z.i}`} className="kf zoom" style={{ left: xOf(drag?.kind === "zoom" && drag.i === z.i ? drag.out : z.out) }}
-              title={`Zoom: ${z.kind} (drag to move)`} onMouseDown={start("zoom", { i: z.i })}>●</div>
-          ))}
-        </div>
-        <div className="ed-track caps">
-          {(v.words_out || []).filter((x: any) => x.out != null && !x.deleted).map((x: any) => (
-            <div key={x.i} className="word" style={{ left: xOf(x.out), width: Math.max(2, (x.end - x.start) * px) }} title={x.word} />
-          ))}
-        </div>
-        <div className="ed-track music">
-          {musicOn && <div className="bar" style={{ left: xOf(Math.max(0, m.delay || 0)), right: 0 }} title={m.title || "Music"} />}
-          {musicOn && (m.beats || []).filter((b: number) => b <= dur).map((b: number, i: number) => <div key={i} className="beat" style={{ left: xOf(b) }} />)}
-          {!musicOn && <span className="muted tiny">{e.rules?.no_music ? "Original audio only (campaign rule)" : "No music"}</span>}
-        </div>
-        <div className="ed-track sfx">{sfx.map((x: any) => <div key={x.i} className="kf sfx" style={{ left: xOf(x.out) }} title={x.name}>♪</div>)}</div>
-        <div className="ed-track broll">{broll.map((x: any) => <div key={x.i} className="bar" style={{ left: xOf(x.out), width: x.dur * px }} />)}</div>
-        <div className="playhead" style={{ left: xOf(drag?.kind === "seek" ? drag.out : t) }} />
-        {drag && (drag.kind === "start" || drag.kind === "end") && <div className="ghost" style={{ left: xOf(drag.out) }} />}
-      </div>
-      <div className="ed-tl-help muted tiny">Space play/pause · J/K/L · S split · Delete remove selected part · Ctrl+Z / Ctrl+Y</div>
     </div>
   );
 }
@@ -465,7 +361,7 @@ export function EffectsPanel({ v, onEdl, t, post }: { v: View; onEdl: (fn: (e: E
         </select>
       </div>
       <div className="row wrap" style={{ gap: 6 }}>
-        <button onClick={() => add("zooms", { t: at(), kind: "punch", amount: 1.18, dur: 0.6 }, "Add zoom")}>+ Punch-in zoom at {fmt(t)}</button>
+        <button onClick={() => add("zooms", { t: at(), kind: "punch", amount: 0.18, dur: 0.6 }, "Add zoom")}>+ Punch-in zoom at {fmt(t)}</button>
         <button onClick={() => add("overlays", { kind: "flash", t: at(), dur: 0.15 }, "Add flash")}>+ Flash</button>
         <button onClick={() => add("overlays", { kind: "shake", t: at(), dur: 0.5 }, "Add shake")}>+ Shake</button>
         {REACTION_EMOJI.map((em) => <button key={em} title="Reaction emoji" onClick={() => add("overlays", { kind: "emoji", t: at(), dur: 1.2, emoji: em }, "Add emoji")}>{em}</button>)}

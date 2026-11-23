@@ -18,7 +18,7 @@ export type MainPage = "dashboard" | "new" | "editor" | "clips" | "earnings" | "
 export type Page = MainPage | "review" | "submissions" | "campaigns" | "programs" | "health" | "logs";
 
 const NAV: [MainPage, string][] = [
-  ["dashboard", "Home"], ["new", "New Project"], ["editor", "Editor"], ["clips", "My Clips"], ["earnings", "Earnings"],
+  ["editor", "Editor"], ["dashboard", "Home"], ["new", "New Project"], ["clips", "My Clips"], ["earnings", "Earnings"],
   ["settings", "Settings"],
 ];
 
@@ -38,7 +38,7 @@ export default function App() {
   const [ready, setReady] = useState(false);
   const [error, setError] = useState("");
   const [setupDone, setSetupDone] = useState(false);
-  const [page, setPage] = useState<MainPage>("dashboard");
+  const [page, setPage] = useState<MainPage>("editor");     // v0.8.3: the Editor is the start screen
   const [encoder, setEncoder] = useState("");
   const [paused, setPaused] = useState(false);
   const [conn, setConn] = useState<ConnState>("connecting");
@@ -180,7 +180,7 @@ export default function App() {
           </div>
         </div>
       </nav>
-      <main className="content">
+      <main className={page === "editor" ? "content studio-host" : "content"}>
         {update && (
           <div className="banner" style={{ background: "#13283a", borderColor: "#24507a", color: "#bfe0ff" }}>
             <span>ClipFarm {update.version} is available. It installs over this version; your keys and settings stay.</span>

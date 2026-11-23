@@ -381,7 +381,7 @@ def build_track(words: list[dict], out: Path, style_name: str = DEFAULT, words_p
                 hook_sec: float = 2.2, credit: str | None = None, duration: float | None = None,
                 cam_h: int = 640, layout_segments: list[tuple[float, str]] | None = None,
                 credit_pos: str | None = None, position: str | None = None, title_box: str = "outline",
-                title_pos: str | None = None) -> CaptionTrack:
+                title_pos: str | None = None, text_layers: list[dict] | None = None) -> CaptionTrack:
     """words: [{"word","start","end"}] in source time; `offset` is subtracted so they line up with the clip.
     style_name: a preset key or a template dict. layout_segments: [(clip time, layout)] when the layout
     changes mid-clip -- each caption uses the placement of the layout on screen when it appears."""
@@ -556,6 +556,23 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             lines.append(f"Dialogue: 1,{_ts(0)},{_ts(hook_sec)},{sty},,0,0,0,,{{\\an5\\pos(540,{hy0 + li * hb.line_h:.0f})"
                          f"\\fs{hfs:.1f}{'' if boxed else chr(92) + 'blur1.5'}\\q2{anim}\\fad(0,180)}}{txt}")
         title = {"text": hook, "box": title_box, "y": round(hb.y), "h": round(hb.height), "end": hook_sec}
+    for tl in (text_layers or [])[:30]:
+        txt = _esc(str(tl.get("text") or "").strip())[:200]
+        if not txt:
+            continue
+        a, b = float(tl.get("start", 0)), float(tl.get("end", duration or 3))
+        if b <= a:
+            continue
+        x, y = max(0.0, min(1.0, float(tl.get("x", 0.5)))) * W, max(0.0, min(1.0, float(tl.get("y", 0.3)))) * H
+        fam = tl.get("font") if tl.get("font") in FONTS else pr.family
+        fs_ = ass_size(fam, max(24, min(220, float(tl.get("size", 72)))))
+        box = tl.get("box") or "outline"
+        sty = {"white_box": "HookWhiteBox", "black_box": "HookBlackBox"}.get(box, "Hook")
+        col = re.sub(r"[^0-9A-Fa-f]", "", str(tl.get("color") or ""))[:6]
+        colour = "" if box in ("white_box", "black_box") or len(col) != 6 else f"\\1c{_c(col)}"
+        rot = float(tl.get("rotate", 0) or 0)
+        lines.append(f"Dialogue: 3,{_ts(a)},{_ts(b)},{sty},,0,0,0,,{{\\an5\\pos({x:.0f},{y:.0f})\\fn{fam}\\fs{fs_:.1f}"
+                     f"{colour}{f'{chr(92)}frz{-rot:.1f}' if rot else ''}\\q2}}{txt.replace(chr(10), chr(92) + 'N')}")
     if credit:
         end = duration if duration else 3600
         cy = {"top": SAFE["top"] + 26, "bottom": SAFE["bottom"] - 30}.get(credit_pos or "", pl.credit_y)

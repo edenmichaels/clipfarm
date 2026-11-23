@@ -67,29 +67,58 @@ def piece_graph(lay: str, inp: str, out: str, sw: int, sh: int, cam: dict | None
             f"[{out}b]scale={W}:-2[{out}fg];[{out}bg][{out}fg]overlay=(W-w)/2:(H-h)/2,setsar=1[{out}]")
 
 
-def pieces(edl: dict) -> list[tuple[float, float, dict]]:
-    """Kept segments split at layout keyframes: [(src_a, src_b, keyframe)]."""
-    kfs = sorted(edl["layout"].get("keyframes") or [], key=lambda k: k["t"]) or \
-        [{"t": edl["range"][0], "layout": "blur_fill", "cam": None, "path": [[0, 0.5]]}]
+def _item(edl: dict, i: int) -> dict:
+    """Item 0 = the main clip; 1.. = appended sequence clips (each has its own source, range, cuts, layout)."""
+    if i == 0:
+        return {"source": edl["source"], "layout": edl["layout"]}
+    it = edl["sequence"][i - 1]
+    return {"source": it["source"], "layout": it.get("layout") or {"keyframes": []}}
+
+
+def pieces(edl: dict) -> list[tuple[T.Seg, dict]]:
+    """Output segments (speed ramps, freezes, sequence items) split at layout keyframes: [(segment, keyframe)]."""
     out = []
-    for a, b in T.kept(edl):
-        cuts = sorted({a, b, *[k["t"] for k in kfs if a < k["t"] < b]})
+    for sg in T.segments(edl):
+        it = _item(edl, sg.item)
+        kfs = sorted(it["layout"].get("keyframes") or [], key=lambda k: k["t"]) or \
+            [{"t": sg.a, "layout": "blur_fill", "cam": None, "path": [[0, 0.5]]}]
+        if sg.hold:
+            kf = next((k for k in reversed(kfs) if k["t"] <= sg.a + 1e-3), kfs[0])
+            out.append((sg, kf))
+            continue
+        cuts = sorted({sg.a, sg.b, *[k["t"] for k in kfs if sg.a < k["t"] < sg.b]})
         for p, q in zip(cuts, cuts[1:]):
             if q - p < T.MIN_SEG:
                 continue
             kf = next((k for k in reversed(kfs) if k["t"] <= p + 1e-3), kfs[0])
-            out.append((p, q, kf))
+            out.append((sg._replace(a=p, b=q), kf))
     return out
 
 
 def base_key(edl: dict) -> str:
-    src = Path(edl["source"]["path"])
-    stat = f"{src.stat().st_size}:{int(src.stat().st_mtime)}" if src.exists() else "missing"
+    srcs = [Path(edl["source"]["path"])] + [Path(it["source"]["path"]) for it in edl.get("sequence") or []]
+    stat = [f"{p}:{p.stat().st_size}:{int(p.stat().st_mtime)}" if p.exists() else f"{p}:missing" for p in srcs]
     lay = edl.get("layout") or {}
-    blob = json.dumps({"src": str(src), "stat": stat, "cam_h": lay.get("cam_h", 640), "seam": bool(lay.get("seam_line")),
-                       "pieces": [(a, b, k.get("layout"), k.get("cam"), k.get("path"),
-                       k.get("t")) for a, b, k in pieces(edl)]}, sort_keys=True)
+    blob = json.dumps({"src": stat, "cam_h": lay.get("cam_h", 640), "seam": bool(lay.get("seam_line")),
+                       "pieces": [(tuple(sg), k.get("layout"), k.get("cam"), k.get("path"), k.get("t"))
+                                  for sg, k in pieces(edl)]}, sort_keys=True)
     return hashlib.sha1(blob.encode()).hexdigest()[:16]
+
+
+def _atempo(speed: float) -> str:
+    """atempo takes 0.5-2 per stage; chain stages for 0.25-4."""
+    parts, s = [], speed
+    while s > 2.0:
+        parts.append("atempo=2.0")
+        s /= 2.0
+    while s < 0.5:
+        parts.append("atempo=0.5")
+        s /= 0.5
+    parts.append(f"atempo={s:.4f}")
+    return ",".join(parts)
+
+
+AFMT = "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo"
 
 
 def render_base(edl: dict, cache: Path, quality: str = "export") -> tuple[Path, dict]:
@@ -99,28 +128,50 @@ def render_base(edl: dict, cache: Path, quality: str = "export") -> tuple[Path, 
     meta_p = out.with_suffix(".json")
     if out.exists() and meta_p.exists():
         return out, json.loads(meta_p.read_text(encoding="utf-8"))
-    src = edl["source"]
     ps = pieces(edl)
     if not ps:
         raise ValueError("Nothing left to render: every part of the clip was cut.")
-    ss = max(0.0, ps[0][0] - 1.0)
-    end = ps[-1][1]
+    # one input per item, each seeked close to the part it uses
+    items = sorted({sg.item for sg, _ in ps})
+    inputs, idx, ss_of = [], {}, {}
+    for i in items:
+        src = _item(edl, i)["source"]
+        used = [sg for sg, _ in ps if sg.item == i]
+        ss = max(0.0, min(sg.a for sg in used) - 1.0)
+        end = max(sg.b for sg in used) + 0.5
+        idx[i], ss_of[i] = len(idx), ss
+        inputs += ["-ss", f"{ss:.3f}", "-t", f"{end - ss:.3f}", "-i", src["path"]]
+    main_src = edl["source"]
+    has_a = main_src.get("has_audio", True) or any(_item(edl, i)["source"].get("has_audio", True) for i in items)
+    cam_h, seam = int(edl["layout"].get("cam_h", 640)), bool(edl["layout"].get("seam_line"))
     g, pads = [], []
-    for i, (a, b, kf) in enumerate(ps):
-        rel = [[float(t) - (a - kf["t"]), x] for t, x in (kf.get("path") or [[0, 0.5]])]
-        rel = [[max(0.0, t), x] for t, x in rel] or [[0, 0.5]]
-        g.append(f"[0:v]trim=start={a - ss:.3f}:end={b - ss:.3f},setpts=PTS-STARTPTS[s{i}]")
-        g.append(piece_graph(kf["layout"], f"s{i}", f"v{i}", src["width"], src["height"], kf.get("cam"), rel,
-                             int(edl["layout"].get("cam_h", 640)), bool(edl["layout"].get("seam_line"))))
-        pads.append(f"[v{i}]")
-        if src.get("has_audio", True):
-            g.append(f"[0:a]atrim=start={a - ss:.3f}:end={b - ss:.3f},asetpts=PTS-STARTPTS[a{i}]")
-            pads.append(f"[a{i}]")
-    has_a = src.get("has_audio", True)
+    for n, (sg, kf) in enumerate(ps):
+        src, k, ss = _item(edl, sg.item)["source"], idx[sg.item], ss_of[sg.item]
+        a = sg.a - ss
+        if sg.hold:
+            g.append(f"[{k}:v]trim=start={a:.3f}:end={a + 0.05:.3f},setpts=PTS-STARTPTS,"
+                     f"tpad=stop_mode=clone:stop_duration={sg.hold:.3f},trim=duration={sg.hold:.3f}[s{n}]")
+            rel = [[0, x] for _, x in (kf.get("path") or [[0, 0.5]])[:1]]
+        else:
+            sp = "" if sg.speed == 1 else f",setpts=PTS/{sg.speed:.4f}"
+            g.append(f"[{k}:v]trim=start={a:.3f}:end={sg.b - ss:.3f},setpts=PTS-STARTPTS{sp}[s{n}]")
+            rel = [[(float(t) - (sg.a - kf["t"])) / sg.speed, x] for t, x in (kf.get("path") or [[0, 0.5]])]
+            rel = [[max(0.0, t), x] for t, x in rel] or [[0, 0.5]]
+        g.append(piece_graph(kf["layout"], f"s{n}", f"v{n}", src["width"], src["height"], kf.get("cam"), rel,
+                             cam_h, seam))
+        g.append(f"[v{n}]fps=30,format=yuv420p[w{n}]")
+        pads.append(f"[w{n}]")
+        if has_a:
+            if sg.hold or not src.get("has_audio", True):
+                ln = sg.length
+                g.append(f"anullsrc=channel_layout=stereo:sample_rate=48000,atrim=duration={ln:.3f},{AFMT}[a{n}]")
+            else:
+                tempo = "" if sg.speed == 1 else "," + _atempo(sg.speed)
+                g.append(f"[{k}:a]atrim=start={a:.3f}:end={sg.b - ss:.3f},asetpts=PTS-STARTPTS{tempo},{AFMT}[a{n}]")
+            pads.append(f"[a{n}]")
     g.append(f"{''.join(pads)}concat=n={len(ps)}:v=1:a={1 if has_a else 0}[vc]{'[ac]' if has_a else ''}")
     g.append("[vc]fps=30,format=yuv420p[vb]")
-    cmd = [ffmpeg_bin(), "-y", "-v", "error", "-ss", f"{ss:.3f}", "-t", f"{end - ss + 0.5:.3f}", "-i", src["path"],
-           "-filter_complex", ";".join(g), "-map", "[vb]"]
+    cmd = [ffmpeg_bin(), "-y", "-v", "error", *inputs, "-filter_complex", ";".join(g), "-map", "[vb]"]
     if has_a:
         cmd += ["-map", "[ac]", "-c:a", "aac", "-b:a", "256k", "-ar", "48000"]
     codec = "libx264" if quality == "proxy" else pick_encoder("auto")
@@ -128,12 +179,13 @@ def render_base(edl: dict, cache: Path, quality: str = "export") -> tuple[Path, 
     res = proc.run(cmd + [*vargs, "-pix_fmt", "yuv420p", str(out)], capture_output=True, text=True)
     if res.returncode != 0 and codec != "libx264":
         res = proc.run(cmd + [*encoder_args("libx264", "high"), "-pix_fmt", "yuv420p", str(out)],
-                             capture_output=True, text=True)
+                       capture_output=True, text=True)
     if res.returncode != 0:
         raise RuntimeError(f"FFmpeg failed (edit base): {res.stderr[-1500:]}")
-    first = ps[0][2]["layout"]
-    meta = {"layout": "crop" if first in ("speaker", "pip", "cam_full") else first, "src_w": src["width"], "src_h": src["height"],
-            "has_audio": has_a, "duration": round(sum(b - a for a, b, _ in ps), 3), "key": key}
+    first = ps[0][1]["layout"]
+    meta = {"layout": "crop" if first in ("speaker", "pip", "cam_full") else first, "src_w": main_src["width"],
+            "src_h": main_src["height"], "has_audio": has_a, "duration": round(sum(sg.length for sg, _ in ps), 3),
+            "key": key}
     meta_p.write_text(json.dumps(meta), encoding="utf-8")
     return out, meta
 
@@ -147,11 +199,11 @@ def licensed(path: str) -> bool:
 
 def layout_segments(edl: dict) -> list[tuple[float, str]]:
     segs, acc, last = [], 0.0, None
-    for a, b, kf in pieces(edl):
+    for sg, kf in pieces(edl):
         if kf["layout"] != last:
             segs.append((round(acc, 3), kf["layout"]))
             last = kf["layout"]
-        acc += b - a
+        acc += sg.length
     return segs
 
 
@@ -162,6 +214,44 @@ def broll_licensed(path: str | Path) -> bool:
     p = Path(path).resolve()
     lib = (db.get_setting("music", {}) or {}).get("broll_dir")
     return bool(lib) and (Path(lib).resolve() == p.parent or Path(lib).resolve() in p.parents) and p.exists()
+
+
+def sticker_licensed(path: str | Path) -> bool:
+    """Image stickers only from your own sticker folder (Settings › Music & B-roll); nothing is downloaded."""
+    if not path:
+        return False
+    p = Path(path).resolve()
+    lib = (db.get_setting("music", {}) or {}).get("stickers_dir")
+    return bool(lib) and Path(lib).resolve() in p.parents and p.exists()
+
+
+def layer_specs(edl: dict, dur: float) -> dict:
+    """The Editor's free layers (output time): text, stickers, colour, crop/rotate, transitions, audio keyframes."""
+    def clamp_t(x):
+        return max(0.0, min(dur, float(x)))
+    texts = [{**t, "start": clamp_t(t.get("start", 0)), "end": clamp_t(t.get("end", dur))}
+             for t in edl.get("text_layers") or [] if not t.get("hidden")]
+    emojis, images = [], []
+    for st in edl.get("stickers") or []:
+        if st.get("hidden"):
+            continue
+        a, b = clamp_t(st.get("start", 0)), clamp_t(st.get("end", dur))
+        if b <= a:
+            continue
+        if st.get("emoji"):
+            emojis.append({"emoji": st["emoji"], "t": a, "dur": b - a, "size": int(st.get("size", 240)),
+                           "x": float(st.get("x", 0.5)) * 1080, "y": float(st.get("y", 0.5)) * 1920,
+                           "rotate": float(st.get("rotate", 0))})
+        elif sticker_licensed(st.get("path", "")):
+            images.append({**st, "start": a, "end": b})
+    tr = [dict(x, t=clamp_t(x["t"])) for x in edl.get("transitions") or [] if x.get("kind") in ("fade", "flash", "zoom", "whip")]
+    zooms = [{"t": max(0.0, x["t"] - float(x.get("dur", 0.4)) / 2), "kind": "punch",
+              "amount": 0.25 if x["kind"] == "zoom" else 0.15, "dur": float(x.get("dur", 0.4))}
+             for x in tr if x["kind"] in ("zoom", "whip")]
+    shakes = [(max(0.0, x["t"] - 0.15), x["t"] + 0.15) for x in tr if x["kind"] == "whip"]
+    return {"text_layers": texts, "emojis": emojis, "stickers": images, "color": edl.get("color"),
+            "transform": edl.get("transform"), "transitions": tr, "zooms": zooms, "shakes": shakes,
+            "audio_keys": edl.get("audio_keys") or {}}
 
 
 def spec_for(edl: dict, out: Path, base: Path, quality: str = "export", music: bool = True,
@@ -213,6 +303,10 @@ def spec_for(edl: dict, out: Path, base: Path, quality: str = "export", music: b
     peak = edl["moment"].get("peak")
     peak_out = T.to_out(edl, peak) if peak is not None else None
     swells = [(max(0.0, peak_out - 0.3), min(dur, peak_out + 2.0))] if peak_out is not None else []
+    lay = layer_specs(edl, dur)
+    emojis += lay["emojis"]
+    zooms += lay["zooms"]
+    sh = sorted([*sh, *lay["shakes"]])
     rules = edl["rules"]
     hk = edl["hook"]
     ov = cap.get("style_overrides") or {}
@@ -242,6 +336,8 @@ def spec_for(edl: dict, out: Path, base: Path, quality: str = "export", music: b
         encoder="libx264" if quality == "proxy" else "auto",
         emojis=emojis, broll=broll, logo=logo, cards=cards,
         progress_color=brand.get("progress_color") or "FFE500",
+        text_layers=lay["text_layers"], stickers=lay["stickers"], color=lay["color"], transform=lay["transform"],
+        transitions=lay["transitions"], audio_keys=lay["audio_keys"],
         credit_pos=brand.get("credit_pos"),
         )
 
@@ -277,3 +373,21 @@ def render_frame(edl: dict, t_out: float, out: Path, cache: Path, quality: str =
     spec = spec_for(e, out, base, quality, True, template)
     spec.scale_to = None                      # stills are compared with the export at full 1080x1920
     return finish(spec, base, meta, out=out, frame_at=t_out)
+
+
+def caption_y(edl: dict, template: dict | None = None) -> float | None:
+    """Centre y (1920 px canvas, before the user's nudge) of the caption block, for the Editor's drag handle."""
+    import tempfile
+    from ..editing.render import track_for
+    words = T.words_out(edl)
+    if not words or not edl["captions"].get("enabled", True):
+        return None
+    ps = pieces(edl)
+    first = ps[0][1]["layout"] if ps else "blur_fill"
+    meta = {"layout": "crop" if first in ("speaker", "pip", "cam_full") else first, "src_w": edl["source"]["width"],
+            "src_h": edl["source"]["height"], "duration": T.duration(edl)}
+    with tempfile.TemporaryDirectory() as d:
+        spec = spec_for(edl, Path(d) / "o.mp4", Path(d) / "b.mp4", "export", False, template)
+        spec.words, spec.text_layers, spec.hook, spec.credit = words[:4], [], None, None
+        tr = track_for(spec, meta, Path(d) / "c.ass")
+    return round(tr.events[0]["y"] - spec.caption_nudge, 1) if tr.events else None

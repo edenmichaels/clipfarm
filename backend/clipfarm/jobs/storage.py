@@ -14,6 +14,25 @@ def media_dir() -> Path:
     return p
 
 
+TEMP_PREFIXES = ("cff_",)
+
+
+def cleanup_stale_temp(min_age_sec: float = 600) -> int:
+    """Remove work folders left in the system temp folder by renders that were killed (crash, power cut, Task
+    Manager). Only ClipFarm's own prefixes, and only ones older than min_age_sec. Returns how many were removed."""
+    import tempfile
+    import time
+    root, n = Path(tempfile.gettempdir()), 0
+    for d in root.iterdir() if root.exists() else []:
+        try:
+            if d.is_dir() and d.name.startswith(TEMP_PREFIXES) and time.time() - d.stat().st_mtime > min_age_sec:
+                shutil.rmtree(d, ignore_errors=True)
+                n += 1
+        except OSError:
+            continue
+    return n
+
+
 def folder_size(p: Path) -> int:
     return sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
 

@@ -1,5 +1,67 @@
 # ClipFarm changelog
 
+## 0.8.3 (step 4): the Editor is the app
+
+### A real video editor, and the screen ClipFarm opens on
+- **Show more / Show less is gone.** The Editor now has a professional layout:
+  - **Top:** a toolbar with undo/redo, Split, Freeze, Text, Sticker, Transition, Effects, Auto-edit, Fix my clip, Variants, brand template, 👍/👎, export preset, Export and Send to Post, plus a save indicator.
+  - **Left:** the **Bin** (your clips with filters and batch actions, and **+ Append** to add a clip after the open one), plus **Styles**, **Music**, **SFX**, **B-roll** and **Stickers** tabs.
+  - **Centre:** the 9:16 preview, drawn by the export renderer. **Drag text, stickers and the caption block right on the preview.**
+  - **Right:** an **inspector** for whatever you selected, then the clip's Captions, Title, Layout, Colour, Audio, Effects, Transcript, Rules and Sequence.
+  - **Bottom:** a **multi-track timeline** with Video, Text, Stickers, Captions, FX, Music, Voice, SFX and B-roll tracks. It zooms with Ctrl+wheel, + / − / 0 and a slider. Bars and markers can be dragged, and text and sticker bars resize from their edges.
+- The Editor is the **start screen** and first in the menu. It **reopens where you were**: the same clip, playhead, panels and timeline zoom.
+
+### New editing tools
+- **Multi-clip sequences:** append other clips after this one. Each keeps its own cuts and layout, and its captions come along.
+- **Speed ramps:** select a part and set it from 0.25× to 4×. The audio is time-stretched, not pitched.
+- **Freeze frames:** F holds the frame at the playhead, 0.2–10 s, with silence under it.
+- **Text layers:** font, size, colour, outline or white/black box, rotation and timing, on screen wherever you drop them.
+- **Stickers:** the bundled reaction emojis or images from your own sticker folder. Each has size, rotation and timing.
+- **Transitions:** dip to black, flash, zoom punch and whip (zoom plus shake).
+- **Colour:** brightness, contrast, saturation and warmth.
+- **Crop, zoom, pan and rotate.** Rotating scales up automatically, so no black corners show.
+- **Audio keyframes:** volume points on the voice and music tracks, gliding between them, plus a "duck music here" button.
+- **Facecam editor:** drag or resize the cam box on the real source frame. Every split, picture-in-picture and full-reaction part uses it.
+- **Keyboard shortcuts** for everything, with a **shortcut sheet** you open with ? or the ⌨ button.
+- **Autosave and crash recovery:**
+  - Every change is saved as a new version.
+  - A change still being saved is kept as a draft.
+  - After a crash or a forced close, the Editor offers **Restore it**.
+
+### Fixes
+- **Auto zooms were 2× too big.** Zoom amounts were stored as scale factors, for example 1.16, but rendered as "+116 %", so automatic punch-ins zoomed to about 216 %. They're now +16 % as intended. Old projects are read correctly.
+- The **+ Punch-in zoom** button had the same problem.
+- The "crash" event tag no longer fires on scene cuts or facecam movement without an impact sound, or on the word "hit". This is what caused "Crash at 0:00" in moment reasons.
+
+### Under the hood
+- **Timeline engine:** segments now cover the main clip, speed, holds and sequence items, and every source↔output mapping goes through them.
+- **Base render:** one input per item, plus `setpts`, `atempo` chains, `tpad` freezes, and silence for holds and silent items.
+- **Finish pass:**
+  - crop/zoom/rotate;
+  - one per-frame `eq` for colour and dip/flash transitions;
+  - text layers in the libass track;
+  - image stickers;
+  - rotation for emoji stickers;
+  - volume envelopes for voice and music.
+- **New API routes:**
+  - `GET /edit/{cid}/source-frame`;
+  - `POST /edit/{cid}/sequence` and `DELETE /edit/{cid}/sequence/{idx}`;
+  - `GET /stickers`;
+  - `GET` and `PUT /editor/session`.
+
+  The Editor view now includes `segments` and `caption_y`.
+- **Tests:** `test_v08_editor.py` covers:
+  - the timeline maths;
+  - a speed ramp + freeze + appended-clip render with an exact duration;
+  - text, sticker, transition, colour and rotate pixels;
+  - preview vs export;
+  - audio keyframes muting and restoring;
+  - the caption handle;
+  - the old zoom factors.
+
+  A new contract test covers the editor routes.
+- **Screenshots:** CI now captures the Editor at 100 %, 125 % and 150 % display scaling.
+
 ## 0.8.2 (step 3): Trending Styles
 
 ### Five ready-made looks, picked for you

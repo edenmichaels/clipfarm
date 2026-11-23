@@ -114,6 +114,12 @@ class Engine:
             "UPDATE jobs SET status='queued', updated_at=datetime('now') WHERE status='running'").rowcount
         if recovered:
             db.log("info", "engine", f"Recovered {recovered} interrupted job(s) after restart")
+        try:
+            from . import storage
+            if (n := storage.cleanup_stale_temp()):
+                db.log("info", "engine", f"Removed {n} leftover render folder(s) from an earlier crash")
+        except Exception:                 # noqa: BLE001  (never block start-up on housekeeping)
+            pass
         for lane, n, where in self.lanes:
             for i in range(n):
                 t = threading.Thread(target=self._loop, args=(where,), daemon=True, name=f"{lane}-{i}")

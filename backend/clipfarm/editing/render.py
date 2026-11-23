@@ -91,6 +91,13 @@ class RenderSpec:
     cam_h: int = 640                     # facecam height in the split layout (Style: 35-45 % of 1920)
     title_box: str = "outline"           # Style title look: white_box | black_box | outline | none
     title_pos: str | None = None         # top | seam (None = layout default)
+    # v0.8.3 Editor layers (all in output time)
+    text_layers: list[dict] = field(default_factory=list)   # [{text,start,end,x,y (0-1),size,color,box,rotate}]
+    stickers: list[dict] = field(default_factory=list)      # image stickers [{path,start,end,x,y (0-1),size,rotate}]
+    color: dict | None = None            # {brightness -0.3..0.3, contrast 0.5..1.5, saturation 0..2, warmth -1..1}
+    transform: dict | None = None        # {crop: {l,t,r,b fractions}, zoom 1..2, x/y pan -1..1, rotate degrees}
+    transitions: list[dict] = field(default_factory=list)   # [{t, kind: fade|flash|zoom|whip, dur}]
+    audio_keys: dict = field(default_factory=dict)          # {"speech": [{t, db}], "music": [{t, db}]}
     fps: int = 30
 
 
@@ -196,6 +203,8 @@ def build_audio(spec: RenderSpec, base: Path, meta: dict, bleeps: list[tuple[flo
             voice += ",highpass=f=90,acompressor=threshold=0.08:ratio=3:attack=10:release=150:makeup=2"
         if spec.speech_gain_db:
             voice += f",volume={spec.speech_gain_db:.2f}dB"
+        if (ke := keys_expr(spec.audio_keys.get("speech"))):
+            voice += f",volume='pow(10,({ke})/20)':eval=frame"
         if bleeps:
             voice += f",volume=0:enable='{_between_sum(bleeps)}'"
         chains.append(voice + "[voice]")
@@ -218,8 +227,9 @@ def build_audio(spec: RenderSpec, base: Path, meta: dict, bleeps: list[tuple[flo
         speech = merge_intervals(spec.speech, 0.15)
         sw = merge_intervals(spec.swells)
         sp_env, sw_env = _trapezoid(speech, 0.12), _trapezoid(sw, 0.3)
+        mk = keys_expr(spec.audio_keys.get("music"))
         gain = (f"if(lt(t,{spec.music_entry:.3f}),-90,"
-                f"-{spec.duck_db:.2f}*({sp_env})+{spec.swell_db:.2f}*({sw_env})*(1-({sp_env})))")
+                f"-{spec.duck_db:.2f}*({sp_env})+{spec.swell_db:.2f}*({sw_env})*(1-({sp_env})){f'+({mk})' if mk else ''})")
         fade_in = f"afade=t=in:st={spec.music_entry:.3f}:d={0.06 if spec.music_entry > 0 else 0.6}"
         chains.append(f"[{inputs}:a]aresample=48000,aformat=channel_layouts=stereo,atrim=0:{dur:.3f},asetpts=PTS-STARTPTS,"
                       f"{f'adelay={int(spec.music_delay * 1000)}:all=1,atrim=0:{dur:.3f},' if spec.music_delay > 0 else ''}"
@@ -270,6 +280,9 @@ def _zoom_expr(spec: RenderSpec) -> str | None:
         parts.append(f"0.035*exp(-pow((t-{b:.3f})/0.09,2))")
     for z in spec.zooms[:24]:
         amt, t0, d = float(z.get("amount", 0.12)), float(z["t"]), max(0.2, float(z.get("dur", 1.2)))
+        if amt >= 1.0:          # older projects stored a scale factor (1.16 = +16 %); it used to zoom to 216 %
+            amt -= 1.0
+        amt = max(0.0, min(0.6, amt))
         if z.get("kind") == "pulse":
             parts.append(f"{amt:.3f}*exp(-pow((t-{t0:.3f})/0.1,2))")
         else:   # punch-in: snap in, hold, ease out
@@ -289,6 +302,83 @@ def _zoom_expr(spec: RenderSpec) -> str | None:
             f"y='max(0,min(ih-1920,(ih-1920)/2+{sy}))',scale=1080:1920")
 
 
+def keys_expr(keys: list[dict], default: float = 0.0) -> str | None:
+    """Piecewise-linear dB envelope from [{t, db}] keyframes (held before the first / after the last)."""
+    pts = sorted((float(k["t"]), max(-60.0, min(12.0, float(k["db"])))) for k in keys or [] if "t" in k and "db" in k)
+    if not pts:
+        return None
+    expr = f"{pts[-1][1]:.2f}"
+    for (t0, d0), (t1, d1) in reversed(list(zip(pts, pts[1:]))):
+        span = max(1e-3, t1 - t0)
+        expr = f"if(lt(t,{t1:.3f}),{d0:.2f}+({d1 - d0:.2f})*(t-{t0:.3f})/{span:.3f},{expr})"
+    return f"if(lt(t,{pts[0][0]:.3f}),{pts[0][1]:.2f},{expr})"
+
+
+def _tri(t0: float, d: float) -> str:
+    return f"max(0,1-abs(t-{t0:.3f})/{max(0.04, d / 2):.3f})"
+
+
+def transform_filter(tf: dict | None) -> str | None:
+    """Crop (fractions per side) -> fill 1080x1920 -> zoom/pan -> rotate. None when nothing is set."""
+    if not tf:
+        return None
+    c = tf.get("crop") or {}
+    l, t_, r, b = (max(0.0, min(0.45, float(c.get(k, 0)))) for k in ("l", "t", "r", "b"))
+    z = max(1.0, min(2.0, float(tf.get("zoom", 1.0))))
+    px, py = (max(-1.0, min(1.0, float(tf.get(k, 0)))) for k in ("x", "y"))
+    rot = max(-45.0, min(45.0, float(tf.get("rotate", 0))))
+    if not any((l, t_, r, b)) and z == 1.0 and not rot:
+        return None
+    parts = []
+    if any((l, t_, r, b)):
+        parts.append(f"crop=iw*{1 - l - r:.4f}:ih*{1 - t_ - b:.4f}:iw*{l:.4f}:ih*{t_:.4f},"
+                     "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920")
+    if z > 1.0:
+        w, h = int(1080 * z) // 2 * 2, int(1920 * z) // 2 * 2
+        parts.append(f"scale={w}:{h},crop=1080:1920:{(w - 1080) / 2 * (1 + px):.1f}:{(h - 1920) / 2 * (1 + py):.1f}")
+    if rot:
+        # rotate, then scale up just enough that no black corners show
+        import math
+        a = math.radians(abs(rot))
+        k = math.cos(a) + max(1080 / 1920, 1920 / 1080) * math.sin(a)
+        parts.append(f"rotate={math.radians(rot):.5f}:c=black,scale={int(1080 * k) // 2 * 2}:{int(1920 * k) // 2 * 2},"
+                     "crop=1080:1920")
+    return ",".join(parts)
+
+
+def color_filter(color: dict | None, transitions: list[dict]) -> str | None:
+    """Colour grade + dip/flash transitions in ONE eq pass (brightness is evaluated per frame)."""
+    c = color or {}
+    br = max(-0.3, min(0.3, float(c.get("brightness", 0))))
+    ct = max(0.5, min(1.5, float(c.get("contrast", 1))))
+    sat = max(0.0, min(2.0, float(c.get("saturation", 1))))
+    warm = max(-1.0, min(1.0, float(c.get("warmth", 0))))
+    dips = [f"-{_tri(float(x['t']), float(x.get('dur', 0.4)))}" for x in transitions or [] if x.get("kind") == "fade"]
+    flashes = [f"+0.8*{_tri(float(x['t']), float(x.get('dur', 0.25)))}" for x in transitions or [] if x.get("kind") == "flash"]
+    out = []
+    if br or ct != 1 or sat != 1 or dips or flashes:
+        expr = f"{br:.3f}{''.join(dips)}{''.join(flashes)}"
+        out.append(f"eq=brightness='{expr}':contrast={ct:.3f}:saturation={sat:.3f}:eval=frame")
+    if warm:
+        out.append(f"colorbalance=rs={0.12 * warm:.3f}:gs={0.03 * warm:.3f}:bs={-0.12 * warm:.3f}:"
+                   f"rm={0.08 * warm:.3f}:bm={-0.08 * warm:.3f}")
+    return ",".join(out) or None
+
+
+def track_for(spec: RenderSpec, meta: dict, out: Path):
+    """The caption/title/text-layer track for a render (also used by the Editor to place its caption handle)."""
+    dur = meta["duration"]
+    return build_track(spec.words if spec.captions_enabled else [], out,
+                       spec.template or spec.caption_style, spec.words_per_chunk, layout_segments=spec.layout_segments,
+                       offset=spec.start, layout=meta["layout"], src_w=meta.get("src_w", 1920),
+                       src_h=meta.get("src_h", 1080), keep_clear=tuple(spec.keep_clear),
+                       nudge=spec.caption_nudge, uppercase=spec.uppercase, profanity=spec.profanity,
+                       fillers=spec.fillers, emoji=spec.emoji, hook=spec.hook, hook_sec=spec.hook_sec,
+                       credit=spec.credit, duration=dur, credit_pos=spec.credit_pos, cam_h=spec.cam_h,
+                       position=spec.caption_position, title_box=spec.title_box, title_pos=spec.title_pos,
+                       text_layers=spec.text_layers)
+
+
 def finish(spec: RenderSpec, base: Path, meta: dict, out: Path | None = None, music: bool = True,
            frame_at: float | None = None) -> dict:
     """The final pass: zoom/shake, captions (libass), emojis, flashes, B-roll, logo, cards, progress bar, audio mix.
@@ -302,14 +392,7 @@ def finish(spec: RenderSpec, base: Path, meta: dict, out: Path | None = None, mu
         fd = fonts_dir()
         if fd:
             shutil.copytree(fd, work / "fonts", dirs_exist_ok=True)
-        track = build_track(spec.words if spec.captions_enabled else [], work / "captions.ass",
-                            spec.template or spec.caption_style, spec.words_per_chunk, layout_segments=spec.layout_segments,
-                            offset=spec.start, layout=meta["layout"], src_w=meta.get("src_w", 1920),
-                            src_h=meta.get("src_h", 1080), keep_clear=tuple(spec.keep_clear),
-                            nudge=spec.caption_nudge, uppercase=spec.uppercase, profanity=spec.profanity,
-                            fillers=spec.fillers, emoji=spec.emoji, hook=spec.hook, hook_sec=spec.hook_sec,
-                            credit=spec.credit, duration=dur, credit_pos=spec.credit_pos, cam_h=spec.cam_h,
-                            position=spec.caption_position, title_box=spec.title_box, title_pos=spec.title_pos)
+        track = track_for(spec, meta, work / "captions.ass")
         if frame_at is None:
             shutil.copy2(track.path, out.with_suffix(".ass"))
             shutil.copy2(track.path.with_suffix(".events.json"), out.with_suffix(".events.json"))
@@ -330,8 +413,12 @@ def finish(spec: RenderSpec, base: Path, meta: dict, out: Path | None = None, mu
             chain.append(f"[{last}]{f}[{nxt}]")
             last = nxt
 
+        if (tf := transform_filter(spec.transform)):
+            add(tf)
         if (z := _zoom_expr(spec)):
             add(z)
+        if (cf := color_filter(spec.color, spec.transitions)):
+            add(cf)
         add("ass=captions.ass" + (":fontsdir=fonts" if fd else ""))
         edir = _emoji_dir()
         for e in track.emojis[:12] if edir else []:
@@ -359,7 +446,7 @@ def finish(spec: RenderSpec, base: Path, meta: dict, out: Path | None = None, mu
                 chain.append(f"[{n_in}:v]scale=900:-2,format=rgba,setpts=PTS-STARTPTS+{t0:.3f}/TB[br{k}]")
             add(f"[br{k}]overlay=x=(W-w)/2:y=330:eof_action=pass:enable='between(t,{t0:.3f},{t1:.3f})'")
             n_in += 1
-        for k, e in enumerate(spec.emojis[:10] if edir else []):
+        for k, e in enumerate(spec.emojis[:20] if edir else []):
             code = "_".join(f"{ord(c):x}" for c in e["emoji"] if ord(c) != 0xFE0F)
             png = edir / f"emoji_u{code}.png"
             if not png.exists():
@@ -367,9 +454,23 @@ def finish(spec: RenderSpec, base: Path, meta: dict, out: Path | None = None, mu
             size = int(e.get("size", 220))
             cmd += ["-loop", "1", "-t", f"{dur:.3f}", "-i", str(png)]
             t0, t1 = float(e["t"]), float(e["t"]) + float(e.get("dur", 1.2))
-            chain.append(f"[{n_in}:v]scale={size}:{size},format=rgba[ex{k}]")
-            add(f"[ex{k}]overlay=x={int(e.get('x', 540)) - size // 2}:y={int(e.get('y', 560)) - size // 2}:"
+            rot = float(e.get("rotate", 0) or 0)
+            rf = f",rotate={rot * 3.14159265 / 180:.4f}:c=none:ow=rotw({rot * 3.14159265 / 180:.4f}):oh=roth({rot * 3.14159265 / 180:.4f})" if rot else ""
+            chain.append(f"[{n_in}:v]scale={size}:{size},format=rgba{rf}[ex{k}]")
+            add(f"[ex{k}]overlay=x={int(e.get('x', 540))}-w/2:y={int(e.get('y', 560))}-h/2:"
                 f"enable='between(t,{t0:.3f},{t1:.3f})'")
+            n_in += 1
+        for k, st in enumerate(spec.stickers[:12]):
+            sp = Path(st.get("path", ""))
+            if not sp.exists():
+                continue
+            size = max(40, min(1080, int(st.get("size", 300))))
+            rot = float(st.get("rotate", 0) or 0) * 3.14159265 / 180
+            rf = f",rotate={rot:.4f}:c=none:ow=rotw({rot:.4f}):oh=roth({rot:.4f})" if rot else ""
+            cmd += ["-loop", "1", "-t", f"{dur:.3f}", "-i", str(sp)]
+            chain.append(f"[{n_in}:v]scale={size}:-2,format=rgba{rf}[stk{k}]")
+            x, y = float(st.get("x", 0.5)) * 1080, float(st.get("y", 0.5)) * 1920
+            add(f"[stk{k}]overlay=x={x:.0f}-w/2:y={y:.0f}-h/2:enable='between(t,{float(st['start']):.3f},{float(st['end']):.3f})'")
             n_in += 1
         if spec.logo and Path(spec.logo.get("path", "")).exists():
             lg = spec.logo

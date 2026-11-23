@@ -248,7 +248,9 @@ def test_menu_has_at_most_six_items_and_old_screens_reachable():
     app = (ROOT / "app" / "src" / "App.tsx").read_text(encoding="utf-8")
     nav = re.search(r"const NAV[^=]*=\s*\[(.*?)\];", app, re.S).group(1)
     items = re.findall(r'\[\s*"(\w+)"\s*,\s*"([^"]+)"', nav)
-    assert [label for _, label in items] == ["Home", "New Project", "Editor", "My Clips", "Earnings", "Settings"]
+    # v0.8.3: the Editor is the app, so it comes first (and opens at start-up)
+    assert [label for _, label in items] == ["Editor", "Home", "New Project", "My Clips", "Earnings", "Settings"]
+    assert 'useState<MainPage>("editor")' in app
     # Every v0.2 screen still exists and is mounted somewhere (v0.6: the Editor replaced Review).
     src = "\n".join(p.read_text(encoding="utf-8") for p in (ROOT / "app" / "src").rglob("*.tsx"))
     assert 'review: ["editor"' in app

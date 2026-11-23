@@ -303,6 +303,8 @@ def apply(edl: dict, style: dict | str) -> dict:
     zs = []
     for z in e.get("zooms", []):
         base_amt = float(z.get("base_amount", z.get("amount", 0.12)))
+        if base_amt >= 1.0:                 # older projects stored a scale factor (1.16 = +16 %)
+            base_amt -= 1.0
         if strength <= 0.01:
             continue
         zs.append({**z, "base_amount": base_amt, "amount": round(max(0.03, base_amt * (0.5 + strength)), 3)})

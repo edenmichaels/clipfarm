@@ -32,6 +32,9 @@ with sync_playwright() as p:
     page.goto("http://localhost:1420")
     page.wait_for_selector("nav.side", timeout=60000)
     page.wait_for_timeout(2500)
+    if page.locator(".studio").count():                       # v0.8.3+: the Editor opens first
+        page.locator("nav.side").get_by_role("button", name="Home").click()
+        page.wait_for_timeout(1500)
     shot(page, "1-home", full=False)
     page.locator("nav.side").screenshot(path=str(out / "0-menu.png"))
 
@@ -79,16 +82,50 @@ with sync_playwright() as p:
         page.locator("nav.side").get_by_role("button", name="Editor").click()
         page.wait_for_selector(".ed-card", timeout=15000)
         page.wait_for_timeout(3500)
-        shot(page, "6-editor-simple", full=False)
-        page.get_by_role("button", name="Show more").click()
-        page.wait_for_timeout(2500)
-        shot(page, "7-editor-advanced", full=False)
-        for tab, name in (("Captions", "8-editor-captions"), ("Layout", "8b-editor-layout"),
-                          ("Campaign rules", "9-editor-rules")):
-            page.get_by_role("tab", name=tab, exact=False).first.click()
-            page.wait_for_timeout(1200)
+        if page.get_by_role("button", name="Show more").count():          # v0.6-v0.8.2 editor
+            shot(page, "6-editor-simple", full=False)
+            page.get_by_role("button", name="Show more").click()
+            page.wait_for_timeout(2500)
+            shot(page, "7-editor-advanced", full=False)
+            for tab, name in (("Captions", "8-editor-captions"), ("Layout", "8b-editor-layout"),
+                              ("Campaign rules", "9-editor-rules")):
+                page.get_by_role("tab", name=tab, exact=False).first.click()
+                page.wait_for_timeout(1200)
+                shot(page, name, full=False)
+            page.get_by_role("button", name="Show less").click()
+            return
+        # v0.8.3+: the Editor is the app (and the start screen)
+        shot(page, "6-editor-100pct", full=False)
+        for tab, name in (("Styles", "7-editor-styles"), ("Stickers", "7b-editor-stickers")):
+            page.locator(".st-left").get_by_role("tab", name=tab).click()
+            page.wait_for_timeout(1500)
             shot(page, name, full=False)
-        page.get_by_role("button", name="Show less").click()
+        page.locator(".st-left").get_by_role("tab", name="Bin").click()
+        for tab, name in (("Captions", "8-editor-captions"), ("Layout", "8b-editor-layout-facecam"),
+                          ("Colour", "8c-editor-colour"), ("Rules", "9-editor-rules")):
+            page.locator(".st-right").get_by_role("tab", name=tab, exact=False).first.click()
+            page.wait_for_timeout(1500)
+            shot(page, name, full=False)
+        page.locator(".tl-track.text .bar").first.click()
+        page.wait_for_timeout(1000)
+        shot(page, "8d-editor-text-selected", full=False)
+        page.keyboard.press("?")
+        page.wait_for_timeout(600)
+        shot(page, "8e-editor-shortcuts", full=False)
+        page.keyboard.press("Escape")
     if page.locator("nav.side").get_by_role("button", name="Editor").count():
         attempt("editor", editor)
+
+    def scaled():
+        # Windows display scaling: 125 % and 150 % on a 1360x860 window = fewer CSS pixels, denser pixels
+        for pct, (w, h) in ((125, (1088, 688)), (150, (907, 573))):
+            ctx = b.new_context(viewport={"width": w, "height": h}, device_scale_factor=pct / 100)
+            pg = ctx.new_page()
+            pg.goto("http://localhost:1420")
+            pg.wait_for_selector("nav.side", timeout=60000)
+            pg.wait_for_timeout(5000)
+            pg.screenshot(path=str(out / f"6-editor-{pct}pct.png"))
+            print("saved", f"6-editor-{pct}pct")
+            ctx.close()
+    attempt("scaled", scaled)
     b.close()

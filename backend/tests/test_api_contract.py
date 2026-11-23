@@ -74,6 +74,24 @@ def test_auth_and_public_health(client):
     assert client.get("/settings?token=" + TOKEN).status_code == 200
 
 
+def test_every_route_needs_the_token(client):
+    """Audit: no route is reachable without the per-launch token except the public health check and fonts."""
+    import re as _re
+    from clipfarm import api
+    public = {"/health", "/fonts/{name}", "/oauth/youtube/callback"}   # the callback is protected by OAuth state
+    checked = 0
+    for r in api.app.routes:
+        path = getattr(r, "path", "")
+        if not getattr(r, "methods", None) or path in public or path.startswith(("/docs", "/openapi", "/redoc")):
+            continue
+        url = _re.sub(r"\{[^}]+\}", "1", path)
+        for m in r.methods - {"HEAD", "OPTIONS"}:
+            res = client.request(m, url, json={})
+            assert res.status_code == 401, (m, path, res.status_code)
+            checked += 1
+    assert checked > 150
+
+
 # ---- system, settings, secrets -------------------------------------------------------------------
 def test_system_settings_secrets(client):
     s = call(client, "GET", "/system")
@@ -625,6 +643,37 @@ def test_v08_styles_and_style_refs(client, tmp_path):
     call(client, "DELETE", f"/style-refs/{rid}", route="/style-refs/{rid}")
     call(client, "DELETE", f"/styles/{saved['id']}", route="/styles/{sid}")
     assert all(x["key"] != saved["key"] for x in call(client, "GET", "/styles")["styles"])
+
+
+def test_v08_editor_routes(client, tmp_path):
+    import subprocess
+    src = tmp_path / "src.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=1920x1080:r=30:d=12", "-f", "lavfi",
+                    "-i", "sine=f=300:d=12", "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac",
+                    str(src)], check=True)
+    _, prog, cid, _ = _linked_clip(tmp_path)
+    db.ex("UPDATE clips SET source_path=? WHERE id=?", (str(src), cid))
+    cid2 = db.ex("INSERT INTO clips(project_id, streamer_id, program_id, file_path, title, source_path) "
+                 "SELECT project_id, streamer_id, program_id, file_path, 'second', source_path FROM clips WHERE id=?",
+                 (cid,))
+    v = call(client, "GET", f"/edit/{cid}", route="/edit/{cid}")
+    assert v["segments"] and v["segments"][0]["out_a"] == 0
+    r = client.get(f"/edit/{cid}/source-frame?t=2", headers=H)
+    assert r.status_code == 200 and r.content[:2] == b"\xff\xd8"
+    COVERED.add(("GET", "/edit/{cid}/source-frame"))
+    assert client.get(f"/edit/{cid}/source-frame?item=3", headers=H).status_code == 404
+    v2 = call(client, "POST", f"/edit/{cid}/sequence", route="/edit/{cid}/sequence", json={"clip_id": cid2})
+    assert len(v2["edl"]["sequence"]) == 1 and v2["duration"] > v["duration"]
+    assert {s["item"] for s in v2["segments"]} == {0, 1}
+    call(client, "POST", f"/edit/{cid}/sequence", route="/edit/{cid}/sequence", json={"clip_id": cid}, expect=400)
+    v3 = call(client, "DELETE", f"/edit/{cid}/sequence/0", route="/edit/{cid}/sequence/{idx}")
+    assert not v3["edl"]["sequence"]
+    st = call(client, "GET", "/stickers")
+    assert "🔥" in st["emoji"] and st["images"] == []
+    s = call(client, "PUT", "/editor/session", json={"clip_id": cid, "t": 3.5, "panel": "Styles", "junk": 1})
+    assert s["clip_id"] == cid and "junk" not in s and s["saved_at"]
+    assert call(client, "GET", "/editor/session")["panel"] == "Styles"
+    call(client, "PUT", "/editor/session", json={"draft": "nope"}, expect=400)
 
 
 def test_every_route_is_covered():

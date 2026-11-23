@@ -27,7 +27,7 @@ LABEL = {"crash": "crash", "explosion": "explosion", "gunfire": "gunfire", "poli
 KEYWORDS: dict[str, list[str]] = {
     "police": ["cop", "cops", "police", "wanted", "arrest", "arrested", "stars", "sheriff", "swat", "jail", "busted"],
     "death": ["wasted", "died", "dead", "killed", "respawn"],
-    "crash": ["crash", "crashed", "wreck", "totaled", "hit"],
+    "crash": ["crash", "crashed", "wreck", "wrecked", "totaled"],     # not "hit": "hit me up", "hit follow"...
     "explosion": ["explode", "exploded", "explosion", "blew", "boom", "bomb", "sticky", "rpg", "grenade"],
     "gunfire": ["shoot", "shooting", "shot", "gun", "shootout"],
     "stunt": ["flip", "backflip", "frontflip", "jump", "stunt", "ramp", "trick", "wheelie"],
@@ -68,7 +68,8 @@ def from_signals(n: int, parts: dict, words: list[dict] | None = None, chat: lis
     flash = np.clip(p("flash") * 10, 0, 1)
     shake = np.clip(p("shake") / 2.5, 0, 1)
     tags["explosion"] = np.maximum(tags["explosion"], flash * np.clip(p("ev_explosion") * 3 + 0.3, 0, 1))
-    tags["crash"] = np.maximum(tags["crash"], shake * 0.6)
+    # camera shake alone is often a scene cut or facecam movement: only an impact sound makes it a crash
+    tags["crash"] = np.maximum(tags["crash"], shake * 0.6 * np.clip(p("ev_crash") * 3 + p("ev_explosion") * 2, 0, 1))
     # words: the streamer's (most reliable) and chat's
     for w in words or []:
         i = int(float(w["start"]) - offset)

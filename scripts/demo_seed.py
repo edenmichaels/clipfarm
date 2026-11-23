@@ -100,6 +100,18 @@ def seed_edit_projects():
         tags = ["gta6"] if mtype == "Fail" else ["KreekCraft", "gta6"]
         e["texts"] = {"tiktok": {"title": title, "description": "", "hashtags": tags}}
         e["music"]["enabled"] = False
+        if mtype == "Funny":        # v0.8.2+: a Trending Style, and v0.8.3+ layers (older versions ignore these keys)
+            try:
+                from clipfarm.edit import styles
+                e = styles.apply(e, "streamer_split")
+            except ImportError:
+                pass
+            e["text_layers"] = [{"id": "demo1", "text": "WAIT FOR IT", "start": 0.5, "end": 4.0, "x": 0.5, "y": 0.78,
+                                 "size": 84, "color": "FFFFFF", "box": "black_box", "font": "Anton", "rotate": -3}]
+            e["stickers"] = [{"id": "demo2", "emoji": "😂", "start": 9.0, "end": 12.0, "x": 0.78, "y": 0.56, "size": 240,
+                              "rotate": 8}]
+            e["transitions"] = [{"t": 6.0, "kind": "flash", "dur": 0.3}]
+            e["audio_keys"] = {"music": [{"t": 0, "db": 0}, {"t": 10, "db": -12}]}
         ep.create(cid, e)
         try:                        # low-res base for the live preview + a thumbnail
             base, _ = ec.render_base(e, media / "edit_cache" / f"c{cid}", "proxy")

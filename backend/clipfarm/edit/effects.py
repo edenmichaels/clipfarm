@@ -15,15 +15,15 @@ from . import timeline as T
 
 REACTION = re.compile(r"^(no+|what+|bro+|yo+|oh+|omg|wow+|wait|dude|holy|yes+|let'?s|go+|nah+|why|how)$", re.I)
 PLAN = {   # moment type: (zoom amount at payoff, flash, shake, emoji, sfx at payoff, sfx before payoff)
-    "Funny": (1.16, False, False, "😂", "pop", None),
-    "Action/Explosion": (1.24, True, True, "💥", "boom", "whoosh"),
-    "Rage/Reaction": (1.2, False, True, "😱", "impact", None),
-    "Clutch/Skill": (1.18, True, False, "🏆", "ding", "riser"),
-    "Fail": (1.12, False, False, "💀", "bonk", None),
-    "Chaos/Fail": (1.14, False, True, "💀", "bonk", None),
-    "Action + Reaction": (1.24, True, True, "💥", "boom", "whoosh"),
-    "Rage": (1.2, False, True, "😱", "impact", None),
-    "Wholesome": (1.08, False, False, "❤️", "ding", None),
+    "Funny": (0.16, False, False, "😂", "pop", None),
+    "Action/Explosion": (0.24, True, True, "💥", "boom", "whoosh"),
+    "Rage/Reaction": (0.2, False, True, "😱", "impact", None),
+    "Clutch/Skill": (0.18, True, False, "🏆", "ding", "riser"),
+    "Fail": (0.12, False, False, "💀", "bonk", None),
+    "Chaos/Fail": (0.14, False, True, "💀", "bonk", None),
+    "Action + Reaction": (0.24, True, True, "💥", "boom", "whoosh"),
+    "Rage": (0.2, False, True, "😱", "impact", None),
+    "Wholesome": (0.08, False, False, "❤️", "ding", None),
 }
 
 
@@ -46,7 +46,7 @@ def auto_effects(edl: dict, *, emoji: bool = True, sfx: bool = True, broll: bool
     m = e["music"]
     music_on = bool(m.get("enabled") and m.get("path") and not e["rules"].get("no_music"))
     beats = [float(x) for x in (m.get("zoom_beats") or m.get("beats") or [])] if music_on else []
-    zoom, flash, shake, emo, fx_hit, fx_pre = PLAN.get(e["moment"].get("type") or "", (1.12, False, False, None, None, None))
+    zoom, flash, shake, emo, fx_hit, fx_pre = PLAN.get(e["moment"].get("type") or "", (0.12, False, False, None, None, None))
     pack = {}
     if sfx:
         from ..music import sfx as sfxlib
@@ -84,7 +84,7 @@ def auto_effects(edl: dict, *, emoji: bool = True, sfx: bool = True, broll: bool
         if any(abs(ts - x) < 2.5 for x in taken):
             continue
         ts = _snap(ts, e, beats, 0.2)
-        e["zooms"].append({"t": round(ts, 3), "kind": "punch", "amount": 1.08, "dur": 0.4, "auto": True})
+        e["zooms"].append({"t": round(ts, 3), "kind": "punch", "amount": 0.08, "dur": 0.4, "auto": True})
         taken.append(ts)
         extra += 1
     if broll:

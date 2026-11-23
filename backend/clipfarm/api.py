@@ -451,10 +451,12 @@ def checklist(cid: int):
 
 @app.get("/media", dependencies=A)
 def media(path: str):
-    """Serve thumbnails/videos for the UI — only from inside the media folder."""
+    """Serve thumbnails/videos for the UI — only from inside the media folder or your own B-roll / sticker
+    folders (their thumbnails in the Editor)."""
     p = Path(path).resolve()
-    root = storage.media_dir().resolve()
-    if root not in p.parents or not p.exists():
+    lib = db.get_setting("music", {}) or {}
+    roots = [storage.media_dir().resolve()] + [Path(lib[k]).resolve() for k in ("broll_dir", "stickers_dir") if lib.get(k)]
+    if not any(r in p.parents for r in roots) or not p.is_file():
         raise HTTPException(404)
     return FileResponse(p)
 
@@ -716,14 +718,23 @@ def _ep(cid: int) -> dict:
     return p
 
 
+def _caption_y(e: dict) -> float | None:
+    try:
+        tm = e["captions"].get("template")
+        return edit_compile.caption_y(e, edit_templates.get(tm) if isinstance(tm, str) else None)
+    except Exception:                                  # noqa: BLE001  (only the drag handle needs it)
+        return None
+
+
 def _view(p: dict) -> dict:
     e = p["edl"]
     words = e["captions"]["words"]
     proxy = db.get_setting(f"proxy:{p['clip_id']}") or {}
-    return {**p, "duration": edit_tl.duration(e), "kept": edit_tl.kept(e),
+    return {**p, "duration": edit_tl.duration(e), "kept": edit_tl.kept(e), "segments": edit_tl.out_segments(e),
             "words_out": [{"i": i, **w, "out": edit_tl.to_out(e, float(w["start"]))} for i, w in enumerate(words)],
             "fillers": edit_tr.filler_indices(e), "silences": edit_tr.silences(e),
             "layout_segments": edit_compile.layout_segments(e),
+            "caption_y": _caption_y(e),
             "rule_fixes": edit_reframe.enforce_rules(e["layout"]["keyframes"], e["rules"].get("onscreen") or [],
                                                      e["layout"].get("facecam"))[1],
             "proxy": proxy.get("path") if proxy.get("head") == p["head"] and proxy.get("path") and Path(proxy["path"]).exists() else None}
@@ -1223,7 +1234,7 @@ def edit_add_broll(cid: int, body: dict):
 def library_folders(body: dict):
     """Your own SFX and B-roll folders. You confirm you have the rights to everything in them."""
     cur = db.get_setting("music", {}) or {}
-    for k in ("sfx_dir", "broll_dir"):
+    for k in ("sfx_dir", "broll_dir", "stickers_dir"):
         if k in body:
             v = body[k]
             if v and not Path(str(v)).is_dir():
@@ -1232,7 +1243,7 @@ def library_folders(body: dict):
                 raise HTTPException(400, "Confirm you have the rights to use everything in this folder.")
             cur[k] = str(v) if v else None
     db.set_setting("music", cur)
-    return {"sfx_dir": cur.get("sfx_dir"), "broll_dir": cur.get("broll_dir")}
+    return {"sfx_dir": cur.get("sfx_dir"), "broll_dir": cur.get("broll_dir"), "stickers_dir": cur.get("stickers_dir")}
 
 
 @app.get("/brand-templates", dependencies=A)
@@ -2016,6 +2027,8 @@ def style_refs_list():
 @app.post("/style-refs", dependencies=A)
 def style_refs_add(body: dict):
     """Add one of YOUR screenshots: {"data": base64 image, "notes", "tags": [...], "source_note"}. Not scraped."""
+    if len(body.get("data") or "") > 34_000_000:
+        raise HTTPException(413, "That image is too big (25 MB max).")
     try:
         raw = base64.b64decode(body.get("data") or "", validate=False)
         return edit_style_refs.add(raw, body.get("notes") or "", body.get("tags") or [], body.get("source_note") or "")
@@ -2063,8 +2076,111 @@ def style_refs_make(rid: int, body: dict | None = None):
 @app.post("/styles/from-image", dependencies=A)
 def styles_from_image(body: dict):
     """Analyse a screenshot without adding it to the library: {"data": base64, "name"}."""
+    if len(body.get("data") or "") > 34_000_000:
+        raise HTTPException(413, "That image is too big (25 MB max).")
     raw = base64.b64decode(body.get("data") or "", validate=False)
     try:
         return edit_style_refs.make_style(raw, body.get("name") or "From screenshot")
     except Exception as e:                                # noqa: BLE001
         raise HTTPException(400, f"Couldn't read that image: {e}")
+
+
+from datetime import datetime, timezone  # noqa: E402
+
+
+# ---- v0.8.3: the Editor is the app -- sequences, source frames (facecam editor), stickers, session restore ----
+@app.get("/edit/{cid}/source-frame", dependencies=A)
+def edit_source_frame(cid: int, t: float | None = None, item: int = 0):
+    """The untouched source picture (16:9) at source time t: the facecam editor draws the cam box on it."""
+    p = _ep(cid)
+    e = p["edl"]
+    seq = e.get("sequence") or []
+    src = e["source"] if item == 0 else seq[item - 1]["source"] if 0 < item <= len(seq) else None
+    if not src:
+        raise HTTPException(404, "No such item.")
+    t = float(t if t is not None else (e["range"][0] + 1.0))
+    d = storage.media_dir() / "edit_cache" / f"c{cid}" / "src_frames"
+    d.mkdir(parents=True, exist_ok=True)
+    out = d / f"i{item}_{max(0.0, t):.2f}.jpg"
+    if not out.exists():
+        for old in sorted(d.glob("*.jpg"), key=lambda f: f.stat().st_mtime)[:-20]:
+            old.unlink(missing_ok=True)
+        from . import proc
+        from .editing.ffmpeg_util import ffmpeg_bin
+        r = proc.run([ffmpeg_bin(), "-y", "-v", "error", "-ss", f"{max(0.0, t):.3f}", "-i", src["path"], "-frames:v", "1",
+                      "-vf", "scale=960:-2", "-q:v", "4", str(out)], capture_output=True, text=True)
+        if r.returncode != 0 or not out.exists():
+            raise HTTPException(500, "Couldn't read that frame of the source.")
+    return FileResponse(out, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+@app.post("/edit/{cid}/sequence", dependencies=A)
+def edit_sequence_add(cid: int, body: dict):
+    """Append another clip to this one (multi-clip sequence): {"clip_id": n}. Its cuts and layout come along."""
+    _ep(cid)
+    other = body.get("clip_id")
+    if not other or int(other) == cid:
+        raise HTTPException(400, "clip_id of another clip is required")
+    o = edit_build.ensure_project(int(other))
+    if not o:
+        raise HTTPException(404, "That clip has no editable source.")
+    oe = o["edl"]
+    item = {"clip_id": int(other), "source": oe["source"], "range": oe["range"], "cuts": oe.get("cuts", []),
+            "speed": oe.get("speed", []), "freezes": oe.get("freezes", []),
+            "words": [w for w in oe["captions"]["words"] if not w.get("deleted")],
+            "layout": {"keyframes": oe["layout"].get("keyframes", []), "facecam": oe["layout"].get("facecam")},
+            "label": body.get("label") or f"Clip #{other}"}
+
+    def go(e):
+        e.setdefault("sequence", []).append(item)
+        return e
+    return _view(edit_project.update(cid, go, f"Append clip #{other}"))
+
+
+@app.delete("/edit/{cid}/sequence/{idx}", dependencies=A)
+def edit_sequence_remove(cid: int, idx: int):
+    p = _ep(cid)
+    if not 0 <= idx < len(p["edl"].get("sequence") or []):
+        raise HTTPException(404, "No such item in the sequence.")
+
+    def go(e):
+        e["sequence"].pop(idx)
+        return e
+    return _view(edit_project.update(cid, go, "Remove appended clip"))
+
+
+@app.get("/stickers", dependencies=A)
+def stickers_list():
+    """Bundled reaction emojis (Noto Emoji, Apache 2.0) + images in YOUR sticker folder. Nothing is downloaded."""
+    from .editing.render import _emoji_dir
+    emo = []
+    d = _emoji_dir()
+    if d:
+        for f in sorted(d.glob("emoji_u*.png")):
+            try:
+                emo.append("".join(chr(int(x, 16)) for x in f.stem[7:].split("_")))
+            except ValueError:
+                continue
+    lib = (db.get_setting("music", {}) or {}).get("stickers_dir")
+    imgs = []
+    if lib and Path(lib).is_dir():
+        imgs = [{"path": str(f), "name": f.stem} for f in sorted(Path(lib).iterdir())
+                if f.suffix.lower() in (".png", ".webp", ".gif", ".jpg", ".jpeg")][:300]
+    return {"emoji": emo, "images": imgs, "folder": lib}
+
+
+@app.get("/editor/session", dependencies=A)
+def editor_session_get():
+    """Where you were: the Editor reopens it after a restart or a crash."""
+    return db.get_setting("editor_session", {}) or {}
+
+
+@app.put("/editor/session", dependencies=A)
+def editor_session_put(body: dict):
+    keep = {k: body[k] for k in ("clip_id", "t", "panel", "inspector", "zoom", "draft") if k in body}
+    if "draft" in keep and keep["draft"] is not None:
+        if not isinstance(keep["draft"], dict) or len(json.dumps(keep["draft"])) > 2_000_000:
+            raise HTTPException(400, "draft must be an edit project under 2 MB")
+    db.set_setting("editor_session", {**(db.get_setting("editor_session", {}) or {}), **keep,
+                                      "saved_at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+    return db.get_setting("editor_session")

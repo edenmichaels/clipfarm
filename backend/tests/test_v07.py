@@ -77,9 +77,10 @@ def _moment_edl(mtype="Action/Explosion"):
 
 def test_auto_effects_match_the_moment_and_rerun_cleanly(fresh_db):
     e = _moment_edl()
-    e["zooms"] = [{"t": 12.0, "kind": "punch", "amount": 1.1, "dur": 0.5}]          # added by hand
+    e["zooms"] = [{"t": 12.0, "kind": "punch", "amount": 0.1, "dur": 0.5}]          # added by hand
     a = effects.auto_effects(e)
-    assert any(z["t"] == 20.0 and z["amount"] > 1.2 for z in a["zooms"])
+    # v0.8.3: amounts are "+N %" (0.24 = 124 %), not scale factors -- 1.24 used to render at 224 %
+    assert any(z["t"] == 20.0 and 0.2 < z["amount"] < 0.3 for z in a["zooms"])
     kinds = {o["kind"] for o in a["overlays"]}
     assert {"flash", "shake", "emoji"} <= kinds
     assert any(s["id"] == "boom" and s["t"] == 20.0 for s in a["sfx"]) and any(s["id"] == "whoosh" for s in a["sfx"])
@@ -94,7 +95,7 @@ def test_auto_effects_match_the_moment_and_rerun_cleanly(fresh_db):
 def test_auto_zoom_snaps_to_the_beat(fresh_db):
     e = _moment_edl("Funny")
     e["music"].update(enabled=True, path="/m.m4a", zoom_beats=[T.to_out(e, 20.0) + 0.2])
-    z = next(z for z in effects.auto_effects(e, sfx=False)["zooms"] if z["amount"] > 1.1)
+    z = next(z for z in effects.auto_effects(e, sfx=False)["zooms"] if z["amount"] > 0.1)
     assert abs(T.to_out(e, z["t"]) - (T.to_out(e, 20.0) + 0.2)) < 0.01
 
 

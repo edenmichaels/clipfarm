@@ -152,7 +152,7 @@ export function LibrarySettings() {
         <h2>Your SFX and B-roll folders</h2>
         <span className="warn-text small-text">Only add files you have the rights to use commercially on TikTok, Reels, Shorts and X. ClipFarm never downloads sounds or video for you.</span>
         <label className="row" style={{ gap: 8 }}><input type="checkbox" checked={ok} onChange={(e) => setOk(e.target.checked)} /> I have the rights to use everything in these folders</label>
-        {[["sfx_dir", "Sound effects folder"], ["broll_dir", "B-roll folder (name files after what they show, e.g. cops.mp4)"]].map(([k, l]) => (
+        {[["sfx_dir", "Sound effects folder"], ["broll_dir", "B-roll folder (name files after what they show, e.g. cops.mp4)"], ["stickers_dir", "Sticker folder (PNG/WebP with transparency)"]].map(([k, l]) => (
           <div key={k} className="row between">
             <span>{l}: <span className="muted">{folders[k] || "not set"}</span></span>
             <span className="row" style={{ gap: 6 }}>
