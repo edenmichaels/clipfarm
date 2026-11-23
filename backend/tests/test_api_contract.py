@@ -481,7 +481,7 @@ def test_v07_routes(client, tmp_path):
     v = call(client, "POST", f"/edit/{cid}/hooks", route="/edit/{cid}/hooks")
     assert len(v["edl"]["hook"]["options"]) >= 3 and "dylanpage" in v["edl"]["texts"]["tiktok"]["hashtags"]
     v = call(client, "POST", f"/edit/{cid}/effects", route="/edit/{cid}/effects", json={})
-    assert any(z.get("auto") for z in v["edl"]["zooms"])
+    assert not any(z.get("auto") for z in v["edl"]["zooms"])          # v0.8.5: zoom cuts are off by default
     v = call(client, "POST", f"/edit/{cid}/effects", route="/edit/{cid}/effects", json={"clear": True})
     assert not any(z.get("auto") for z in v["edl"]["zooms"])
     fx = call(client, "GET", "/sfx")

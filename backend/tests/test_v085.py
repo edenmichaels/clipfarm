@@ -239,10 +239,13 @@ def test_glyphs_never_change_size_or_position_within_a_caption(fresh_db, tmp_pat
     from clipfarm.editing.ffmpeg_util import ffmpeg_bin
     words = [{"word": w, "start": 0.2 + i * 0.4, "end": 0.5 + i * 0.4} for i, w in enumerate(["NO", "WAY", "BRO"])]
 
+    import shutil
+    shutil.copytree(C.fonts_dir(), tmp_path / "fonts", dirs_exist_ok=True)   # relative: Windows paths break the filter
+
     def frames(style):
         tr = C.build_track(words, tmp_path / "c.ass", style, vocab=False)
         subprocess.run([ffmpeg_bin(), "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=0x505050:s=1080x1920:r=30:d=1.6",
-                        "-vf", f"format=rgb24,ass=c.ass:fontsdir={C.fonts_dir()}", "-pix_fmt", "rgb24",
+                        "-vf", f"format=rgb24,ass=c.ass:fontsdir=fonts", "-pix_fmt", "rgb24",
                         "-f", "rawvideo", "out.raw"], check=True, cwd=tmp_path)
         return tr, np.fromfile(tmp_path / "out.raw", np.uint8).reshape(-1, 1920, 1080, 3).astype(int)[8:40]
     _, plain = frames({"base": "bold_pop", "highlight": "FFFFFF"})
