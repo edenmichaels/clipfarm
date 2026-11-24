@@ -192,7 +192,7 @@ def test_migration_v13_moves_old_deletes_into_recently_deleted(tmp_path, monkeyp
     db.init_db(tmp_path / "old.db", upto=12)
     db.ex("INSERT INTO clips(title, deleted_at) VALUES ('old', datetime('now','-2 days'))")
     applied = migrations.run(db.connect())
-    assert 13 in applied and migrations.LATEST == 13
+    assert 13 in applied and migrations.LATEST >= 13
     assert db.q1("SELECT purge_after FROM clips WHERE title='old'")["purge_after"]
     cols = {r[1] for r in db.connect().execute("PRAGMA table_info(posts)")}
     assert {"stage", "publish_id", "sent_at"} <= cols

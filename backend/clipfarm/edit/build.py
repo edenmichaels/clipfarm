@@ -68,8 +68,8 @@ def auto_edit(*, media: Path, start: float, end: float, words: list[dict], strea
     if peak is not None and settings.get("zoom", True) and FX.zoom_cuts_on(e):
         e["zooms"] = [{"t": round(peak - 0.15, 3), "kind": "punch", "amount": 0.12, "dur": 1.0, "auto": True}]
     e["progress_bar"] = settings.get("progress_bar", True)
-    # music
-    plan_music(e, account_ids, settings, program, seed=moment.get("id"))
+    # music: OFF (v0.8.7). Exports use the original stream audio; music is a manual Editor option only.
+    e["music"].update({"enabled": False, "path": None, "track_id": None, "mode": None, "manual": False})
     # Trending Style: clip's own -> campaign -> account -> streamer -> global -> automatic
     if style or (db.get_setting("styles", {}) or {}).get("auto", True):
         key, why = (style, "clip") if style else styles.default_for(

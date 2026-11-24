@@ -69,34 +69,34 @@ BUILTINS: dict[str, dict] = {s["key"]: s for s in [
            "Gameplay fills the frame with the facecam in a top corner; cuts to the streamer when they're the moment.",
            {"mode": "corner", "cam_ratio": 0.40, "pip_w": 0.34, "focus": True, "seam_line": False},
            dict(_CAP), {"box": "white_box", "whole": True, "seconds": 4.0}, dict(_PACE), dict(_FX),
-           {"music": True, "music_db": -3.0}),
+           {"music": False, "music_db": -3.0}),
     _style("streamer_split", "Streamer Split",
            "Facecam on top, gameplay below, static captions at the bottom, white-box title.",
            {"mode": "split", "cam_ratio": 0.40, "pip_w": 0.34, "focus": False, "seam_line": True},
            dict(_CAP), {"box": "white_box", "whole": True, "seconds": 4.0}, dict(_PACE), dict(_FX),
-           {"music": True, "music_db": -3.0}),
+           {"music": False, "music_db": -3.0}),
     _style("full_reaction", "Full Reaction",
            "The streamer fills the screen: IRL, Just Chatting and big reactions.",
            {"mode": "full_reaction", "cam_ratio": 0.40, "pip_w": 0.34, "focus": True, "seam_line": False},
            dict(_CAP, words=2), {"box": "white_box", "whole": False, "seconds": 4.0}, dict(_PACE),
-           dict(_FX, emoji=True), {"music": True, "music_db": -3.0}),
+           dict(_FX, emoji=True), {"music": False, "music_db": -3.0}),
     _style("gameplay_only", "Gameplay Only",
            "No facecam: one fixed crop on the action, captions at the bottom, outline title.",
            {"mode": "gameplay", "cam_ratio": 0.40, "pip_w": 0.34, "focus": False, "seam_line": False},
            dict(_CAP), {"box": "outline", "whole": False, "seconds": 4.0}, dict(_PACE, max_gap=0.6), dict(_FX),
-           {"music": True, "music_db": 0.0}),
+           {"music": False, "music_db": 0.0}),
     _style("meme_high_energy", "Meme / High Energy",
            "One word at a time, a flash and a sound effect on the payoff, reaction emojis. For chaos and fails.",
            {"mode": "auto", "cam_ratio": 0.42, "pip_w": 0.36, "focus": True, "seam_line": True},
            dict(_CAP, template="hype_yellow", words=1, highlight_color="3DFF5A"),
            {"box": "black_box", "whole": False, "seconds": 3.0}, dict(_PACE, max_gap=0.3),
-           {"flash": True, "sfx": True, "emoji": True}, {"music": True, "music_db": 0.0}),
+           {"flash": True, "sfx": True, "emoji": True}, {"music": False, "music_db": 0.0}),
     _style("clean", "Clean",
            "Captions without a highlight, no title box, no effects.",
            {"mode": "auto", "cam_ratio": 0.38, "pip_w": 0.32, "focus": False, "seam_line": False},
            dict(_CAP, template="minimal", highlight=False, highlight_color="FFFFFF"),
            {"box": "none", "whole": False, "seconds": 3.0}, dict(_PACE, cut_silence=False, max_gap=0.8), dict(_FX),
-           {"music": True, "music_db": -6.0}),
+           {"music": False, "music_db": -6.0}),
 ]}
 DEFAULT = "streamer_corner"
 
@@ -109,6 +109,8 @@ def legacy_changes(style: dict) -> list[str]:
         out.append(f"captions {style['captions']['position']} -> static at the bottom")
     if (style.get("title") or {}).get("position") == "seam":
         out.append("title on the seam -> fixed at the top")
+    if (style.get("audio") or {}).get("music"):
+        out.append("background music -> off")
     if (style.get("effects") or {}).get("shake"):
         out.append("screen shake -> off")
     p = style.get("pacing") or {}
@@ -179,7 +181,12 @@ def get(key: str | None) -> dict:
 
 def convert_saved(data: dict) -> tuple[dict, list[str]]:
     """A style saved before v0.8.5 -> the static version, and what changed (for the one-time notice)."""
-    return clean(data), legacy_changes(data)
+    out = clean(data)
+    what = legacy_changes(data)
+    if (data.get("audio") or {}).get("music"):
+        what.append("background music -> off (add music by hand in the Editor if you want it)")
+    out["audio"]["music"] = False
+    return out, what
 
 
 def save(name: str, style: dict, style_id: int | None = None, ref_id: int | None = None) -> dict:
@@ -374,10 +381,9 @@ def apply(edl: dict, style: dict | str) -> dict:
     c["emoji"] = bool(fx["emoji"])
 
     # audio
+    # v0.8.7: styles never add music. Original stream audio only, unless you picked a track in the Editor.
     m = e["music"]
-    if not au["music"]:
+    if not m.get("manual"):
         m["enabled"] = False
-    elif m.get("path") and not e["rules"].get("no_music"):
-        m["enabled"] = True
     m["volume_db"] = float(au["music_db"])
     return e

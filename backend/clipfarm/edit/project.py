@@ -31,7 +31,7 @@ def blank(source: dict, words: list[dict], start: float, end: float) -> dict:
         "overlays": [],                                     # [{kind: emoji|flash|shake|image, t, dur, ...}]
         "broll": [],                                        # [{path, t, dur, licence}]
         "sfx": [],                                          # [{id, path, t, gain_db, licence}]
-        "music": {"enabled": True, "track_id": None, "path": None, "offset": 0.0, "entry": 0.0, "delay": 0.0,
+        "music": {"enabled": False, "manual": False, "track_id": None, "path": None, "offset": 0.0, "entry": 0.0, "delay": 0.0,
                   "volume_db": 0.0, "duck_db": 15.0, "beats": [], "mode": None, "loudness": None},
         "audio": {"speech_gain_db": 0.0, "enhance": False, "denoise": False, "target_lufs": -14.0},
         "moment": {"type": None, "reason": None, "peak": None, "score": None, "viral": None, "tags": [], "why": []},

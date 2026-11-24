@@ -1151,6 +1151,7 @@ def edit_music(cid: int, body: dict):
     e = edit_build.plan_music(json.loads(json.dumps(p["edl"])), [], settings, prog, track=track)
     if not e["music"].get("enabled"):
         raise HTTPException(409, e["music"].get("why_off") or "Music isn't allowed for this clip.")
+    e["music"]["manual"] = True                          # you chose it: styles and re-edits keep it
     return _view(edit_project.save(cid, e, f"Music: {e['music'].get('title')}"))
 
 
@@ -1487,6 +1488,45 @@ def yt_callback(code: str = Query(...), state: str = Query(...)):
     aid = connect_account("youtube", res["handle"], res["channel_id"])
     secrets.set_secret(f"account:{aid}", res["token"])
     return HTMLResponse("<h2>YouTube connected to ClipFarm. You can close this tab.</h2>")
+
+
+# ---- v0.8.7: Live Watcher ---------------------------------------------------------------------------------------
+@app.get("/live/status", dependencies=A)
+def live_status():
+    from .live import watcher
+    return watcher.manager().status()
+
+
+@app.get("/live/candidates", dependencies=A)
+def live_candidates():
+    """Streamers you can watch: Twitch, permitted (campaign or permission)."""
+    out = []
+    for s in db.q("SELECT id, display_name, login, platform FROM streamers WHERE platform='twitch' ORDER BY display_name"):
+        ok, why = compliance.can_clip(s["id"])
+        out.append({**s, "allowed": ok, "why": None if ok else why})
+    return out
+
+
+@app.put("/live/settings", dependencies=A)
+def live_settings(body: dict):
+    from .live import watcher
+    kw = {}
+    if "streamers" in body:
+        ids = [int(x) for x in body["streamers"]]
+        bad = [i for i in ids if not compliance.can_clip(i)[0]]
+        if bad:
+            raise HTTPException(400, "Only streamers you have permission (or a campaign) for can be watched.")
+        kw["streamers"] = ids
+    if "paused" in body:
+        kw["paused"] = bool(body["paused"])
+    if "threshold" in body:
+        kw["threshold"] = max(1.0, min(10.0, float(body["threshold"])))
+    if "per_hour" in body:
+        kw["per_hour"] = max(1, min(20, int(body["per_hour"])))
+    s = watcher.save_settings(**kw)
+    if s["streamers"]:
+        watcher.manager().start()
+    return watcher.manager().status()
 
 
 # ---- v0.8.6: TikTok and Instagram sign-in, posting overview, Post Kit, Send to phone, audit ----------------

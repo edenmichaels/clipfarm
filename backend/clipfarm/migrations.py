@@ -430,9 +430,60 @@ def _v13(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE clips SET purge_after=datetime('now','+7 days') WHERE deleted_at IS NOT NULL AND purge_after IS NULL")
 
 
+# ---- v14 (0.8.7): Live Watcher, music off by default -----------------------------------------------------------
+def _v14(conn: sqlite3.Connection) -> None:
+    _script(conn, """
+    CREATE TABLE IF NOT EXISTS live_moments (
+        id            INTEGER PRIMARY KEY,
+        streamer_id   INTEGER NOT NULL REFERENCES streamers(id) ON DELETE CASCADE,
+        trigger       TEXT NOT NULL,                 -- chat | laughter | scream | viewer_clip
+        trigger_t     REAL NOT NULL,                 -- wall-clock (epoch) of the trigger
+        cut_start     REAL NOT NULL, cut_end REAL NOT NULL,
+        path          TEXT,                          -- the 60-90 s cut (deleted unless kept)
+        words TEXT, chat TEXT, signals TEXT,
+        judge_score   REAL, reason TEXT, best_start REAL, best_end REAL, moment_type TEXT, llm INTEGER,
+        viewer_clips  INTEGER, chat_bonus REAL, final_score REAL,
+        status        TEXT NOT NULL DEFAULT 'pending',   -- pending | kept | dropped
+        confirm_at    REAL, clip_json TEXT, moment_id INTEGER,
+        created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+        created_epoch REAL NOT NULL DEFAULT (CAST(strftime('%s','now') AS REAL))
+    );
+    CREATE INDEX IF NOT EXISTS live_moments_due ON live_moments(status, confirm_at);
+    CREATE TABLE IF NOT EXISTS live_events (
+        id INTEGER PRIMARY KEY, streamer_id INTEGER NOT NULL, kind TEXT NOT NULL, t REAL NOT NULL, data TEXT
+    );
+    CREATE INDEX IF NOT EXISTS live_events_t ON live_events(streamer_id, kind, t)
+    """)
+    # Music off: projects that got music automatically go back to the original stream audio.
+    for pid, head, data in conn.execute("SELECT id, head, data FROM edit_projects").fetchall():
+        try:
+            edl = json.loads(data)
+        except ValueError:
+            continue
+        m = edl.get("music") or {}
+        if m.get("enabled") and not m.get("manual"):
+            edl["music"] = {**m, "enabled": False}
+            blob = json.dumps(edl)
+            conn.execute("UPDATE edit_projects SET data=? WHERE id=?", (blob, pid))
+            conn.execute("UPDATE edit_versions SET data=? WHERE project_id=? AND version=?", (blob, pid, head))
+    if "styles" in {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}:
+        changed = []
+        for sid, name, data in conn.execute("SELECT id, name, data FROM styles").fetchall():
+            try:
+                st = json.loads(data)
+            except ValueError:
+                continue
+            if (st.get("audio") or {}).get("music"):
+                st["audio"]["music"] = False
+                conn.execute("UPDATE styles SET data=? WHERE id=?", (json.dumps(st), sid))
+                changed.append({"name": name, "changes": ["background music -> off"]})
+        if changed:
+            _set(conn, "style_notices", (_get(conn, "style_notices", []) or []) + changed)
+
+
 MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [(2, _v2), (3, _v3), (4, _v4), (5, _v5), (6, _v6),
                                                                       (7, _v7), (8, _v8), (9, _v9), (10, _v10),
-                                                                      (11, _v11), (12, _v12), (13, _v13)]
+                                                                      (11, _v11), (12, _v12), (13, _v13), (14, _v14)]
 LATEST = MIGRATIONS[-1][0]
 
 

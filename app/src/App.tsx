@@ -6,6 +6,7 @@ import { Brand } from "./components/Icons";
 import Setup from "./pages/Setup";
 import Dashboard from "./pages/Dashboard";
 import NewProject from "./pages/NewProject";
+import LiveWatcher from "./pages/LiveWatcher";
 import MyClips from "./pages/MyClips";
 import Editor from "./pages/Editor";
 import Settings from "./pages/Settings";
@@ -13,12 +14,12 @@ import Earnings from "./pages/Earnings";
 import { listenForImports } from "./lib/campaignBrowser";
 
 /** The six screens in the menu. */
-export type MainPage = "dashboard" | "new" | "editor" | "clips" | "earnings" | "settings";
+export type MainPage = "dashboard" | "live" | "new" | "editor" | "clips" | "earnings" | "settings";
 /** Older screen names still work and open where that screen lives now. */
 export type Page = MainPage | "review" | "submissions" | "campaigns" | "programs" | "health" | "logs";
 
 const NAV: [MainPage, string][] = [
-  ["editor", "Editor"], ["dashboard", "Home"], ["new", "New Project"], ["clips", "My Clips"], ["earnings", "Earnings"],
+  ["editor", "Editor"], ["dashboard", "Home"], ["live", "Live Watcher"], ["clips", "My Clips"], ["earnings", "Earnings"],
   ["settings", "Settings"],
 ];
 
@@ -196,6 +197,7 @@ export default function App() {
           </div>
         )}
         {page === "dashboard" && <Dashboard go={go} />}
+        {page === "live" && <LiveWatcher go={go} />}
         {page === "new" && <NewProject done={() => go("dashboard")} go={go} />}
         {page === "editor" && <Editor go={go} initialClip={tab?.startsWith("clip:") ? Number(tab.slice(5)) : undefined} />}
         {page === "clips" && <MyClips initialTab={tab} go={go} />}

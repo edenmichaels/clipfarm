@@ -1,5 +1,13 @@
 # ClipFarm changelog
 
+## 0.8.7: Live Watcher, a different hook on every clip, no auto music
+
+- **Live Watcher (the new default):** watches the streamers you pick while they're live, using chat, new viewer clips, and laughter from a 3-minute buffer. When something happens, an AI judge scores it; anything rated 7/10 or higher (after checking viewer clips and chat 10 minutes later) becomes a clip in My Clips. Everything else is deleted.
+- **Live Watcher panel:** pick streamers, see who's live, close looks this hour, clips kept, CPU and disk use, and a Pause button. Your thumbs up/down in the Editor teach the judge.
+- **Different hooks:** every clip gets its own hook from its own transcript and never repeats one of your last 50. If the AI model isn't running you get a warning, and the hook is written from the clip's words instead of "Wait for it...".
+- **Music off:** no style or auto-edit adds background music any more. Exports use the stream's own audio, and music is a manual Editor option. Existing clips and saved styles were switched over too (migration v14).
+- **Post & Submit:** TikTok now has an "Add a trending sound in TikTok before posting" step. Sound campaigns you've joined (like "Tokyo Girl") show as a reminder on clips they fit; the song is never put in the video. "Scan a past stream" (the old VOD scan) is still there.
+
 ## 0.8.6: manage My Clips, and post more from inside the app
 
 ### My Clips

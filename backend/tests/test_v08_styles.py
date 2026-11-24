@@ -211,6 +211,7 @@ def test_auto_edit_picks_the_style_and_caption_defaults_still_win(fresh_db, tmp_
     e = build.auto_edit(**kw)
     assert e["style"]["key"] == "streamer_corner" and e["style"]["source"] == "automatic"
     assert e["zooms"] == []                                            # v0.8.5: no automatic zoom by default
+    assert e["music"]["enabled"] is False                              # v0.8.7: original stream audio only
     db.set_setting("editing", {"zoom_cuts": True})
     assert [z["t"] for z in build.auto_edit(**kw)["zooms"]] == [3.85]  # switched on: one instant cut on the payoff
     db.set_setting("editing", {})

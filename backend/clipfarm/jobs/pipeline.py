@@ -314,7 +314,8 @@ def render_moment(payload: dict, ctx: JobContext) -> None:
     ctx.progress(0.3)
     transcript = " ".join(w["word"] for w in words)
     mtype = m.get("type") or "Funny"
-    pkg = generate_package(transcript, streamer["display_name"], game["name"], reqs["tags"])
+    pkg = generate_package(transcript, streamer["display_name"], game["name"], reqs["tags"], words=words,
+                           moment_type=mtype, reason=m.get("reason"))
     platform_url = {"twitch": "twitch.tv/", "kick": "kick.com/", "youtube": "youtube.com/"}[streamer["platform"]]
     credit = (reqs["credit"] or "{url}").replace("{url}", platform_url + streamer["login"]) \
         .replace("{name}", streamer["display_name"])
@@ -370,6 +371,10 @@ def render_moment(payload: dict, ctx: JobContext) -> None:
         review_flags.append("Campaign needs the full frame but a different layout was rendered.")
     caption = rules.caption_text(pkg["title"], pkg["description"], pkg["hashtags"], credit, reqs["disclosure"],
                                  req["tags"])
+    if not pkg.get("llm"):
+        from ..editing.hooks import LLM_OFF_WARNING
+        review_flags.append(LLM_OFF_WARNING)
+        db.log("warn", "hooks", LLM_OFF_WARNING)
     missing = rules.check_caption(caption, req)
     if missing:
         review_flags.append("Caption is missing: " + ", ".join(missing))

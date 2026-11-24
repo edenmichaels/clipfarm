@@ -732,6 +732,21 @@ def test_v086_library_and_posting_routes(client, tmp_path, monkeypatch):
     assert e["purged"] == 1 and not f.exists()
 
 
+def test_v087_live_watcher_routes(client, tmp_path):
+    sid, prog, cid, f = _linked_clip(tmp_path)
+    cands = call(client, "GET", "/live/candidates")
+    st = call(client, "GET", "/live/status")
+    assert st["paused"] is False and st["threshold"] == 7.0 and "cpu_percent" in st and "disk_bytes" in st
+    allowed = [c["id"] for c in cands if c["allowed"]]
+    st = call(client, "PUT", "/live/settings", json={"streamers": allowed[:1], "threshold": 8, "paused": True})
+    assert st["paused"] is True and st["threshold"] == 8.0
+    blocked = [c["id"] for c in cands if not c["allowed"]]
+    if blocked:
+        call(client, "PUT", "/live/settings", json={"streamers": blocked[:1]}, expect=400)
+    from clipfarm.live import watcher
+    watcher.manager().shutdown()
+
+
 def test_every_route_is_covered():
     from clipfarm import api
     routes = set()

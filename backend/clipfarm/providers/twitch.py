@@ -115,6 +115,23 @@ class TwitchProvider:
         return [SourceHit(kind, c["id"], c["url"], c["title"], c["view_count"], c["duration"],
                           c["created_at"], vod_offset_sec=c.get("vod_offset")) for c in data]
 
+    def live_status(self, user_ids: list[str]) -> dict[str, dict]:
+        """{user_id: stream} for those of user_ids that are live right now (Get Streams, one light request)."""
+        if not user_ids:
+            return {}
+        params = [("user_id", u) for u in user_ids[:100]] + [("first", "100")]
+        data = self.http.get("streams", self._headers(), params).get("data", [])
+        return {d["user_id"]: d for d in data}
+
+    def recent_clips(self, user_id: str, since_iso: str) -> list[dict]:
+        """Viewer-made clips created since a time (Get Clips). created_at is when the clip was made; a clip covers
+        roughly the `duration` seconds before that."""
+        data = self.http.get("clips", self._headers(), {"broadcaster_id": user_id, "started_at": since_iso,
+                                                         "first": 50}).get("data", [])
+        return [{"id": c["id"], "created_at": c["created_at"], "duration": float(c.get("duration") or 30),
+                 "views": c.get("view_count", 0), "title": c.get("title"), "url": c.get("url"),
+                 "vod_offset": c.get("vod_offset")} for c in data]
+
     def top_clips_for_game(self, game_id: str, days: int = 7, n: int = 100) -> list[dict]:
         """The most-viewed community clips for a game over the last `days` (Helix returns them by views).
         Official API only: https://dev.twitch.tv/docs/api/reference/#get-clips"""

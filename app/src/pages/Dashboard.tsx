@@ -35,7 +35,8 @@ export default function Dashboard({ go }: { go: (p: Page, tab?: string) => void 
           <h1>Home</h1>
           <p className="muted">{projects.length ? `${projects.length} project${projects.length === 1 ? "" : "s"} running` : "Nothing running right now"}</p>
         </div>
-        <button className="btn-primary big" onClick={() => go("new")}>New Project</button>
+        <button className="btn-primary big" onClick={() => go("live")}>Live Watcher</button>
+        <button className="btn-ghost" onClick={() => go("new")}>Scan a past stream</button>
       </header>
 
       {problems.length > 0 && (

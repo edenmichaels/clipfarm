@@ -125,6 +125,7 @@ export default function Submissions() {
                     {(s.code === "auto_posted" || s.code === "posted") && s.url && <button className="btn-quiet" onClick={() => openUrl(s.url)}>Open</button>}
                   </span>))}
               </div>
+              {(row.sounds || []).map((n: string) => <span key={n} className="small-text">🎵 {n}</span>)}
               {row.statuses.filter((s: any) => s.note && s.code !== "waiting").map((s: any) => <span key={s.account_id} className="muted small-text">{NAME[s.platform]}: {s.note}</span>)}
             </div>
           </div>))}

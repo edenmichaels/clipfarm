@@ -38,7 +38,8 @@ with sync_playwright() as p:
     shot(page, "1-home", full=False)
     page.locator("nav.side").screenshot(path=str(out / "0-menu.png"))
 
-    page.get_by_role("button", name="New Project").first.click()
+    nb = page.get_by_role("button", name="New Project")
+    (nb if nb.count() else page.get_by_role("button", name="Scan a past stream")).first.click()
     page.wait_for_timeout(1500)
     shot(page, "2-new-project-step1")
 

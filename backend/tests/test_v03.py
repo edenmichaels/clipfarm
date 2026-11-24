@@ -249,7 +249,9 @@ def test_menu_has_at_most_six_items_and_old_screens_reachable():
     nav = re.search(r"const NAV[^=]*=\s*\[(.*?)\];", app, re.S).group(1)
     items = re.findall(r'\[\s*"(\w+)"\s*,\s*"([^"]+)"', nav)
     # v0.8.3: the Editor is the app, so it comes first (and opens at start-up)
-    assert [label for _, label in items] == ["Editor", "Home", "New Project", "My Clips", "Earnings", "Settings"]
+    # v0.8.7: Live Watcher replaces New Project in the menu ("Scan a past stream" is on Home and Live Watcher)
+    assert [label for _, label in items] == ["Editor", "Home", "Live Watcher", "My Clips", "Earnings", "Settings"]
+    assert "<NewProject" in app
     assert 'useState<MainPage>("editor")' in app
     # Every v0.2 screen still exists and is mounted somewhere (v0.6: the Editor replaced Review).
     src = "\n".join(p.read_text(encoding="utf-8") for p in (ROOT / "app" / "src").rglob("*.tsx"))

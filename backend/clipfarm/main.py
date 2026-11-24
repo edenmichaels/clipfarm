@@ -143,6 +143,11 @@ def _startup_jobs() -> None:
         if not db.q1("SELECT 1 FROM jobs WHERE kind=? AND status IN ('queued','running')", (kind,)):
             enqueue(kind, payload or {}, priority=priority, delay_sec=delay)
 
+    try:                                       # v0.8.7: Live Watcher (only if you picked streamers)
+        from .live import watcher
+        watcher.start_if_configured()
+    except Exception as e:                     # noqa: BLE001
+        db.log("error", "live", f"Live Watcher didn't start: {e}")
     once("health_check", delay=3, priority=1)
     once("post_due", delay=60, priority=3)
     once("metrics", delay=600, priority=8)

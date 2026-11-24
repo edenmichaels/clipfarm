@@ -81,7 +81,7 @@ def post(platform: str, account_id: int, clip: dict, post_id: int | None = None)
 
 
 # ---- Post Kit ------------------------------------------------------------------------------------------------
-def checklist(platform: str, t: dict, trending: str | None = None) -> list[str]:
+def checklist(platform: str, t: dict, trending: str | None = None, sounds: list[dict] | None = None) -> list[str]:
     tags = [x for x in t["required_tags"]]
     steps = {
         "tiktok": ["Drag the video in (Explorer is open with it selected)", "Paste the caption (it's on your clipboard)"],
@@ -94,8 +94,14 @@ def checklist(platform: str, t: dict, trending: str | None = None) -> list[str]:
         steps.append(f"Check the campaign hashtag {tag} is in the caption")
     if t.get("disclosure"):
         steps.append(f"Check the disclosure is there: {t['disclosure']}")
-    if trending and platform in ("tiktok", "instagram"):
-        steps.append(f"Optional: add the trending sound \"{trending}\"")
+    if platform == "tiktok":
+        steps.append("Add a trending sound in TikTok before posting (keep the clip's original audio, sound low)"
+                     + (f", e.g. \"{trending}\"" if trending else ""))
+    elif trending and platform == "instagram":
+        steps.append(f"Optional: add the trending sound \"{trending}\" (keep the original audio)")
+    for snd in sounds or []:
+        if platform in ("tiktok", "instagram"):
+            steps.append(snd["note"])
     steps += ["Post", "Copy the post's link and paste it below"]
     return steps
 
@@ -112,6 +118,8 @@ def kit(post_id: int) -> dict:
         from ..music import trending as tm
         s = tm.suggest(clip.get("moment_type") or "Funny", p["platform"], 1)
         trending = (s[0]["name"] if s else None)
+    from ..music.trending import sound_campaigns
+    sounds = sound_campaigns(clip)
     caption = t["caption"]
     if p["platform"] == "youtube":
         caption = f"{t['title']}\n\n{caption}" if t["title"] and t["title"] not in caption else caption
@@ -119,8 +127,8 @@ def kit(post_id: int) -> dict:
     return {"post_id": post_id, "platform": p["platform"], "platform_name": PLATFORM_NAME.get(p["platform"]),
             "handle": p["handle"], "caption": caption, "title": t["title"], "hashtags": t["hashtags"],
             "upload_url": UPLOAD_PAGES.get(p["platform"]), "file": clip.get("file_path"),
-            "nomusic_file": clip.get("nomusic_path"), "checklist": checklist(p["platform"], t, trending),
-            "trending": trending}
+            "nomusic_file": clip.get("nomusic_path"), "checklist": checklist(p["platform"], t, trending, sounds),
+            "trending": trending, "sound_campaigns": sounds}
 
 
 def reveal_command(path: str) -> list[str]:
@@ -181,6 +189,7 @@ def status_of(post: dict | None, acct: dict, clip: dict) -> dict:
 
 
 def overview() -> dict:
+    from ..music.trending import sound_campaigns
     accts = db.q("SELECT * FROM accounts ORDER BY CASE platform WHEN 'youtube' THEN 0 WHEN 'tiktok' THEN 1 "
                  "WHEN 'instagram' THEN 2 ELSE 3 END, id")
     clips = db.q("""SELECT c.*, s.display_name streamer, pr.name program FROM clips c
@@ -203,7 +212,8 @@ def overview() -> dict:
         done = all(s["code"] in ("posted", "auto_posted", "submitted", "not_allowed") for s in st)
         rows.append({"clip_id": c["id"], "title": c["title"], "streamer": c["streamer"], "program": c["program"],
                      "thumb_path": c["thumb_path"], "virality": c.get("virality"), "file_path": c["file_path"],
-                     "projected_aud": c.get("profit_likely"), "statuses": st, "done": done})
+                     "projected_aud": c.get("profit_likely"), "statuses": st, "done": done,
+                     "sounds": [x["note"] for x in sound_campaigns(c)]})
     return {"clips": [r for r in rows if not r["done"]], "done": [r for r in rows if r["done"]][:50],
             "accounts": [account_card(a) for a in accts]}
 
