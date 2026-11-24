@@ -58,7 +58,7 @@ def test_bold_box_draws_a_static_rounded_box_and_hype_a_green_word(fresh_db, tmp
     words = [{"word": w, "start": 0.5 + i * 0.4, "end": 0.8 + i * 0.4} for i, w in enumerate("no way he did that".split())]
     tr = C.build_track(words, tmp_path / "b.ass", {**C.preset("bold_pop").as_dict(), "box": True, "outline_px": 0},
                        hook="Title", title_box="color_box", title_color="7C4DFF", vocab=False)
-    ass = (tmp_path / "b.ass").read_text()
+    ass = (tmp_path / "b.ass").read_text(encoding="utf-8")
     assert "\\p1}m " in ass and "TitleColorBox" in ass and "&H00FF4D7C" in ass.upper()
     assert not re.search(r"\\(t\(|fad|move|fscy)", ass)                          # nothing animates
     boxes = [ln for ln in ass.splitlines() if "CapBox" in ln and "Dialogue" in ln]
@@ -225,11 +225,11 @@ def test_kick_and_youtube_checks(fresh_db, monkeypatch):
 
 
 def test_picker_polls_every_minute_and_stops_when_closed():
-    src = (APP / "components" / "LiveDot.tsx").read_text()
+    src = (APP / "components" / "LiveDot.tsx").read_text(encoding="utf-8")
     assert "POLL_MS = 60_000" in src and "setInterval(load, POLL_MS)" in src
     assert "clearInterval(timer.current)" in src and "if (!open || !key) return;" in src
-    lw = (APP / "pages" / "LiveWatcher.tsx").read_text()
+    lw = (APP / "pages" / "LiveWatcher.tsx").read_text(encoding="utf-8")
     assert "useLiveStatus(cands.map((c) => c.id), picking)" in lw               # only while the picker is open
     for f in ("components/StreamerSections.tsx", "components/StreamerTable.tsx", "pages/LiveWatcher.tsx"):
-        t = (APP / f).read_text()
+        t = (APP / f).read_text(encoding="utf-8")
         assert "<LiveDot" in t and "liveRank" in t                              # dot + live first, everywhere

@@ -599,8 +599,9 @@ def test_v08_styles_and_style_refs(client, tmp_path):
     import subprocess
     from PIL import Image
     st = call(client, "GET", "/styles")
-    assert [x["key"] for x in st["styles"]][:6] == ["streamer_corner", "streamer_split", "full_reaction", "gameplay_only",
-                                                     "meme_high_energy", "clean"]
+    assert [x["key"] for x in st["styles"]][:6] == ["streamer_corner", "split_screen", "bold_box", "clean_minimal",
+                                                     "hype", "facecam_focus"]      # v0.8.8 presets first
+    assert {"streamer_split", "full_reaction", "gameplay_only", "meme_high_energy", "clean"} <= {x["key"] for x in st["styles"]}
     assert st["fields"]["layout.cam_ratio"] == [0.35, 0.45]
     mine = dict(st["styles"][0], name="Mine")
     mine["layout"]["cam_ratio"] = 0.43
