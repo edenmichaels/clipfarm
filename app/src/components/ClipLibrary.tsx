@@ -167,7 +167,7 @@ export default function ClipLibrary({ onOpen, onSendToPost }: { onOpen: (c: Clip
 
       {confirm && (
         <div className="modal-back" onClick={() => setConfirm(null)}>
-          <div className="card modal stack tight" role="dialog" aria-label="Delete clips" onClick={(e) => e.stopPropagation()}>
+          <div className="dlg stack tight" role="dialog" aria-label="Delete clips" onClick={(e) => e.stopPropagation()}>
             <h2>{confirm.message}</h2>
             {confirm.notes.map((n: string) => <span key={n} className="muted">{n}</span>)}
             <span className="muted small-text">Deleted: the videos, previews, thumbnails and edit projects. Kept: links, views and earnings of posted clips. Source videos other clips use are kept.</span>
@@ -228,7 +228,7 @@ export function RecentlyDeleted() {
         </div>)}
       {ask && (
         <div className="modal-back" onClick={() => setAsk(false)}>
-          <div className="card modal stack tight" role="dialog" aria-label="Empty now" onClick={(e) => e.stopPropagation()}>
+          <div className="dlg stack tight" role="dialog" aria-label="Empty now" onClick={(e) => e.stopPropagation()}>
             <h2>Remove {sel.size || rows.length} clip{(sel.size || rows.length) === 1 ? "" : "s"} for good?</h2>
             <span className="muted">This frees {gb(sel.size ? rows.filter((r) => sel.has(r.id)).reduce((n, r) => n + r.bytes, 0) : total)}. You can't restore them afterwards.</span>
             <div className="row" style={{ justifyContent: "flex-end", gap: 8 }}>

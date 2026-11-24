@@ -142,7 +142,7 @@ with sync_playwright() as p:
             page.wait_for_selector("[aria-label='Post Kit']", timeout=8000)
             shot(page, "14-post-kit", full=False)
             page.keyboard.press("Escape")
-            page.locator(".modal-back").first.click(position={"x": 5, "y": 5})
+            page.wait_for_timeout(500)
         page.get_by_role("button", name="Send to phone").first.click()
         page.wait_for_selector(".qr-box svg", timeout=8000)
         shot(page, "15-send-to-phone", full=False)

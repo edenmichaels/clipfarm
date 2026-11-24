@@ -25,6 +25,11 @@ export default function Submissions() {
     api.get("/submissions?status=done").then(setDone),
   ]).catch((e) => setMsg(e.message));
   useEffect(() => { load(); const t = setInterval(load, 15000); return () => clearInterval(t); }, []);
+  useEffect(() => {                                           // Esc closes whichever box is open
+    const esc = (e: KeyboardEvent) => { if (e.key === "Escape") { setKit(null); setPhone(null); setAudit(null); } };
+    window.addEventListener("keydown", esc);
+    return () => window.removeEventListener("keydown", esc);
+  }, []);
 
   const copy = async (text: string, what: string) => { await navigator.clipboard.writeText(text); setMsg(`${what} copied.`); };
   const tick = async (s: any) => { try { await api.post(`/submissions/${s.id}`, { done: true }); load(); } catch (e: any) { setMsg(e.message); } };
@@ -149,7 +154,7 @@ export default function Submissions() {
 
       {kit && (
         <div className="modal-back" onClick={() => setKit(null)}>
-          <div className="card modal stack tight" role="dialog" aria-label="Post Kit" onClick={(e) => e.stopPropagation()}>
+          <div className="dlg stack tight" role="dialog" aria-label="Post Kit" onClick={(e) => e.stopPropagation()}>
             <h2>{kit.code === "inbox" ? `Post from your TikTok inbox` : kit.code === "inbox_posted" ? "Paste the TikTok link" : `Post to ${kit.platform_name}`} <span className="muted">{kit.handle}</span></h2>
             {kit.code === "inbox" && <span className="muted">The video is in the TikTok app: Inbox › ClipFarm notification. Add a sound if you like, paste the caption (copied), then Post.</span>}
             {kit.code !== "inbox" && kit.code !== "inbox_posted" && <span className="muted">Caption copied, upload page opened, and the video is selected in Explorer: drag it in.</span>}
@@ -170,7 +175,7 @@ export default function Submissions() {
 
       {phone && (
         <div className="modal-back" onClick={() => setPhone(null)}>
-          <div className="card modal stack tight" role="dialog" aria-label="Send to phone" onClick={(e) => e.stopPropagation()}>
+          <div className="dlg stack tight" role="dialog" aria-label="Send to phone" onClick={(e) => e.stopPropagation()}>
             <h2>Scan with your phone</h2>
             <span className="muted">Your phone must be on the same Wi-Fi. The page has Download and Copy caption. The link stops working at {phone.expires_at}.</span>
             <div className="qr-box" dangerouslySetInnerHTML={{ __html: phone.qr_svg }} />
@@ -181,7 +186,7 @@ export default function Submissions() {
 
       {audit && (
         <div className="modal-back" onClick={() => setAudit(null)}>
-          <div className="card modal stack tight" style={{ maxWidth: 900 }} role="dialog" aria-label="Posting check" onClick={(e) => e.stopPropagation()}>
+          <div className="dlg stack tight" style={{ width: "min(900px, 94vw)" }} role="dialog" aria-label="Posting check" onClick={(e) => e.stopPropagation()}>
             <h2>Your accounts</h2>
             {audit.results.map((r: any) => (
               <div key={r.account_id} className="stack tight" style={{ gap: 2 }}>

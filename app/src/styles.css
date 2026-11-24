@@ -496,3 +496,5 @@ kbd { font: 12px/1.4 ui-monospace, monospace; background: var(--panel2); border:
 .qr-box { background: #fff; border-radius: 12px; padding: 10px; align-self: center; }
 .qr-box svg { display: block; width: 220px; height: 220px; }
 .audit td, .audit th { padding: 6px 10px 6px 0; vertical-align: top; text-align: left; font-size: 13px; }
+.dlg { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 20px; width: min(560px, 94vw); max-height: 88vh; overflow: auto; box-shadow: 0 20px 60px #000a; }
+.dlg textarea { width: 100%; box-sizing: border-box; }

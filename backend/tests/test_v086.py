@@ -550,3 +550,10 @@ def test_audit_table_and_account_check_never_posts(fresh_db, monkeypatch):
     res = audit.check_all()
     assert {r["platform"] for r in res} == {"youtube", "tiktok", "instagram"}
     assert all(m != "POST" for m, *_ in http.calls)
+
+
+def test_submission_checklist_still_works(fresh_db):
+    prog = db.q1("SELECT id FROM programs LIMIT 1")["id"]
+    cid = _clip(fresh_db, program_id=prog)
+    items = platforms.submission_checklist(cid)
+    assert items[0]["item"].startswith("Post is live") and items[0]["done"] is False
