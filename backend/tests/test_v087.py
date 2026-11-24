@@ -306,3 +306,9 @@ def test_status_shows_cpu_disk_and_llm_warning(fresh_db, monkeypatch):
     st = W.Manager(provider_factory=FakeTwitch).status()
     assert st["streamers"][0]["display_name"] == "Kai" and "cpu_percent" in st and "disk_bytes" in st
     assert "AI model" in st["llm_warning"]
+
+
+def test_one_line_transcript_still_gives_three_hook_options(fresh_db, monkeypatch):
+    _no_llm(monkeypatch)
+    o = hooks.generate_options("no way the cops are here bro", "Dylanpage", "GTA VI", None)["hooks"]
+    assert len(o) >= 3 and "cops" in o[0]

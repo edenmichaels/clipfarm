@@ -116,11 +116,12 @@ def transcript_hooks(transcript: str, words: list[dict] | None, streamer: str, m
     out = [f'"{p_}"' for p_ in ranked[:4]]
     out += [f'{streamer}: "{p_}"' for p_ in ranked[:3]]
     out += [f'When {streamer} said "{p_}"' for p_ in ranked[:2] if len(p_.split()) <= 6]
+    out += [f'"{p_}" 😭' for p_ in ranked[:1]]
     if reason:
         r = re.sub(r"\s+", " ", reason).strip().rstrip(".")
         if 2 <= len(r.split()) <= 9:
             out.append(r[0].upper() + r[1:])
-    fb = [h.format(streamer=streamer) for h in TYPE_HOOKS.get(moment_type or "", [])]
+    fb = [h.format(streamer=streamer) for h in TYPE_HOOKS.get(moment_type or "", TYPE_HOOKS["Funny"])]
     out += fb
     return [h[:60] for h in out if h]
 
