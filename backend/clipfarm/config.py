@@ -48,7 +48,7 @@ DEFAULT_SETTINGS: dict = {
             "base_url": "http://127.0.0.1:11434", "cloud_base_url": "https://api.openai.com/v1",
             "cloud_model": "gpt-4o-mini"},
     "transcription": {"enabled": True, "model": "small", "device": "auto"},
-    "posting": {"mode": "manual", "posts_per_day_per_account": 3,
+    "posting": {"mode": "manual", "posts_per_day_per_account": 3, "youtube_daily_uploads": 100, "tiktok_direct": False,
                 "window_start_hour": 9, "window_end_hour": 22, "min_gap_minutes": 90},
     "block_unknown_permission": True,   # unknown streamers need explicit opt-in per streamer
     "ranking_refresh_minutes": 30,

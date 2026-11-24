@@ -126,4 +126,37 @@ def seed_edit_projects():
 
 
 seed_edit_projects()
+
+
+# v0.8.6+: viral scores and A$ on the clips, posts in every state for Post & Submit, one clip in Recently deleted.
+def seed_posting():
+    try:
+        from clipfarm import library  # noqa: F401
+    except ImportError:
+        return
+    rows = db.q("SELECT id FROM clips ORDER BY id")
+    for i, r in enumerate(rows):
+        db.ex("UPDATE clips SET virality=?, profit_likely=? WHERE id=?", (92 - i * 7, round(14.5 - i * 1.3, 2), r["id"]))
+    ready = db.q("SELECT id FROM clips WHERE file_path IS NOT NULL ORDER BY id")
+    acct = {a["platform"]: a["id"] for a in db.q("SELECT id, platform FROM accounts")}
+    if len(ready) < 3 or len(acct) < 3:
+        return
+    a, b, c = (x["id"] for x in ready[:3])
+    db.ex("UPDATE clips SET review_status='approved' WHERE id IN (?,?,?)", (a, b, c))
+    db.ex("""INSERT INTO posts(clip_id, account_id, scheduled_at, posted_at, status, url, manual, stage, sent_at)
+             VALUES (?,?,datetime('now','localtime','-3 hours'),datetime('now','localtime','-3 hours'),'posted',
+             'https://youtube.com/shorts/demo1',0,'auto',datetime('now','-3 hours'))""", (a, acct["youtube"]))
+    db.ex("""INSERT INTO posts(clip_id, account_id, scheduled_at, status, manual, stage, publish_id, sent_at)
+             VALUES (?,?,datetime('now','localtime','-1 hours'),'scheduled',0,'inbox','demo_pub',datetime('now','-1 hours'))""",
+          (a, acct["tiktok"]))
+    db.ex("""INSERT INTO posts(clip_id, account_id, scheduled_at, status, manual, stage)
+             VALUES (?,?,datetime('now','localtime','+2 hours'),'scheduled',1,'kit')""", (a, acct["instagram"]))
+    db.ex("""INSERT INTO posts(clip_id, account_id, scheduled_at, status, manual, stage)
+             VALUES (?,?,datetime('now','localtime','+4 hours'),'scheduled',1,'kit')""", (b, acct["tiktok"]))
+    from clipfarm import library
+    library.delete([ready[-1]["id"]] if len(ready) > 3 else [c])
+    print("posting demo ready")
+
+
+seed_posting()
 print("demo data ready")

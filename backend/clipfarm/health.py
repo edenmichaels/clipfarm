@@ -210,7 +210,7 @@ def _youtube_upload() -> dict:
         except requests.RequestException as e:
             return from_problem(explain_exception("YouTube", e))
     return ok(f"{', '.join(a['handle'] for a in connected)} signed in; token refreshes automatically. "
-              "Upload limit: about 6 Shorts a day on Google's free quota.")
+              "Upload limit: 100 Shorts a day on Google's free quota (shown in Post & Submit).")
 
 
 @check("kick", "Kick")

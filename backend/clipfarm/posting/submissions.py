@@ -14,7 +14,8 @@ from datetime import datetime, timedelta
 from .. import db
 from .scheduler import plan_slots
 
-PLATFORM_DAILY_LIMIT = {"youtube": 6}     # ~1,600 quota units per upload of the default 10,000/day
+PLATFORM_DAILY_LIMIT: dict[str, int] = {}   # API limits now live in each platform module (YouTube quota day,
+                                            # TikTok 5 drafts / 24 h, Instagram content_publishing_limit)
 
 
 class PostingBlocked(ValueError):
@@ -79,13 +80,16 @@ def schedule(clip_id: int, account_ids: list[int], now: datetime | None = None) 
                           start_hour=cfg.get("window_start_hour", 9), end_hour=cfg.get("window_end_hour", 22),
                           min_gap_min=cfg.get("min_gap_minutes", 90))[0]
         check_can_post(clip_id, aid, slot)
-        manual = int(acct["platform"] != "youtube" or acct["oauth_status"] != "connected")
-        pid = db.ex("""INSERT INTO posts(clip_id, account_id, scheduled_at, status, program_id, projected_aud, manual)
-                       VALUES (?,?,?,'scheduled',?,?,?)""",
+        db.ex("DELETE FROM posts WHERE clip_id=? AND account_id=? AND status='cancelled'", (clip_id, aid))
+        from .platforms import mode
+        stage = mode(acct)                         # auto | inbox | kit
+        manual = int(stage == "kit")
+        pid = db.ex("""INSERT INTO posts(clip_id, account_id, scheduled_at, status, program_id, projected_aud, manual, stage)
+                       VALUES (?,?,?,'scheduled',?,?,?,?)""",
                     (clip_id, aid, slot.isoformat(sep=" "), _clip(clip_id)["program_id"],
-                     _projected(clip_id, acct["platform"]), manual))
+                     _projected(clip_id, acct["platform"]), manual, stage))
         out.append({"post_id": pid, "account": acct["handle"], "platform": acct["platform"],
-                    "scheduled_at": slot.isoformat(sep=" "), "manual": bool(manual)})
+                    "scheduled_at": slot.isoformat(sep=" "), "manual": bool(manual), "stage": stage})
     return out
 
 
@@ -118,6 +122,9 @@ def record_posted(clip_id: int, account_id: int, url: str, external_id: str | No
         raise PostingBlocked("That post link is already recorded for another clip.")
     if post and post["status"] == "posted":
         raise PostingBlocked("This clip is already marked as posted on that account.")
+    if post and post["status"] == "cancelled":
+        db.ex("DELETE FROM posts WHERE id=?", (post["id"],))     # a cancelled slot doesn't block a real post
+        post = None
     if not post:
         check_can_post(clip_id, account_id)
         pid = db.ex("""INSERT INTO posts(clip_id, account_id, scheduled_at, posted_at, status, url, external_id,

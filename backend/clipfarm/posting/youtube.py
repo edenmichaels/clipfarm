@@ -2,8 +2,10 @@
 
 OAuth: desktop "installed app" flow with a loopback redirect to the local API
 (http://127.0.0.1:<port>/oauth/youtube/callback). Tokens are stored in the OS keychain.
-Note: each upload costs ~1,600 quota units of the default 10,000/day — about 6 uploads/day
-per Google Cloud project unless you request more quota.
+Quota (checked Nov 2026): since 1 June 2026 uploads (videos.insert) have their own bucket of 100 calls a day
+per Google Cloud project, reset at midnight Pacific time. ClipFarm counts its own uploads per Pacific day, shows
+"N uploads left today", and when the bucket (or Google's quotaExceeded) says no, moves the post to the next day.
+Uploads go up in 8 MB chunks and stop between chunks if the post is cancelled (clip deleted).
 """
 from __future__ import annotations
 
@@ -11,6 +13,7 @@ import json
 import secrets as pysecrets
 import time
 import urllib.parse
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -66,6 +69,9 @@ def exchange_code(code: str, state: str) -> dict:
         raise RuntimeError("Google didn't return a refresh token. Remove ClipFarm from "
                            "myaccount.google.com/permissions and connect again.")
     tok["expires_at"] = time.time() + tok["expires_in"]
+    tok["connected_at"] = time.time()
+    if tok.get("refresh_token_expires_in"):      # Google only sends this for time-limited sign-ins (Testing mode)
+        tok["refresh_expires_at"] = time.time() + int(tok["refresh_token_expires_in"])
     me = requests.get("https://www.googleapis.com/youtube/v3/channels", params={"part": "snippet", "mine": "true"},
                       headers={"Authorization": f"Bearer {tok['access_token']}"}, timeout=20).json()
     ch = me["items"][0]
@@ -124,25 +130,113 @@ def channel_stats(account_id: int, video_ids: list[str]) -> dict[str, dict]:
     return out
 
 
+# ---- quota: uploads per Pacific day ----------------------------------------------------------------------------
+DAILY_UPLOADS = 100           # videos.insert bucket per Google Cloud project (since 1 June 2026)
+CHUNK = 8 * 1024 * 1024       # a multiple of 256 KB, as YouTube's resumable protocol requires
+
+
+class QuotaUsed(RuntimeError):
+    """No uploads left today. The post moves to the next quota day (not an error the user must fix)."""
+    def __init__(self, msg: str, next_reset: datetime):
+        super().__init__(msg)
+        self.next_reset = next_reset
+
+
+def _pacific_offset(utc: datetime) -> timedelta:
+    """US Pacific time without a tz database (Windows Python has none): DST from the 2nd Sunday of March
+    2:00 to the 1st Sunday of November 2:00 local time."""
+    y = utc.year
+
+    def nth_sunday(month: int, n: int) -> datetime:
+        d = datetime(y, month, 1, tzinfo=timezone.utc)
+        d += timedelta(days=(6 - d.weekday()) % 7)
+        return d + timedelta(weeks=n - 1)
+    start = nth_sunday(3, 2) + timedelta(hours=10)      # 2:00 PST = 10:00 UTC
+    end = nth_sunday(11, 1) + timedelta(hours=9)        # 2:00 PDT = 9:00 UTC
+    return timedelta(hours=-7) if start <= utc < end else timedelta(hours=-8)
+
+
+def quota_day(now: datetime | None = None) -> tuple[str, datetime]:
+    """(today's quota day as YYYY-MM-DD in Pacific time, the UTC moment it resets)."""
+    now = now or datetime.now(timezone.utc)
+    local = now + _pacific_offset(now)
+    nxt_local = datetime(local.year, local.month, local.day, tzinfo=timezone.utc) + timedelta(days=1)
+    nxt = nxt_local - _pacific_offset(nxt_local - timedelta(hours=8))
+    return local.strftime("%Y-%m-%d"), nxt
+
+
+def quota(now: datetime | None = None) -> dict:
+    """Uploads used/left today for this Google Cloud project (all connected channels share it)."""
+    from .. import db
+    day, reset = quota_day(now)
+    lo = reset - timedelta(days=1)
+    used = db.q1("""SELECT COUNT(*) n FROM posts p JOIN accounts a ON a.id=p.account_id WHERE a.platform='youtube'
+                    AND p.sent_at >= ? AND p.sent_at < ?""",
+                 (lo.strftime("%Y-%m-%d %H:%M:%S"), reset.strftime("%Y-%m-%d %H:%M:%S")))["n"]
+    limit = int(db.get_setting("posting", {}).get("youtube_daily_uploads", DAILY_UPLOADS))
+    hit = db.get_setting("youtube_quota_hit") == day          # Google said quotaExceeded today
+    left = 0 if hit else max(0, limit - used)
+    return {"day": day, "used": used, "limit": limit, "left": left, "resets_at": reset.isoformat(),
+            "label": f"{left} upload{'s' if left != 1 else ''} left today"}
+
+
+def consent_reminder(account_id: int) -> str | None:
+    """Google expires sign-ins after 7 days while the OAuth consent screen is in Testing."""
+    tok = secrets.get_secret(f"account:{account_id}", as_json=True) or {}
+    if tok.get("refresh_expires_at"):
+        when = datetime.fromtimestamp(tok["refresh_expires_at"]).strftime("%a %d %b")
+        return (f"Your Google consent screen is still in Testing, so this sign-in expires {when}. "
+                "Publish the app (Google Cloud > OAuth consent screen > Publish app) to stop the weekly reconnect.")
+    from .. import db
+    if db.get_setting("google_consent_published"):
+        return None
+    if tok.get("connected_at") and time.time() - tok["connected_at"] > 4 * 86400:
+        when = datetime.fromtimestamp(tok["connected_at"] + 7 * 86400).strftime("%a %d %b")
+        return (f"If your Google consent screen is still in Testing, this sign-in stops working {when}. "
+                "Publish the app in Google Cloud, or reconnect each week.")
+    return None
+
+
 def upload(account_id: int, video: Path, title: str, description: str, tags: list[str],
-           privacy: str = "public", made_for_kids: bool = False) -> dict:
+           privacy: str = "public", made_for_kids: bool = False, post_id: int | None = None) -> dict:
+    from .common import chunks
+    from .. import db
+    q = quota()
+    if q["left"] <= 0:
+        raise QuotaUsed(f"No YouTube uploads left today ({q['used']}/{q['limit']}); queued for tomorrow.",
+                        datetime.fromisoformat(q["resets_at"]))
     headers = {"Authorization": f"Bearer {access_token(account_id)}"}
     title = title if "#shorts" in title.lower() else f"{title[:90]} #Shorts"
-    meta = {"snippet": {"title": title[:100], "description": description[:4900], "tags": tags[:15],
-                        "categoryId": "20"},
+    if "#shorts" not in description.lower():
+        description = f"{description}\n\n#Shorts".strip()
+    meta = {"snippet": {"title": title[:100], "description": description[:4900],
+                        "tags": [t.lstrip("#") for t in tags][:15], "categoryId": "20"},
             "status": {"privacyStatus": privacy, "selfDeclaredMadeForKids": made_for_kids}}
+    size = video.stat().st_size
     init = requests.post(UPLOAD_URL, params={"uploadType": "resumable", "part": "snippet,status"},
                          headers={**headers, "Content-Type": "application/json; charset=UTF-8",
-                                  "X-Upload-Content-Type": "video/mp4",
-                                  "X-Upload-Content-Length": str(video.stat().st_size)},
+                                  "X-Upload-Content-Type": "video/mp4", "X-Upload-Content-Length": str(size)},
                          data=json.dumps(meta), timeout=30)
+    if init.status_code == 403 and "quotaexceeded" in init.text.lower().replace("_", ""):
+        db.set_setting("youtube_quota_hit", q["day"])
+        raise QuotaUsed("Google says the YouTube upload quota is used up for today; queued for tomorrow.",
+                        datetime.fromisoformat(q["resets_at"]))
     p = explain_response("YouTube", init)
     if p:
         raise RuntimeError(p.message)
-    with open(video, "rb") as f:
-        r = requests.put(init.headers["Location"], data=f, headers={"Content-Type": "video/mp4"}, timeout=600)
-    p = explain_response("YouTube", r)
-    if p:
-        raise RuntimeError(p.message)
+    url, r = init.headers["Location"], None
+    for off, data in chunks(video, CHUNK, post_id):
+        r = requests.put(url, data=data, timeout=600, headers={
+            "Content-Type": "video/mp4", "Content-Length": str(len(data)),
+            "Content-Range": f"bytes {off}-{off + len(data) - 1}/{size}"})
+        if r.status_code == 308:            # Resume Incomplete: next chunk
+            continue
+        p = explain_response("YouTube", r)
+        if p:
+            raise RuntimeError(p.message)
+    if r is None or r.status_code == 308:
+        raise RuntimeError("YouTube didn't confirm the upload. It will be retried.")
+    if post_id:
+        db.ex("UPDATE posts SET sent_at=datetime('now') WHERE id=?", (post_id,))
     vid = r.json()["id"]
     return {"external_id": vid, "url": f"https://youtube.com/shorts/{vid}"}

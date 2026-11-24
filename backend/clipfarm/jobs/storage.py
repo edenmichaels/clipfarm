@@ -59,7 +59,9 @@ def _delete_source(row: dict) -> int:
 def cleanup() -> dict:
     """1) delete processed sources if enabled  2) if still over cap, delete oldest sources, then
     rejected clips. Approved/posted clips are never auto-deleted."""
-    freed = 0
+    from .. import library
+    freed = library.purge()["freed"]                 # deleted clips whose 7 days are up
+    freed += library.remove_orphan_sources()         # source sections only deleted clips used
     if db.get_setting("delete_sources_after_processing", True):
         for row in db.q("SELECT * FROM sources WHERE status='processed' AND local_path IS NOT NULL"):
             freed += _delete_source(row)
@@ -70,7 +72,8 @@ def cleanup() -> dict:
             if folder_size(media_dir()) <= status["cap"]:
                 break
     if folder_size(media_dir()) > status["cap"]:
-        for c in db.q("SELECT * FROM clips WHERE review_status='rejected' AND file_path IS NOT NULL ORDER BY id"):
+        for c in db.q("SELECT * FROM clips WHERE review_status='rejected' AND file_path IS NOT NULL "
+                      "AND NOT EXISTS (SELECT 1 FROM posts p WHERE p.clip_id=clips.id AND p.status='posted') ORDER BY id"):
             for p in (c["file_path"], c["thumb_path"]):
                 if p and Path(p).exists():
                     freed += Path(p).stat().st_size

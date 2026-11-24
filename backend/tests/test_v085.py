@@ -245,7 +245,7 @@ def test_glyphs_never_change_size_or_position_within_a_caption(fresh_db, tmp_pat
     def frames(style):
         tr = C.build_track(words, tmp_path / "c.ass", style, vocab=False)
         subprocess.run([ffmpeg_bin(), "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=0x505050:s=1080x1920:r=30:d=1.6",
-                        "-vf", f"format=rgb24,ass=c.ass:fontsdir=fonts", "-pix_fmt", "rgb24",
+                        "-vf", "format=rgb24,ass=c.ass:fontsdir=fonts", "-pix_fmt", "rgb24",
                         "-f", "rawvideo", "out.raw"], check=True, cwd=tmp_path)
         return tr, np.fromfile(tmp_path / "out.raw", np.uint8).reshape(-1, 1920, 1080, 3).astype(int)[8:40]
     _, plain = frames({"base": "bold_pop", "highlight": "FFFFFF"})

@@ -116,6 +116,39 @@ with sync_playwright() as p:
     if page.locator("nav.side").get_by_role("button", name="Editor").count():
         attempt("editor", editor)
 
+    def my_clips():                       # v0.8.6+: selection bar, delete confirmation, Recently deleted, Post & Submit
+        page.set_viewport_size({"width": 1360, "height": 860})
+        page.locator("nav.side").get_by_role("button", name="My Clips").click()
+        page.wait_for_timeout(2500)
+        if not page.locator(".clip-check").count():
+            return
+        boxes = page.locator(".clip-check")
+        boxes.nth(0).click()
+        boxes.nth(1).click(modifiers=["Shift"])
+        shot(page, "10-myclips-selection", full=False)
+        page.locator(".selbar").get_by_role("button", name="Delete").click()
+        page.wait_for_selector("[role=dialog]", timeout=5000)
+        shot(page, "11-myclips-delete-confirm", full=False)
+        page.get_by_role("button", name="Cancel").click()
+        page.get_by_role("tab", name="Recently deleted").click()
+        page.wait_for_timeout(1500)
+        shot(page, "12-myclips-recently-deleted", full=False)
+        page.get_by_role("tab", name="Post & Submit").click()
+        page.wait_for_timeout(2500)
+        shot(page, "13-post-and-submit")
+        kit = page.get_by_role("button", name="Post to Instagram")
+        if kit.count():
+            kit.first.click()
+            page.wait_for_selector("[aria-label='Post Kit']", timeout=8000)
+            shot(page, "14-post-kit", full=False)
+            page.keyboard.press("Escape")
+            page.locator(".modal-back").first.click(position={"x": 5, "y": 5})
+        page.get_by_role("button", name="Send to phone").first.click()
+        page.wait_for_selector(".qr-box svg", timeout=8000)
+        shot(page, "15-send-to-phone", full=False)
+    if page.locator("nav.side").get_by_role("button", name="My Clips").count():
+        attempt("my clips", my_clips)
+
     def scaled():
         # Windows display scaling: 125 % and 150 % on a 1360x860 window = fewer CSS pixels, denser pixels
         for pct, (w, h) in ((125, (1088, 688)), (150, (907, 573))):

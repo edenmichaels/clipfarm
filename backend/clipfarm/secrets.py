@@ -24,7 +24,7 @@ SERVICE = os.environ.get("CLIPFARM_KEYRING_SERVICE", "ClipFarm")   # override on
 SECRET_NAMES = ["twitch_client_id", "twitch_client_secret", "youtube_api_key", "kick_client_id",
                 "kick_client_secret", "google_oauth_client_id", "google_oauth_client_secret", "llm_api_key",
                 "tiktok_client_key", "tiktok_client_secret", "meta_app_id", "meta_app_secret",
-                "x_api_key", "x_api_secret"]
+                "x_api_key", "x_api_secret", "x_access_token", "x_access_secret"]
 
 log = logging.getLogger("clipfarm.secrets")
 

@@ -6,6 +6,8 @@ Each handler is idempotent where possible so retries after a crash are safe.
 from __future__ import annotations
 
 import json
+import logging
+import random
 import shutil
 import threading
 from datetime import datetime, timezone
@@ -27,6 +29,8 @@ from ..highlights.transcribe import transcribe
 from ..providers import available_providers
 from . import media, storage
 from .engine import JobContext, emit, enqueue, handler, on_failure
+
+log = logging.getLogger("clipfarm.pipeline")
 
 TICK_MINUTES = 10
 _chat_loggers: dict[str, threading.Event] = {}
@@ -632,30 +636,84 @@ def autopilot_tick(payload: dict, ctx: JobContext) -> None:
 
 @handler("post_due")
 def post_due(payload: dict, ctx: JobContext) -> None:
-    """Upload scheduled posts whose time has come (YouTube API). Manual platforms stay in the
-    'post manually' list until the user pastes the link."""
-    from ..posting import platforms as posting
+    """Every 5 minutes: upload posts whose slot has come (YouTube, Instagram, X: posted; TikTok: sent to the
+    inbox), then check on TikTok drafts. Quota or draft limits move a post to the next free time; anything only
+    the user can fix (sign-in, account setup, no paid X keys) turns the post into a Post Kit."""
+    from ..posting import common, platforms as posting
     from ..posting.submissions import PostingBlocked, create_submission_item
     due = db.q("""SELECT p.*, a.platform FROM posts p JOIN accounts a ON a.id=p.account_id
-                  WHERE p.status='scheduled' AND p.manual=0 AND p.scheduled_at <= datetime('now','localtime')""")
+                  WHERE p.status='scheduled' AND p.sent_at IS NULL AND COALESCE(p.stage,'auto') IN ('auto','inbox')
+                  AND p.manual=0 AND p.scheduled_at <= datetime('now','localtime') ORDER BY p.scheduled_at""")
     for post in due:
         clip = db.q1("SELECT * FROM clips WHERE id=?", (post["clip_id"],))
-        if clip["review_status"] != "approved":
+        if clip["review_status"] != "approved" or clip["deleted_at"]:
+            continue
+        acct = db.q1("SELECT * FROM accounts WHERE id=?", (post["account_id"],))
+        if posting.mode(acct) == "kit":
+            db.ex("UPDATE posts SET stage='kit', manual=1, error=? WHERE id=?",
+                  (f"{acct['handle']} can't post automatically right now: use the Post Kit.", post["id"]))
             continue
         db.ex("UPDATE posts SET status='uploading' WHERE id=? AND status='scheduled'", (post["id"],))
+        if db.q1("SELECT status FROM posts WHERE id=?", (post["id"],))["status"] != "uploading":
+            continue
         try:
-            res = posting.post(post["platform"], post["account_id"], clip)
-            db.ex("UPDATE posts SET status='posted', posted_at=datetime('now','localtime'), url=?, external_id=? WHERE id=?",
-                  (res["url"], res["external_id"], post["id"]))
-            create_submission_item(post["id"])
-            emit("posted", clip_id=clip["id"], url=res["url"])
+            res = posting.post(post["platform"], post["account_id"], clip, post["id"])
+            if res["state"] == "posted":
+                db.ex("""UPDATE posts SET status='posted', posted_at=datetime('now','localtime'), url=?, external_id=?,
+                         stage='auto', error=NULL WHERE id=?""", (res["url"], res["external_id"], post["id"]))
+                create_submission_item(post["id"])
+                emit("posted", clip_id=clip["id"], url=res["url"])
+            else:                                      # TikTok: waiting in the inbox (or direct post processing)
+                db.ex("UPDATE posts SET status='scheduled', error=NULL WHERE id=?", (post["id"],))
+                emit("posted", clip_id=clip["id"], url="", inbox=True)
+        except common.UploadCancelled:
+            db.ex("UPDATE posts SET status='cancelled' WHERE id=?", (post["id"],))
+        except common.NeedsUser as e:
+            db.ex("UPDATE posts SET status='scheduled', stage='kit', manual=1, error=? WHERE id=?", (str(e), post["id"]))
         except PostingBlocked as e:
             db.ex("UPDATE posts SET status='failed', error=? WHERE id=?", (str(e), post["id"]))
-        except Exception as e:
+        except Exception as e:                           # noqa: BLE001
+            nxt = getattr(e, "next_reset", None) or getattr(e, "next_free", None)
+            if nxt is not None:                          # quota / draft limit: wait, don't fail
+                from datetime import timedelta as _td
+                aware = nxt if nxt.tzinfo else nxt.replace(tzinfo=timezone.utc)
+                local = aware.astimezone().replace(tzinfo=None) + _td(minutes=random.randint(5, 40))
+                db.ex("UPDATE posts SET status='scheduled', scheduled_at=?, error=? WHERE id=?",
+                      (local.strftime("%Y-%m-%d %H:%M:%S"), f"Queued: {e}", post["id"]))
+                continue
             db.ex("UPDATE posts SET status='scheduled', error=? WHERE id=?", (str(e)[:500], post["id"]))
             raise
+    check_tiktok_drafts()
     if not db.q1("SELECT 1 FROM jobs WHERE kind='post_due' AND status='queued'"):
         enqueue("post_due", {}, priority=3, delay_sec=300)
+
+
+def check_tiktok_drafts() -> int:
+    """Drafts sent to the TikTok inbox: once you post one, fill in its link (when TikTok returns the post id) or
+    ask you to paste it. Returns how many changed."""
+    from ..posting import tiktok
+    from ..posting.submissions import record_posted
+    changed = 0
+    for p in db.q("""SELECT p.*, a.handle FROM posts p JOIN accounts a ON a.id=p.account_id
+                     WHERE a.platform='tiktok' AND p.status='scheduled' AND p.stage='inbox' AND p.publish_id IS NOT NULL
+                     AND p.sent_at >= datetime('now','-7 days')"""):
+        try:
+            st = tiktok.fetch_status(p["account_id"], p["publish_id"])
+        except Exception as e:                           # noqa: BLE001
+            log.warning("TikTok status check failed: %s", e)
+            continue
+        if st["status"] == "PUBLISH_COMPLETE":
+            if st["post_id"]:
+                record_posted(p["clip_id"], p["account_id"], tiktok.post_url(p["handle"], st["post_id"]),
+                              st["post_id"], manual=False)
+            else:
+                db.ex("UPDATE posts SET stage='inbox_posted', error=NULL WHERE id=?", (p["id"],))
+            changed += 1
+        elif st["status"] == "FAILED":
+            db.ex("UPDATE posts SET status='failed', error=? WHERE id=?",
+                  (f"TikTok: {st.get('fail_reason') or 'upload failed'}", p["id"]))
+            changed += 1
+    return changed
 
 
 @handler("metrics")

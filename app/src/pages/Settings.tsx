@@ -141,7 +141,16 @@ export default function Settings({ initialTab, go }: { initialTab?: string; go: 
           <label className="line">Posts per day per account {num("posting", "posts_per_day_per_account", 1, 60)}</label>
           <label className="line">Posting hours <span>{num("posting", "window_start_hour", 1, 55)} to {num("posting", "window_end_hour", 1, 55)}</span></label>
           <label className="line">Minimum minutes between posts {num("posting", "min_gap_minutes", 1, 60)}</label>
-          <span className="muted">YouTube Shorts upload automatically at the scheduled time once your channel is connected (about 6 a day on Google's free quota). TikTok, Instagram and X are posted by you: ClipFarm suggests the time, copies the caption and adds the "Submit to campaign" checklist item when you paste the link.</span>
+          <label className="line">YouTube uploads per day (Google's quota) {num("posting", "youtube_daily_uploads", 1, 60)}</label>
+          <span className="muted">YouTube Shorts upload automatically (Google allows 100 uploads a day per project; extras wait for the next day). TikTok clips go to your TikTok inbox (5 a day). Instagram posts itself once your account qualifies. Anything else gets a Post Kit: caption copied, upload page opened, video selected in Explorer.</span>
+          <h2 className="accent">Phone</h2>
+          <label className="line">Phone sync folder <input style={{ width: 300 }} placeholder="e.g. C:\Users\you\Dropbox\ClipFarm" value={s.posting?.sync_folder || ""} onChange={(e) => setIn("posting", "sync_folder", e.target.value)} /></label>
+          <span className="muted">"Phone folder" copies a clip and its caption here; your Dropbox or Google Drive app puts it on your phone.</span>
+          <h2 className="accent">Sign-ins</h2>
+          <label className="line">My Google consent screen is published (not Testing)
+            <input type="checkbox" checked={!!s.google_consent_published} onChange={(e) => set("google_consent_published", e.target.checked)} /></label>
+          <label className="line">TikTok Direct Post (only if your TikTok app passed TikTok's audit)
+            <input type="checkbox" checked={!!s.posting?.tiktok_direct} onChange={(e) => setIn("posting", "tiktok_direct", e.target.checked)} /></label>
         </section>
       )}
 

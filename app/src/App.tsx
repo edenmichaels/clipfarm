@@ -140,7 +140,9 @@ export default function App() {
         if (ev.type === "error") sendNotification({ title: "ClipFarm problem", body: ev.message });
         if (ev.type === "project" && ev.status === "completed") sendNotification({ title: "Project finished", body: `Project #${ev.project_id} is done` });
         if (ev.type === "health") { sendNotification({ title: "ClipFarm setup", body: ev.message }); api.get("/health/checks").then((h) => setBanner(h.summary?.banner ?? null)).catch(() => {}); }
-        if (ev.type === "posted") sendNotification({ title: "Posted", body: "Submit it to the campaign from My Clips › Post & Submit." });
+        if (ev.type === "posted") sendNotification(ev.inbox
+          ? { title: "Sent to your TikTok inbox", body: "Open the TikTok app, add a sound if you like, paste the caption and post." }
+          : { title: "Posted", body: "Submit it to the campaign from My Clips › Post & Submit." });
       } catch { /* ignore malformed events */ }
     };
     return () => es.close();

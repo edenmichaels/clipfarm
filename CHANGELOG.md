@@ -1,5 +1,83 @@
 # ClipFarm changelog
 
+## 0.8.6: manage My Clips, and post more from inside the app
+
+### My Clips
+- **Sorted by viral score** (highest first) by default. You can also sort by projected A$, date made, streamer, campaign, status (not posted / posted / submitted) or length. ClipFarm remembers your choice.
+- **Select clips:**
+  - each clip has a checkbox;
+  - Shift+click selects a range, Ctrl+click adds or removes one clip;
+  - "Select all" (everything in the current filter), "Select none" and "Invert selection";
+  - shortcuts: Ctrl+A selects all, Esc clears, Delete deletes.
+- **Selection bar:** "N selected · Delete · Export · Send to Post & Submit · Apply style · Clear".
+- **Delete:**
+  - works on one clip, a selection or everything;
+  - the confirmation says how much space it frees ("Delete 24 clips? This frees 1.8 GB.");
+  - if some were posted, it says their stats are kept.
+- **Recently deleted:**
+  - deleted clips stay 7 days, with Restore and Empty now;
+  - after that their videos, previews, thumbnails and edit projects are removed for good;
+  - posted clips keep their link, campaign, views and earnings, so Earnings, submissions and learning stay right;
+  - source videos that other clips use are never deleted; the storage clean-up removes them once nothing uses them.
+- **Clips being processed:** deleting a clip that's rendering or uploading stops that first (an upload stops before its next chunk).
+
+### Posting
+- **YouTube Shorts (automatic):**
+  - shows "N uploads left today" and moves extras to the next day by itself;
+  - Google now allows 100 uploads a day; the old limit of 6 is gone;
+  - uploads go in 8 MB chunks;
+  - the title gets #Shorts; the description gets the campaign caption (hashtags, credit, disclosure); "made for kids" is set to no;
+  - reminds you before Google's 7-day "Testing" sign-in runs out;
+  - the post link goes into the submission checklist automatically.
+- **TikTok (your inbox):**
+  - ClipFarm uploads the finished clip and TikTok sends a notification to your TikTok inbox;
+  - open it, add a trending sound if you want, paste the caption (copied for you) and post;
+  - TikTok allows 5 drafts a day; ClipFarm shows "2 of 5 TikTok drafts used today" and queues the rest;
+  - when you post it, the link fills in automatically if TikTok gives it, otherwise you're asked to paste it;
+  - Direct Post is still in the code, switched off.
+- **Instagram Reels (automatic if your account qualifies):**
+  - ClipFarm checks your account (Business or Creator, linked to a Facebook Page, with publish permission) and shows the setup steps if it doesn't qualify;
+  - it uploads straight from your PC, publishes the Reel with caption and hashtags, and checks the daily limit first;
+  - otherwise it uses the Post Kit.
+- **X:** posts directly if you add paid X API keys; otherwise it uses the Post Kit.
+- **Post Kit** ("Post to TikTok / Instagram / YouTube / X"), in one click:
+  - copies the caption;
+  - opens the upload page;
+  - opens Explorer with the video selected so you can drag it in;
+  - shows a short checklist for that platform;
+  - has a "Paste post link" box that fills in the submission checklist.
+- **Send to phone:**
+  - shows a QR code so your phone can download the clip on your home Wi-Fi;
+  - the page has Download and Copy caption;
+  - the link expires after an hour, has a random token, and only works on your home network;
+  - optional "Phone folder" copies a clip and its caption into your Dropbox or Google Drive folder.
+- **One posting screen:** Post & Submit lists every clip waiting to post, with each platform's status: Auto-posted ✓ / In TikTok inbox / Post Kit needed / Posted / Submitted.
+- **"Post all ready clips":** posts what can go automatically and makes Post Kits for the rest. Posts are still spread across the day, follow each platform's limits, and never go to the same account twice.
+- **"Check accounts":** checks each account's sign-in, permissions, account type and quota without posting anything. It also shows the audit table of what changed.
+
+### Fixed
+- A cancelled post no longer blocks scheduling that clip again (it used to crash).
+- YouTube quota errors no longer retry every 5 minutes; they wait for the next quota day.
+
+### Database
+- **Migration v13:**
+  - Recently deleted;
+  - posting stage (automatic / TikTok inbox / Post Kit), TikTok publish id, upload time;
+  - per-account posting mode and the last account check.
+- Clips deleted before 0.8.6 go into Recently deleted with a fresh 7 days.
+
+### Proven by tests
+`tests/test_v086.py` (28 tests, every platform mocked) covers:
+- select all → delete → restore;
+- posted stats kept after delete;
+- disk space freed with no files left behind;
+- YouTube upload and quota;
+- TikTok inbox, the 5-a-day limit and status tracking;
+- Instagram eligibility, fallback and resumable upload;
+- the Post Kit caption, page and file;
+- Send to phone (token, expiry, home network only);
+- nothing posted twice to the same account.
+
 ## 0.8.5: steady framing, a proper facecam corner, and static captions
 
 The moment picker was already good; this update makes the edits look like a real clipper made them.

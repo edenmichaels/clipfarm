@@ -413,9 +413,26 @@ def _v12(conn: sqlite3.Connection) -> None:
             _set(conn, key, {**box, "by": "auto"})
 
 
+# ---- v13 (0.8.6): Recently deleted clips, posting stages (TikTok inbox, Post Kit), per-account posting mode --
+def _v13(conn: sqlite3.Connection) -> None:
+    _add(conn, "clips", "purge_after", "TEXT")      # deleted clips: files removed for good after this time
+    _add(conn, "clips", "purged_at", "TEXT")        # files gone; the row stays so posted stats stay correct
+    _add(conn, "posts", "stage", "TEXT")            # auto | inbox | kit (how this post gets onto the platform)
+    _add(conn, "posts", "publish_id", "TEXT")       # TikTok publish_id / Instagram container id
+    _add(conn, "posts", "sent_at", "TEXT")          # when the upload reached the platform (quotas count these)
+    _add(conn, "accounts", "posting_mode", "TEXT")  # tiktok: inbox|direct, instagram: auto|kit, x: api|kit
+    _add(conn, "accounts", "eligibility", "TEXT")   # last account check (JSON)
+    _script(conn, """
+    CREATE INDEX IF NOT EXISTS posts_sent ON posts(account_id, sent_at);
+    CREATE INDEX IF NOT EXISTS clips_deleted ON clips(deleted_at)
+    """)
+    # clips deleted from the Editor before 0.8.6 go into Recently deleted with a fresh 7 days
+    conn.execute("UPDATE clips SET purge_after=datetime('now','+7 days') WHERE deleted_at IS NOT NULL AND purge_after IS NULL")
+
+
 MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [(2, _v2), (3, _v3), (4, _v4), (5, _v5), (6, _v6),
                                                                       (7, _v7), (8, _v8), (9, _v9), (10, _v10),
-                                                                      (11, _v11), (12, _v12)]
+                                                                      (11, _v11), (12, _v12), (13, _v13)]
 LATEST = MIGRATIONS[-1][0]
 
 

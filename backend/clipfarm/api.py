@@ -20,11 +20,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
-from . import __version__, compliance, db, secrets, vault
+from . import __version__, compliance, db, library, secrets, vault
 from . import health as healthmod
 from .campaigns import autofill, autopilot, forecast, grouping, importer, matching
 from .discovery import service as disc
 from .posting import submissions as subs
+from .posting.common import connect_account
 from .redact import redact
 from .editing.ffmpeg_util import detect_encoders
 from .jobs import engine as eng
@@ -394,23 +395,44 @@ def source_retry(sid: int):
 # ---- clips ---------------------------------------------------------------------------
 @app.get("/clips", dependencies=A)
 def clips(game_id: int | None = None, streamer_id: int | None = None, review_status: str | None = None,
-          posted: bool | None = None, project_id: int | None = None, limit: int = 200):
-    cond, params = ["c.deleted_at IS NULL"], []
-    for col, val in (("c.game_id", game_id), ("c.streamer_id", streamer_id),
-                     ("c.review_status", review_status), ("c.project_id", project_id)):
-        if val is not None:
-            cond.append(f"{col}=?")
-            params.append(val)
-    if posted is not None:
-        cond.append(("" if posted else "NOT ") + "EXISTS (SELECT 1 FROM posts p WHERE p.clip_id=c.id AND p.status='posted')")
-    where = ("WHERE " + " AND ".join(cond)) if cond else ""
-    return db.q(f"""SELECT c.*, s.display_name streamer, g.name game, pr.name program, m.score,
-        (SELECT COALESCE(SUM(pm.views),0) FROM posts p JOIN post_metrics pm ON pm.post_id=p.id
-           WHERE p.clip_id=c.id AND pm.taken_at=(SELECT MAX(taken_at) FROM post_metrics WHERE post_id=p.id)) views,
-        (SELECT COALESCE(SUM(amount),0) FROM payouts py JOIN posts p ON p.id=py.post_id WHERE p.clip_id=c.id) earnings
-        FROM clips c LEFT JOIN streamers s ON s.id=c.streamer_id LEFT JOIN games g ON g.id=c.game_id
-        LEFT JOIN programs pr ON pr.id=c.program_id LEFT JOIN moments m ON m.id=c.moment_id
-        {where} ORDER BY c.id DESC LIMIT ?""", (*params, limit))
+          posted: bool | None = None, project_id: int | None = None, limit: int = 200, sort: str | None = None):
+    return library.list_clips(game_id=game_id, streamer_id=streamer_id, review_status=review_status, posted=posted,
+                              project_id=project_id, limit=limit, sort=sort)
+
+
+@app.get("/clips/sorts", dependencies=A)
+def clip_sorts():
+    return {"sorts": [{"key": k, "label": v} for k, v in library.SORT_LABELS.items()], "current": library.sort_key(None)}
+
+
+class IdsIn(BaseModel):
+    ids: list[int]
+
+
+@app.post("/clips/delete-preview", dependencies=A)
+def clips_delete_preview(b: IdsIn):
+    return library.preview(b.ids)
+
+
+@app.post("/clips/delete", dependencies=A)
+def clips_delete(b: IdsIn):
+    return library.delete(b.ids)
+
+
+@app.post("/clips/restore", dependencies=A)
+def clips_restore(b: IdsIn):
+    return library.restore(b.ids)
+
+
+@app.get("/clips/deleted", dependencies=A)
+def clips_deleted():
+    return library.trash()
+
+
+@app.post("/clips/deleted/empty", dependencies=A)
+def clips_deleted_empty(b: IdsIn | None = None):
+    """Empty now: remove the files of everything in Recently deleted (or just the ids given)."""
+    return library.purge(b.ids if b and b.ids else None, expired_only=False)
 
 
 class ClipPatch(BaseModel):
@@ -1024,7 +1046,7 @@ def edit_signal(cid: int, body: dict):
         except Exception as e:                          # noqa: BLE001
             log.warning("learning refit failed: %s", e)
     if kind == "delete":
-        db.ex("UPDATE clips SET deleted_at=datetime('now') WHERE id=?", (cid,))
+        library.delete([cid])                            # Recently deleted (7 days), renders/posts stopped
     elif kind == "keep":
         db.ex("UPDATE clips SET review_status='approved' WHERE id=? AND review_status='pending'", (cid,))
     return {"ok": True}
@@ -1467,20 +1489,113 @@ def yt_callback(code: str = Query(...), state: str = Query(...)):
     return HTMLResponse("<h2>YouTube connected to ClipFarm. You can close this tab.</h2>")
 
 
-def connect_account(platform: str, handle: str, external_id: str) -> int:
-    """Attach a sign-in to the right accounts row. Preloaded handles (no external id yet) are claimed
-    instead of creating a duplicate. (The old code relied on lastrowid after an UPSERT, which can
-    return a different row's id and file the token under the wrong account.)"""
-    norm = handle.lstrip("@").lower()
-    row = db.q1("SELECT id FROM accounts WHERE platform=? AND external_id=?", (platform, external_id)) or \
-        db.q1("SELECT id FROM accounts WHERE platform=? AND external_id IS NULL AND lower(ltrim(handle,'@'))=?",
-              (platform, norm))
-    if row:
-        db.ex("UPDATE accounts SET handle=?, external_id=?, oauth_status='connected' WHERE id=?",
-              (handle, external_id, row["id"]))
-        return row["id"]
-    return db.ex("INSERT INTO accounts(platform, handle, external_id, oauth_status) VALUES (?,?,?,'connected')",
-                 (platform, handle, external_id))
+# ---- v0.8.6: TikTok and Instagram sign-in, posting overview, Post Kit, Send to phone, audit ----------------
+@app.get("/oauth/tiktok/start", dependencies=A)
+def tiktok_start():
+    from .posting import tiktok
+    try:
+        return {"url": tiktok.auth_url()}
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/oauth/tiktok/callback/")    # opened by the system browser; protected by OAuth state + PKCE instead
+def tiktok_callback(code: str = Query(""), state: str = Query(""), error_description: str = Query("")):
+    from .posting import tiktok
+    if not code:
+        return HTMLResponse(f"<h2>TikTok sign-in cancelled</h2><p>{html.escape(error_description)}</p>", status_code=400)
+    try:
+        res = tiktok.exchange_code(code, state)
+    except Exception as e:                       # noqa: BLE001
+        return HTMLResponse(f"<h2>TikTok sign-in failed</h2><p>{html.escape(redact(e))}</p>", status_code=400)
+    free = db.q("SELECT id, handle FROM accounts WHERE platform='tiktok' AND external_id IS NULL")
+    handle = free[0]["handle"] if len(free) == 1 else res["name"]     # claim the preloaded @handle
+    aid = connect_account("tiktok", handle, res["open_id"])
+    secrets.set_secret(f"account:{aid}", {**res["token"], "scope": res["scope"]})
+    return HTMLResponse("<h2>TikTok connected to ClipFarm. You can close this tab.</h2>")
+
+
+@app.get("/oauth/instagram/start", dependencies=A)
+def instagram_start():
+    from .posting import instagram
+    try:
+        return {"url": instagram.auth_url(), "steps": instagram.SETUP_STEPS}
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/accounts/instagram/connect", dependencies=A)
+def instagram_connect(body: dict):
+    from .posting import instagram
+    try:
+        return instagram.connect(str(body.get("paste") or ""))
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/posting/overview", dependencies=A)
+def posting_overview():
+    return posting.overview()
+
+
+@app.post("/posting/post-all", dependencies=A)
+def posting_post_all():
+    return posting.post_all()
+
+
+@app.get("/posting/audit", dependencies=A)
+def posting_audit():
+    from .posting import audit
+    return {"table": audit.TABLE, "last_check": db.get_setting("posting_check")}
+
+
+@app.post("/posting/check-accounts", dependencies=A)
+def posting_check_accounts():
+    from .posting import audit
+    return {"results": audit.check_all()}
+
+
+@app.get("/posts/{post_id}/kit", dependencies=A)
+def post_kit(post_id: int):
+    try:
+        return posting.kit(post_id)
+    except KeyError:
+        raise HTTPException(404, "Post not found")
+
+
+@app.post("/posts/{post_id}/reveal", dependencies=A)
+def post_reveal(post_id: int, body: dict | None = None):
+    k = post_kit(post_id)
+    path = k["nomusic_file"] if (body or {}).get("nomusic") and k.get("nomusic_file") else k["file"]
+    try:
+        return {"opened": posting.reveal(path), "file": path}
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/clips/{cid}/phone", dependencies=A)
+def clip_to_phone(cid: int, body: dict | None = None):
+    from .posting import common, phone
+    c = _clip(cid)
+    if not c.get("file_path") or not Path(c["file_path"]).exists():
+        raise HTTPException(400, "Export the clip first: there's no video file yet.")
+    plat = (body or {}).get("platform") or "tiktok"
+    t = common.post_text(c, plat)
+    path = Path(c["nomusic_path"]) if (body or {}).get("nomusic") and c.get("nomusic_path") else Path(c["file_path"])
+    return phone.create(cid, path, t["caption"], c.get("title") or "")
+
+
+@app.post("/clips/{cid}/sync-folder", dependencies=A)
+def clip_to_sync_folder(cid: int, body: dict | None = None):
+    from .posting import common, phone
+    c = _clip(cid)
+    if not c.get("file_path") or not Path(c["file_path"]).exists():
+        raise HTTPException(400, "Export the clip first: there's no video file yet.")
+    try:
+        dest = phone.to_sync_folder(Path(c["file_path"]), common.post_text(c, (body or {}).get("platform") or "tiktok")["caption"])
+    except (ValueError, OSError) as e:
+        raise HTTPException(400, str(e))
+    return {"path": str(dest)}
 
 
 @app.get("/accounts", dependencies=A)

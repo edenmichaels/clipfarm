@@ -78,7 +78,8 @@ def test_every_route_needs_the_token(client):
     """Audit: no route is reachable without the per-launch token except the public health check and fonts."""
     import re as _re
     from clipfarm import api
-    public = {"/health", "/fonts/{name}", "/oauth/youtube/callback"}   # the callback is protected by OAuth state
+    public = {"/health", "/fonts/{name}", "/oauth/youtube/callback",   # callbacks: protected by OAuth state
+              "/oauth/tiktok/callback/"}                                 # (+ PKCE for TikTok)
     checked = 0
     for r in api.app.routes:
         path = getattr(r, "path", "")
@@ -683,6 +684,52 @@ def test_v08_editor_routes(client, tmp_path):
     assert s["clip_id"] == cid and "junk" not in s and s["saved_at"]
     assert call(client, "GET", "/editor/session")["panel"] == "Styles"
     call(client, "PUT", "/editor/session", json={"draft": "nope"}, expect=400)
+
+
+def test_v086_library_and_posting_routes(client, tmp_path, monkeypatch):
+    sid, prog, cid, f = _linked_clip(tmp_path)
+    s = call(client, "GET", "/clips/sorts")
+    assert s["current"] == "viral" and [x["key"] for x in s["sorts"]][:2] == ["viral", "projected"]
+    assert call(client, "GET", "/clips?sort=length", route="/clips")[0]["status_name"] == "not posted"
+    assert call(client, "GET", "/clips/sorts")["current"] == "length"                       # remembered
+    pv = call(client, "POST", "/clips/delete-preview", json={"ids": [cid]})
+    assert pv["count"] == 1 and pv["message"].startswith("Delete 1 clip? This frees")
+    assert call(client, "POST", "/clips/delete", json={"ids": [cid]})["deleted"] == 1
+    assert call(client, "GET", "/clips?sort=", route="/clips") == []
+    assert call(client, "GET", "/clips/deleted")[0]["id"] == cid
+    assert call(client, "POST", "/clips/restore", json={"ids": [cid]})["restored"] == 1
+    ov = call(client, "GET", "/posting/overview")
+    assert ov["clips"][0]["clip_id"] == cid and {a["platform"] for a in ov["accounts"]} == {"tiktok", "youtube", "instagram"}
+    assert all(st["code"] in ("waiting", "not_allowed") for st in ov["clips"][0]["statuses"])
+    r = call(client, "POST", "/posting/post-all")
+    assert r["kit"] >= 1 and "scheduled" in r["message"]
+    pid = db.q1("SELECT id FROM posts WHERE clip_id=? LIMIT 1", (cid,))["id"]
+    k = call(client, "GET", f"/posts/{pid}/kit", route="/posts/{post_id}/kit")
+    assert "#DylanPage" in k["caption"] and k["upload_url"].startswith("https://") and k["file"] == str(f)
+    call(client, "GET", "/posts/9999/kit", route="/posts/{post_id}/kit", expect=404)
+    from clipfarm.posting import platforms as P
+    opened = []
+    monkeypatch.setattr(P.proc, "popen", lambda cmd, **kw: opened.append(cmd))
+    assert call(client, "POST", f"/posts/{pid}/reveal", route="/posts/{post_id}/reveal")["file"] == str(f) and opened
+    a = call(client, "GET", "/posting/audit")
+    assert len(a["table"]) >= 4
+    res = call(client, "POST", "/posting/check-accounts")["results"]
+    assert {x["platform"] for x in res} == {"tiktok", "youtube", "instagram"}
+    from clipfarm.posting import phone
+    ph = call(client, "POST", f"/clips/{cid}/phone", route="/clips/{cid}/phone", json={})
+    assert ph["url"].startswith("http://") and ph["qr_svg"].startswith("<svg")
+    phone.stop()
+    call(client, "POST", f"/clips/{cid}/sync-folder", route="/clips/{cid}/sync-folder", json={}, expect=400)  # no folder set
+    db.set_setting("posting", {"sync_folder": str(tmp_path / "sync")})
+    assert call(client, "POST", f"/clips/{cid}/sync-folder", route="/clips/{cid}/sync-folder", json={})["path"]
+    call(client, "GET", "/oauth/tiktok/start", expect=400)                                  # no TikTok app keys yet
+    call(client, "GET", "/oauth/tiktok/callback/?code=x&state=nope", route="/oauth/tiktok/callback/", headers={},
+         expect=400)
+    call(client, "GET", "/oauth/instagram/start", expect=400)                               # no Meta app keys yet
+    call(client, "POST", "/accounts/instagram/connect", json={"paste": "short"}, expect=400)
+    call(client, "POST", "/clips/delete", json={"ids": [cid]})
+    e = call(client, "POST", "/clips/deleted/empty", json={"ids": []})
+    assert e["purged"] == 1 and not f.exists()
 
 
 def test_every_route_is_covered():
