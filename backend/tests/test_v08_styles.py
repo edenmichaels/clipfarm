@@ -56,8 +56,10 @@ def test_every_style_renders(fresh_db, tmp_path, key, facecam, overlay):
         assert still["title"]["box"] == "white_box"
     if s["title"]["box"] == "none":
         assert still["title"] is None
-    # captions: one fixed place at the bottom, whatever the style
-    assert {ev["baseline"] for ev in still["events"]} == {C.BASELINE}
+    # captions: one fixed place for the whole clip: the bottom, or (Split Screen, v0.8.8) on the seam
+    on_seam = s["captions"]["anchor"] == "seam" and lays == {"split"}
+    want = e["layout"]["cam_h"] + 40 if on_seam else C.BASELINE
+    assert {ev["baseline"] for ev in still["events"]} == {want}
 
 
 def test_split_ratio_and_bottom_captions(fresh_db, tmp_path):

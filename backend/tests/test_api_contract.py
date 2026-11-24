@@ -747,6 +747,35 @@ def test_v087_live_watcher_routes(client, tmp_path):
     watcher.manager().shutdown()
 
 
+def test_v088_presets_variations_live_dots(client, tmp_path):
+    import subprocess
+    src = tmp_path / "src.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=1920x1080:r=30:d=20", "-f", "lavfi",
+                    "-i", "sine=f=300:d=20", "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac",
+                    str(src)], check=True)
+    sid, prog, cid, _ = _linked_clip(tmp_path)
+    db.ex("UPDATE clips SET source_path=?, words=? WHERE id=?", (str(src), json.dumps(
+        [{"word": w, "start": 2 + i * 0.5, "end": 2.4 + i * 0.5} for i, w in enumerate(
+            "no way the cops are here. bro run! why did you park there".split())]), cid))
+    ps = call(client, "GET", "/presets")
+    assert [p["key"] for p in ps] == ["streamer_corner", "split_screen", "bold_box", "clean_minimal", "hype", "facecam_focus"]
+    r = client.get(f"/edit/{cid}/preset-thumb/bold_box", headers=H)
+    assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg" and r.content[:2] == b"\xff\xd8"
+    COVERED.add(("GET", "/edit/{cid}/preset-thumb/{key}"))
+    assert client.get(f"/edit/{cid}/preset-thumb/nope", headers=H).status_code == 404
+    made = call(client, "POST", f"/edit/{cid}/variations", route="/edit/{cid}/variations", json={"n": 3, "preset": "hype"})
+    assert len(made) == 3 and len({m["hook"] for m in made}) == 3
+    call(client, "POST", f"/edit/{cid}/variations", route="/edit/{cid}/variations", json={"n": 11}, expect=400)
+    assert len(call(client, "GET", f"/edit/{cid}/variations", route="/edit/{cid}/variations")) == 3
+    kept = call(client, "POST", "/variations/keep", json={"ids": [made[0]["id"]]})
+    assert kept[0]["clip_id"] and db.q1("SELECT variant_of FROM clips WHERE id=?", (kept[0]["clip_id"],))["variant_of"] == cid
+    call(client, "POST", "/variations/keep", json={"ids": []}, expect=400)
+    assert call(client, "POST", f"/edit/{cid}/variations/discard", route="/edit/{cid}/variations/discard",
+                json={})["discarded"] == 2
+    st = call(client, "GET", f"/streamers/live?ids={sid}", route="/streamers/live")
+    assert st[str(sid)]["state"] == "unknown"                       # offline test machine: no guessing
+
+
 def test_every_route_is_covered():
     from clipfarm import api
     routes = set()

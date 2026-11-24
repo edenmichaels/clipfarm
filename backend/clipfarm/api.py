@@ -1490,6 +1490,84 @@ def yt_callback(code: str = Query(...), state: str = Query(...)):
     return HTMLResponse("<h2>YouTube connected to ClipFarm. You can close this tab.</h2>")
 
 
+@app.get("/streamers/live", dependencies=A)
+def streamers_live(ids: str = ""):
+    """Live / offline / unknown for the streamers in a picker (Twitch: one Get Streams call per 100)."""
+    from .live import status as live_status_
+    want = [int(x) for x in ids.split(",") if x.strip().isdigit()][:500]
+    return {str(k): v for k, v in live_status_.for_streamers(want).items()}
+
+
+# ---- v0.8.8: preset bar and variations --------------------------------------------------------------------------
+@app.get("/presets", dependencies=A)
+def presets_list():
+    return edit_styles.presets()
+
+
+@app.get("/edit/{cid}/preset-thumb/{key}", dependencies=A)
+def preset_thumb(cid: int, key: str):
+    """A still of THIS clip in a preset (frame + layout + caption + title), small JPEG, cached per edit version."""
+    from fastapi.responses import FileResponse
+    from .editing.ffmpeg_util import ffmpeg_bin
+    from .edit import timeline as T
+    if key not in edit_styles.BUILTINS:
+        raise HTTPException(404, "No such preset")
+    p = _ep(cid)
+    d = storage.media_dir() / "edit_cache" / f"c{cid}" / "presets"
+    d.mkdir(parents=True, exist_ok=True)
+    out = d / f"h{p['head']}_{key}.jpg"
+    if not out.exists():
+        from . import proc
+        e = edit_styles.apply(p["edl"], key)
+        ws = T.words_out(e)                         # a moment with a caption on screen, while the title shows
+        t = min(float(ws[0]["start"]) + 0.2 if ws else 1.0, float(e["hook"].get("sec") or 2.2) - 0.3, T.duration(e) - 0.2)
+        png = d / f"h{p['head']}_{key}.png"
+        try:
+            edit_compile.render_frame(e, max(0.0, t), png, storage.media_dir() / "edit_cache" / f"c{cid}")
+            proc.run([ffmpeg_bin(), "-v", "error", "-y", "-i", str(png), "-vf", "scale=270:480", "-q:v", "4", str(out)],
+                     check=True, capture_output=True)
+        except Exception as ex:                      # noqa: BLE001
+            raise HTTPException(500, f"Couldn't draw the preset preview: {ex}")
+        finally:
+            png.unlink(missing_ok=True)
+    return FileResponse(out, media_type="image/jpeg", headers={"Cache-Control": "max-age=3600"})
+
+
+@app.post("/edit/{cid}/variations", dependencies=A)
+def variations_make(cid: int, body: dict | None = None):
+    from .edit import variations
+    body = body or {}
+    _ep(cid)
+    n = int(body.get("n", 4))
+    if not 1 <= n <= 10:
+        raise HTTPException(400, "Make 1 to 10 variations.")
+    preset = body.get("preset") or "mix"
+    if preset != "mix" and preset not in edit_styles.BUILTINS:
+        raise HTTPException(400, "Unknown preset.")
+    return variations.make(cid, n, preset)
+
+
+@app.get("/edit/{cid}/variations", dependencies=A)
+def variations_list(cid: int):
+    from .edit import variations
+    return variations.list_for(cid)
+
+
+@app.post("/variations/keep", dependencies=A)
+def variations_keep(body: dict):
+    from .edit import variations
+    ids = [int(x) for x in body.get("ids") or []]
+    if not ids:
+        raise HTTPException(400, "Pick at least one variation.")
+    return variations.keep(ids, export=bool(body.get("export")))
+
+
+@app.post("/edit/{cid}/variations/discard", dependencies=A)
+def variations_discard(cid: int, body: dict | None = None):
+    from .edit import variations
+    return {"discarded": variations.discard(cid, [int(x) for x in (body or {}).get("keep_ids") or []])}
+
+
 # ---- v0.8.7: Live Watcher ---------------------------------------------------------------------------------------
 @app.get("/live/status", dependencies=A)
 def live_status():

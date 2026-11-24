@@ -149,6 +149,9 @@ class Preset:
     max_words: int
     highlight_on: bool = True        # False = "no highlight": every word stays the text colour
     emoji: bool = False
+    box: bool = False                # v0.8.8: a solid rounded box behind the caption (static, like the text)
+    box_color: str = "000000"
+    anchor_y: float | None = None    # v0.8.8: a fixed baseline other than the bottom (Split Screen: on the seam)
 
     def as_dict(self) -> dict:
         from dataclasses import asdict
@@ -156,7 +159,7 @@ class Preset:
 
 
 TEMPLATE_FIELDS = ["family", "em", "uppercase", "text", "highlight", "outline", "outline_px", "shadow_px",
-                   "shadow_alpha", "max_words", "emoji", "highlight_on"]
+                   "shadow_alpha", "max_words", "emoji", "highlight_on", "box", "box_color", "anchor_y"]
 EM_RANGE = (104, 140)            # cap height ~73-98 px with Montserrat
 
 
@@ -172,16 +175,19 @@ def template_from(t: dict | str | None) -> Preset:
             vals[k] = t[k]
     if vals["family"] not in all_fonts():
         vals["family"] = base.family if base.family in all_fonts() else DEFAULT_FONT
-    for c in ("text", "highlight", "outline"):
+    for c in ("text", "highlight", "outline", "box_color"):
         v = str(vals[c]).lstrip("#").upper()
         vals[c] = v if re.fullmatch(r"[0-9A-F]{6}", v) else getattr(base, c)
     vals["em"] = float(min(EM_RANGE[1], max(EM_RANGE[0], float(vals["em"]))))
     vals["highlight_on"] = bool(vals.get("highlight_on", True))
     vals["uppercase"] = bool(vals["uppercase"])
     vals["max_words"] = int(min(6, max(1, int(vals["max_words"]))))
-    vals["outline_px"] = float(min(12, max(6, float(vals["outline_px"]))))
+    vals["outline_px"] = float(min(14, max(0 if vals.get("box") else 6, float(vals["outline_px"]))))
     vals["shadow_px"] = float(min(8, max(0, float(vals["shadow_px"]))))
     vals["shadow_alpha"] = int(min(255, max(0, int(vals["shadow_alpha"]))))
+    vals["box"] = bool(vals.get("box"))
+    ay = vals.get("anchor_y")
+    vals["anchor_y"] = float(min(SAFE["bottom"] - 40, max(700, float(ay)))) if ay not in (None, "") else None
     vals["key"] = t.get("key") or base.key
     vals["label"] = t.get("label") or t.get("name") or base.label
     return Preset(**{k: vals[k] for k in Preset.__dataclass_fields__})
@@ -404,7 +410,7 @@ def caption_box(n_lines: int, pr: Preset, nudge: float = 0.0, widths: list[float
     gap = pr.em * LINE_GAP
     info = _font_info(pr.family)
     cap = pr.em * (info[3] / info[0] if info else 0.7)
-    base = BASELINE + nudge
+    base = (pr.anchor_y or BASELINE) + nudge
     top = base - (n_lines - 1) * gap - cap - pr.outline_px
     bottom = base + pr.em * 0.02 + pr.outline_px
     w = max(widths) if widths else CAP_WIDTH
@@ -417,7 +423,7 @@ def build_track(words: list[dict], out: Path, style: str | dict = DEFAULT, words
                 fillers: str = "remove", emoji: bool = False, hook: str | None = None, hook_sec: float = 2.2,
                 credit: str | None = None, duration: float | None = None, title_box: str = "outline",
                 text_layers: list[dict] | None = None, vocab: dict | bool | None = None,
-                credit_pos: str | None = None) -> CaptionTrack:
+                credit_pos: str | None = None, title_color: str | None = None) -> CaptionTrack:
     """THE caption renderer (preview frames, proxy and export all use this ASS file).
 
     words: [{"word","start","end"}] in source time; `offset` is subtracted so they line up with the clip.
@@ -429,6 +435,8 @@ def build_track(words: list[dict], out: Path, style: str | dict = DEFAULT, words
     fs = ass_size(pr.family, pr.em)
     sh_a = pr.shadow_alpha
     tfs = ass_size(pr.family, 70)
+    tcol = re.sub(r"[^0-9A-Fa-f]", "", str(title_color or "E53935"))[:6].upper()
+    tcol = tcol if len(tcol) == 6 else "E53935"
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {W}
@@ -445,6 +453,9 @@ Style: Cap,{pr.family},{fs:.1f},{_c(pr.text)},{_c(pr.text)},{_c(pr.outline)},{_c
 Style: Title,{pr.family},{tfs:.1f},{_c('FFFFFF')},{_c('FFFFFF')},{_c('000000')},{_c('000000', sh_a)},0,0,0,0,100,100,0,0,1,8,{pr.shadow_px},8,0,0,0,1
 Style: TitleWhiteBox,{pr.family},{tfs:.1f},{_c('111111')},{_c('111111')},{_c('FFFFFF')},{_c('000000', 200)},0,0,0,0,100,100,0,0,3,14,0,8,0,0,0,1
 Style: TitleBlackBox,{pr.family},{tfs:.1f},{_c('FFFFFF')},{_c('FFFFFF')},{_c('000000', 30)},{_c('000000', 200)},0,0,0,0,100,100,0,0,3,14,0,8,0,0,0,1
+Style: TitleColorBox,{pr.family},{tfs:.1f},{_c('FFFFFF')},{_c('FFFFFF')},{_c(tcol)},{_c('000000', 200)},0,0,0,0,100,100,0,0,3,14,0,8,0,0,0,1
+Style: TitlePlain,{pr.family},{ass_size(pr.family, 50):.1f},{_c('FFFFFF')},{_c('FFFFFF')},{_c('000000', 80)},{_c('000000', 120)},0,0,0,0,100,100,0,0,1,3,4,8,0,0,0,1
+Style: CapBox,{pr.family},{fs:.1f},{_c(pr.box_color)},{_c(pr.box_color)},{_c(pr.box_color)},{_c(pr.box_color)},0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
 Style: Text,{pr.family},{tfs:.1f},{_c('FFFFFF')},{_c('FFFFFF')},{_c('000000')},{_c('000000', sh_a)},0,0,0,0,100,100,0,0,1,8,{pr.shadow_px},5,0,0,0,1
 Style: Credit,Montserrat ExtraBold,{ass_size('Montserrat ExtraBold', 34):.1f},{_c('FFFFFF', 40)},{_c('FFFFFF')},{_c('000000', 60)},{_c('000000', 160)},0,0,0,0,100,100,0,0,1,3,0,5,0,0,0,1
 
@@ -470,7 +481,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     emojis: list[dict] = []
     max_words = max(1, min(6, words_per_chunk or pr.max_words))
     gap = pr.em * LINE_GAP
-    base = BASELINE + nudge
+    base = (pr.anchor_y or BASELINE) + nudge
     hi_c = pr.highlight if pr.highlight_on else pr.text
     for cap in captions_from(ws, pr, max_words, upper, duration):
         rows = cap["lines"]
@@ -479,6 +490,12 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         box = caption_box(n, pr, nudge, widths)
         captions.append({"start": round(cap["start"], 3), "end": round(cap["end"], 3),
                          "text": " / ".join(" ".join(_word_text(w, upper) for w in r) for r in rows), "box": box})
+        if pr.box:                       # one solid rounded box behind the whole caption, for its whole time
+            pad_x, pad_y = pr.em * 0.32, pr.em * 0.22
+            x0, x1 = box["x0"] - pad_x, box["x1"] + pad_x
+            y0, y1 = box["top"] - pad_y, box["bottom"] + pad_y + pr.em * 0.12
+            lines.append(f"Dialogue: 0,{_ts(cap['start'])},{_ts(cap['end'])},CapBox,,0,0,0,,"
+                         f"{{\\an7\\pos(0,0)\\p1}}{rounded_rect(x0, y0, x1, y1, pr.em * 0.22)}{{\\p0}}")
         # one step per spoken word: identical text and positions, only the spoken word's colour changes
         order = [w for r in rows for w in r]
         steps = [(cap["start"], None)] if float(order[0]["start"]) > cap["start"] + 0.01 else []
@@ -498,7 +515,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     col = hi_c if (w is cur and pr.highlight_on) else pr.text
                     parts.append(f"{{\\c{_c(col)}}}{txt}")
                 sx = f"\\fscx{cap['condense'] * 100:.1f}" if cap.get("condense") else ""
-                lines.append(f"Dialogue: 0,{_ts(s0)},{_ts(s1)},Cap,,0,0,0,,"
+                lines.append(f"Dialogue: {1 if pr.box else 0},{_ts(s0)},{_ts(s1)},Cap,,0,0,0,,"
                              f"{{\\an2\\pos({CAP_X},{y + _below_baseline(pr):.1f}){sx}\\q2}}{' '.join(parts)}")
             events.append({"start": round(s0, 3), "end": round(s1, 3), "word": cur["word"] if cur else None,
                            "x": CAP_X, "y": round(base), "baseline": round(base, 1), "lines": n,
@@ -512,14 +529,16 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                                "x": CAP_X - size // 2, "y": int(box["top"] - size - 14)})
     title = None
     if hook and title_box != "none":
-        boxed = title_box in ("white_box", "black_box")
-        sty = {"white_box": "TitleWhiteBox", "black_box": "TitleBlackBox"}.get(title_box, "Title")
-        tp = Preset("title", "", pr.family, 70, upper, "FFFFFF", "FFFFFF", "000000", 8 if not boxed else 14, 0, 0, 99)
+        boxed = title_box in ("white_box", "black_box", "color_box")
+        sty = {"white_box": "TitleWhiteBox", "black_box": "TitleBlackBox", "color_box": "TitleColorBox",
+               "plain": "TitlePlain"}.get(title_box, "Title")
+        tp = Preset("title", "", pr.family, 50 if title_box == "plain" else 70, upper, "FFFFFF", "FFFFFF", "000000",
+                    8 if not boxed else 14, 0, 0, 99)
         tws = [{"word": t} for t in hook.split()]
         rows = lines_for(tws, tp, upper) or [tws]
         if len(rows) > 2:
             rows = rows[:2]
-        step = 70 * 1.2 + (28 if boxed else 0)
+        step = tp.em * 1.2 + (28 if boxed else 0)
         top = TITLE_TOP + (14 if boxed else 0)
         for li, r in enumerate(rows):
             txt = " ".join(_esc(_word_text(w, upper)) for w in r)
@@ -551,6 +570,17 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     out.write_text(header + "\n".join(lines) + "\n", encoding="utf-8")
     out.with_suffix(".events.json").write_text(json.dumps(events), encoding="utf-8")
     return CaptionTrack(out, bleeps, emojis, events, title, captions)
+
+
+def rounded_rect(x0: float, y0: float, x1: float, y1: float, r: float) -> str:
+    """An ASS vector drawing (\\p1) of a rounded rectangle, absolute pixels."""
+    r = max(0.0, min(r, (x1 - x0) / 2, (y1 - y0) / 2))
+    k = r * 0.45                                   # bezier handle for a near-circular corner
+    f = lambda v: f"{v:.0f}"                       # noqa: E731
+    return (f"m {f(x0 + r)} {f(y0)} l {f(x1 - r)} {f(y0)} b {f(x1 - k)} {f(y0)} {f(x1)} {f(y0 + k)} {f(x1)} {f(y0 + r)} "
+            f"l {f(x1)} {f(y1 - r)} b {f(x1)} {f(y1 - k)} {f(x1 - k)} {f(y1)} {f(x1 - r)} {f(y1)} "
+            f"l {f(x0 + r)} {f(y1)} b {f(x0 + k)} {f(y1)} {f(x0)} {f(y1 - k)} {f(x0)} {f(y1 - r)} "
+            f"l {f(x0)} {f(y0 + r)} b {f(x0)} {f(y0 + k)} {f(x0 + k)} {f(y0)} {f(x0 + r)} {f(y0)}")
 
 
 def _below_baseline(pr: Preset) -> float:

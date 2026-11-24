@@ -151,7 +151,7 @@ export default function NewProject({ done, go }: { done: () => void; go: (p: Pag
           <p className="muted">Click a streamer to see their campaign. Earnings are estimates in Australian dollars; hover for the range.</p>
           {warn && <p className="warn-text">{warn}</p>}
           {loading && !groups && <div className="row"><div className="spinner small" /><span className="muted">Looking for live streamers…</span></div>}
-          {groups && !allDetails && <StreamerSections gameId={game.id} groups={groups} selected={selected} onSelect={setSelected}
+          {groups && !allDetails && <StreamerSections gameId={game.id} gameName={game.name} groups={groups} selected={selected} onSelect={setSelected}
             reload={async () => { await loadGroups(game.id); }} />}
           {allDetails && <StreamerTable gameId={game.id} streamers={streamers} selected={selected} onSelect={setSelected}
             reload={() => api.get(`/games/${game.id}/streamers`).then(setStreamers)} />}

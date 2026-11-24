@@ -1,5 +1,13 @@
 # ClipFarm changelog
 
+## 0.8.8: presets, variations, and live dots
+
+- **Preset bar in the Editor:** six presets, each card showing your clip in that style: Streamer Corner, Split Screen, Bold Box, Clean Minimal, Hype and Facecam Focus. Click one to apply it, or tweak it and "Save as my style". All keep the rules: fixed crops, static captions, Montserrat, no music.
+- **Make variations:** make 1 to 10 versions of a clip in one preset or a mix. Each has its own hook from the clip's words, plus a different trim, layout, colour or punch-in, and a label saying what's different.
+- **Cheap previews first:** variations show as quick low-res previews. Only "Keep" or "Export" renders a full clip into My Clips, linked to the original with its own viral score and A$. "Keep all", "Keep selected" and "Discard the rest" are there too.
+- **Live dots in every streamer picker:** green for live (viewers, time live, game, with a warning when it's not the project's game), grey for offline, hollow for "status unavailable". Live streamers go to the top, and the list refreshes every minute while it's open.
+- **Cheap live checks:** Twitch uses one call per 100 streamers, Kick its official API, and YouTube a ~2-unit check per channel (never search.list) with a daily cap. Database change: migration v15.
+
 ## 0.8.7: Live Watcher, a different hook on every clip, no auto music
 
 - **Live Watcher (the new default):** watches the streamers you pick while they're live, using chat, new viewer clips, and laughter from a 3-minute buffer. When something happens, an AI judge scores it; anything rated 7/10 or higher (after checking viewer clips and chat 10 minutes later) becomes a clip in My Clips. Everything else is deleted.

@@ -363,7 +363,11 @@ def spec_for(edl: dict, out: Path, base: Path, quality: str = "export", music: b
     sh = sorted([*sh, *lay["shakes"]])
     rules = edl["rules"]
     hk = edl["hook"]
-    ov = cap.get("style_overrides") or {}
+    ov = dict(cap.get("style_overrides") or {})
+    if ov.pop("anchor", None) == "seam":         # Split Screen: captions sit (fixed) on the facecam/gameplay seam
+        kfs = edl["layout"].get("keyframes") or []
+        if kfs and all(k.get("layout") == "split" for k in kfs):
+            ov["anchor_y"] = int(edl["layout"].get("cam_h", 640)) + 40
     if ov:
         from . import templates as _tm
         template = {**(template or _tm.get(cap.get("template") if isinstance(cap.get("template"), str) else None)), **ov}
@@ -374,7 +378,7 @@ def spec_for(edl: dict, out: Path, base: Path, quality: str = "export", music: b
         caption_nudge=float(cap.get("nudge", 0)),
         hook=None if hk.get("hidden") else hk.get("text"),
         hook_sec=dur if hk.get("whole") else float(hk.get("sec", 2.2)),
-        title_box=hk.get("box") or "outline",
+        title_box=hk.get("box") or "outline", title_color=hk.get("color"),
         words_per_chunk=cap.get("words_per_chunk"), emoji=bool(cap.get("emoji")),
         credit=None if edl.get("credit_hidden") else rules.get("credit"),
         progress_bar=edl.get("progress_bar", True), zooms=zooms, flashes=fl, shakes=sh, sfx=sfx,

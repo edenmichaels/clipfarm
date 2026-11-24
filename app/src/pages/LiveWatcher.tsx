@@ -4,6 +4,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import type { Page } from "../App";
+import { LiveDot, liveRank, useLiveStatus } from "../components/LiveDot";
 
 const mb = (b: number) => (b >= 1024 ** 3 ? `${(b / 1024 ** 3).toFixed(1)} GB` : `${(b / 1024 ** 2).toFixed(0)} MB`);
 
@@ -18,6 +19,8 @@ export default function LiveWatcher({ go }: { go: (p: Page, t?: string) => void 
 
   const save = async (body: any) => { try { setSt(await api.put("/live/settings", body)); } catch (e: any) { setMsg(e.message); } };
   const chosen: number[] = st?.streamers?.map((s: any) => s.id) ?? [];
+  const live = useLiveStatus(cands.map((c) => c.id), picking);          // only while the picker is open
+  const sorted = [...cands].sort((a, b) => liveRank(live[String(a.id)]) - liveRank(live[String(b.id)]));
   const toggle = (id: number) => save({ streamers: chosen.includes(id) ? chosen.filter((x) => x !== id) : [...chosen, id] });
 
   return (
@@ -50,10 +53,10 @@ export default function LiveWatcher({ go }: { go: (p: Page, t?: string) => void 
         <section className="card stack tight">
           <h2>Pick streamers</h2>
           <span className="muted small-text">Only Twitch streamers you have permission or a campaign for can be watched.</span>
-          {cands.map((c) => (
+          {sorted.map((c) => (
             <label key={c.id} className="row" style={{ gap: 8, opacity: c.allowed ? 1 : 0.5 }} title={c.why || ""}>
               <input type="checkbox" checked={chosen.includes(c.id)} disabled={!c.allowed} onChange={() => toggle(c.id)} />
-              {c.display_name} <span className="muted small-text">{c.allowed ? `twitch.tv/${c.login}` : c.why}</span>
+              {c.display_name} <LiveDot st={live[String(c.id)]} /> <span className="muted small-text">{c.allowed ? `twitch.tv/${c.login}` : c.why}</span>
             </label>))}
           {cands.length === 0 && <span className="muted">No Twitch streamers yet. Add them in a project first.</span>}
         </section>)}

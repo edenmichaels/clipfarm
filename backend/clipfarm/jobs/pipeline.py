@@ -554,6 +554,16 @@ def export_edit_job(payload: dict, ctx: JobContext) -> None:
     emit("clip_ready", clip_id=payload["clip_id"], title="", streamer="Exported")
 
 
+@handler("render_variation")
+def render_variation_job(payload: dict, ctx: JobContext) -> None:
+    """A variation's cheap preview (low-res proxy). Full renders only happen when you keep it."""
+    from ..edit import variations
+    path = variations.render_preview(payload["variation_id"], Path(payload["out"]))
+    v = db.q1("SELECT clip_id FROM variations WHERE id=?", (payload["variation_id"],))
+    if path and v:
+        emit("variation_ready", clip_id=v["clip_id"], variation_id=payload["variation_id"])
+
+
 @handler("rerender_clip")
 def rerender_clip(payload: dict, ctx: JobContext) -> None:
     """Re-render captions/hook/music over the clip's base (seconds, not minutes). Review uses this."""

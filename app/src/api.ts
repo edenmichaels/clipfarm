@@ -107,6 +107,7 @@ export const api = {
   del: <T = any>(p: string) => req<T>("DELETE", p),
   frameUrl: (cid: number, t: number, head: number) => `${base}/edit/${cid}/frame?t=${t.toFixed(2)}&h=${head}&token=${token}`,
   sourceFrameUrl: (cid: number, t: number, item = 0) => `${base}/edit/${cid}/source-frame?t=${t.toFixed(1)}&item=${item}&token=${token}`,
+  presetThumbUrl: (cid: number, key: string, head: number) => `${base}/edit/${cid}/preset-thumb/${key}?h=${head}&token=${token}`,
   styleRefUrl: (rid: number) => `${base}/style-refs/${rid}/image?token=${token}`,
   mediaUrl: (path: string) => `${base}/media?path=${encodeURIComponent(path)}&token=${token}`,
   fontUrl: (file: string) => `${base}/fonts/${encodeURIComponent(file)}`,

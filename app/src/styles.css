@@ -498,3 +498,23 @@ kbd { font: 12px/1.4 ui-monospace, monospace; background: var(--panel2); border:
 .audit td, .audit th { padding: 6px 10px 6px 0; vertical-align: top; text-align: left; font-size: 13px; }
 .dlg { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 20px; width: min(560px, 94vw); max-height: 88vh; overflow: auto; box-shadow: 0 20px 60px #000a; }
 .dlg textarea { width: 100%; box-sizing: border-box; }
+/* v0.8.8 live dots */
+.live-dot { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+.live-dot i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; background: #6b7280; }
+.live-dot.on { color: #22c55e; font-weight: 600; }
+.live-dot.on i { background: #22c55e; box-shadow: 0 0 6px #22c55e99; }
+.live-dot.unknown i { background: transparent; border: 1.5px solid #9ca3af; }
+.live-game { color: var(--muted); font-weight: 400; margin-left: 4px; }
+.live-game.other { color: var(--warn); font-weight: 600; }
+/* v0.8.8 preset bar + variations */
+.preset-bar { display: flex; gap: 10px; overflow-x: auto; padding: 8px 2px; align-items: stretch; }
+.preset-card { flex: 0 0 132px; display: flex; flex-direction: column; gap: 4px; padding: 6px; border-radius: 12px; background: var(--panel2); border: 2px solid transparent; cursor: pointer; text-align: left; }
+.preset-card.on { border-color: var(--accent); }
+.preset-card img, .preset-card .ph { width: 120px; height: 213px; object-fit: cover; border-radius: 8px; background: #111; }
+.preset-card b { font-size: 13px; }
+.preset-card span { font-size: 11px; color: var(--muted); line-height: 1.25; }
+.var-tools { display: flex; flex-direction: column; gap: 6px; padding: 8px; min-width: 190px; }
+.var-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; }
+.var-card { display: flex; flex-direction: column; gap: 4px; padding: 6px; border-radius: 10px; background: var(--panel2); border: 2px solid transparent; }
+.var-card.on { border-color: var(--accent); }
+.var-card video, .var-card .ph { width: 100%; aspect-ratio: 9/16; border-radius: 8px; background: #111; object-fit: cover; }

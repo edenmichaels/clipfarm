@@ -1,6 +1,7 @@
 // Streamer discovery readout: sortable table + card view, permission editing, program linking.
 import { useEffect, useMemo, useState } from "react";
 import { api, PERMISSIONS } from "../api";
+import { LiveDot, liveRank, useLiveStatus } from "./LiveDot";
 
 type Props = { gameId: number; streamers: any[]; selected: number[]; onSelect: (ids: number[]) => void; reload: () => void };
 type PermKey = keyof typeof PERMISSIONS;
@@ -36,11 +37,13 @@ export default function StreamerTable({ gameId, streamers, selected, onSelect, r
   const [hideBlocked, setHideBlocked] = useState(true);
   const [why, setWhy] = useState<any>(null);
 
+  const live = useLiveStatus(streamers.map((s) => s.id));
   const rows = useMemo(() => {
     const r = streamers.filter((s) => !hideBlocked || s.permission_status !== "prohibited");
     const [k, dir] = sort;
-    return [...r].sort((a, b) => ((a[k] ?? -1) > (b[k] ?? -1) ? dir : -dir));
-  }, [streamers, sort, hideBlocked]);
+    return [...r].sort((a, b) => liveRank(live[String(a.id)]) - liveRank(live[String(b.id)])     // live first
+      || ((a[k] ?? -1) > (b[k] ?? -1) ? dir : -dir));
+  }, [streamers, sort, hideBlocked, live]);
 
   const toggle = (s: any) => {
     if (!clippable(s)) return setEditing(s);
@@ -74,7 +77,7 @@ export default function StreamerTable({ gameId, streamers, selected, onSelect, r
                   <td><button className={on ? "tick on" : "tick"} aria-label={`Select ${s.display_name}`} onClick={() => toggle(s)}>{on ? "✓" : ""}</button></td>
                   <td><Score v={s.profit_score} /></td>
                   <td>{s.avatar_url && <img className="avatar" src={s.avatar_url} alt="" />}<span style={{ fontWeight: 600 }}>{s.display_name}</span> <span className="muted">{s.platform}</span></td>
-                  <td>{s.is_live ? <span className="pill live">LIVE</span> : <span className="muted">offline</span>}</td>
+                  <td>{live[String(s.id)] ? <LiveDot st={live[String(s.id)]} /> : s.is_live ? <span className="pill live">LIVE</span> : <span className="muted">offline</span>}</td>
                   <td>{s.current_viewers?.toLocaleString() ?? "—"}</td>
                   <td>{s.avg_viewers ? Math.round(s.avg_viewers).toLocaleString() : "—"}</td>
                   <td>{s.earnings_tier}</td>
@@ -91,7 +94,7 @@ export default function StreamerTable({ gameId, streamers, selected, onSelect, r
           {rows.map((s) => (
             <div key={s.id} className={`card scard ${selected.includes(s.id) ? "on" : ""} ${clippable(s) ? "" : "blocked"}`}>
               <div className="row between" style={{ width: "100%" }}>
-                <span style={{ fontWeight: 700, fontSize: 16 }}>{s.display_name}</span><Score v={s.profit_score} />
+                <span style={{ fontWeight: 700, fontSize: 16 }}>{s.display_name} <LiveDot st={live[String(s.id)]} /></span><Score v={s.profit_score} />
               </div>
               <span className="muted">{s.platform} · {s.is_live ? "LIVE" : "offline"} · {s.current_viewers?.toLocaleString() ?? "—"} viewers</span>
               <Perm s={s} />

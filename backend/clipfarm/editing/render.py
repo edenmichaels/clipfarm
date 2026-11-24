@@ -83,7 +83,8 @@ class RenderSpec:
     cards: list[dict] = field(default_factory=list)        # [{text, start, end, bg, fg}] intro/outro cards
     progress_color: str = "FFE500"
     credit_pos: str | None = None        # brand: top | bottom (None = top)
-    title_box: str = "outline"           # title look: white_box | black_box | outline | none (fixed at the top)
+    title_box: str = "outline"           # title look: white_box | black_box | color_box | plain | outline | none
+    title_color: str | None = None       # v0.8.8: the box colour for title_box="color_box"
     # v0.8.3 Editor layers (all in output time)
     text_layers: list[dict] = field(default_factory=list)   # [{text,start,end,x,y (0-1),size,color,box,rotate}]
     stickers: list[dict] = field(default_factory=list)      # image stickers [{path,start,end,x,y (0-1),size,rotate}]
@@ -359,7 +360,8 @@ def track_for(spec: RenderSpec, meta: dict, out: Path):
                        spec.words_per_chunk, offset=spec.start, nudge=spec.caption_nudge, uppercase=spec.uppercase,
                        profanity=spec.profanity, fillers=spec.fillers, emoji=spec.emoji, hook=spec.hook,
                        hook_sec=spec.hook_sec, credit=spec.credit, duration=meta["duration"],
-                       title_box=spec.title_box, text_layers=spec.text_layers, credit_pos=spec.credit_pos)
+                       title_box=spec.title_box, text_layers=spec.text_layers, credit_pos=spec.credit_pos,
+                       title_color=spec.title_color)
 
 
 def finish(spec: RenderSpec, base: Path, meta: dict, out: Path | None = None, music: bool = True,

@@ -8,6 +8,7 @@ import { useEffect, useState } from "react";
 import { api, aud, PLATFORM_LABEL } from "../api";
 import { openCampaignBrowser } from "../lib/campaignBrowser";
 import { WhyRanked } from "./StreamerTable";
+import { LiveDot, liveRank, useLiveStatus } from "./LiveDot";
 
 export const clippable = (s: any) => s.permission_status === "allowed" || s.permission_status === "program_member";
 
@@ -25,12 +26,15 @@ function Money({ pj }: { pj: any }) {
   );
 }
 
-export default function StreamerSections({ gameId, groups, selected, onSelect, reload }: Props) {
+export default function StreamerSections({ gameId, gameName, groups, selected, onSelect, reload }: Props & { gameName?: string }) {
   const [open, setOpen] = useState<any>(null);
   const [why, setWhy] = useState<any>(null);
   const [showNone, setShowNone] = useState(false);
   const [showLeftOut, setShowLeftOut] = useState(false);
   const [msg, setMsg] = useState("");
+  const allIds = [...(groups?.joined ?? []), ...(groups?.worth_joining ?? []), ...(groups?.worth_joining_left_out ?? []),
+    ...(groups?.no_campaign ?? [])].map((s: any) => s.id);
+  const live = useLiveStatus(allIds);
 
   const toggle = (s: any) => {
     setMsg("");
@@ -51,8 +55,8 @@ export default function StreamerSections({ gameId, groups, selected, onSelect, r
           ? <button className={on ? "tick on" : "tick"} aria-label={`Select ${s.display_name}`} onClick={() => toggle(s)}>{on ? "✓" : ""}</button>
           : <span className="tick ghost" aria-hidden="true" />}
         <button className="srow-main" onClick={() => setOpen(s)}>
-          <span className="sname">{s.display_name}</span>
-          <span className="muted small-text">{PLATFORM_LABEL[s.platform] ?? s.platform}{s.is_live ? ` · live · ${(s.current_viewers ?? 0).toLocaleString()} watching` : ""}</span>
+          <span className="sname">{s.display_name} <LiveDot st={live[String(s.id)]} projectGame={gameName} /></span>
+          <span className="muted small-text">{PLATFORM_LABEL[s.platform] ?? s.platform}</span>
           <span className="sreason">{kind === "left" ? s.excluded_reason : kind === "none" ? "Not paying clippers" : s.campaign ? `${s.campaign.name} — ${s.reason}` : s.reason}</span>
         </button>
         <Money pj={s.projection} />
@@ -64,8 +68,9 @@ export default function StreamerSections({ gameId, groups, selected, onSelect, r
     );
   };
 
-  const joined = groups?.joined ?? [], worth = groups?.worth_joining ?? [], left = groups?.worth_joining_left_out ?? [],
-    none = groups?.no_campaign ?? [];
+  const byLive = (xs: any[]) => [...xs].sort((a, b) => liveRank(live[String(a.id)]) - liveRank(live[String(b.id)]));
+  const joined = byLive(groups?.joined ?? []), worth = byLive(groups?.worth_joining ?? []),
+    left = byLive(groups?.worth_joining_left_out ?? []), none = byLive(groups?.no_campaign ?? []);
 
   return (
     <div className="stack tight">

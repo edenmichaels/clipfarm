@@ -10,6 +10,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, aud, MOMENT_EMOJI, PLATFORM_LABEL, waitForJob } from "../api";
 import type { Page } from "../App";
 import { StylesPanel } from "../components/Styles";
+import { PresetBar, Variations } from "../components/EditorPresets";
 import {
   CaptionsPanel, EffectsPanel, HookPanel, LayoutPanel, MusicPanel, Preview, RulesPanel, TranscriptPanel,
   fmt, keptOf, segAt, toSrc, useCaptionFonts,
@@ -202,6 +203,9 @@ function Studio({ clip, bin, onChanged, go, msg, setMsg, session }: {
   }, [cid]);
   const rescore = () => api.post(`/edit/${cid}/score`).then(setScore).catch(() => {});
   const show = (r: any) => { setV(r); rescore(); if (!r.proxy) rebuild(); onChanged(); };
+  const [vars, setVars] = useState<any[]>([]);
+  const loadVars = () => api.get(`/edit/${cid}/variations`).then(setVars).catch(() => {});
+  useEffect(() => { setVars([]); loadVars(); }, [cid]);
   useEffect(() => {
     api.get(`/edit/${cid}`).then((r) => { setV(r); setPreset(r.edl.export?.preset || "tiktok"); if (!r.proxy) rebuild(); }).catch((e) => setLoadErr(e.message));
     rescore();
@@ -397,6 +401,10 @@ function Studio({ clip, bin, onChanged, go, msg, setMsg, session }: {
       </aside>
 
       <section className="st-centre">
+        <PresetBar cid={cid} head={v.head} current={v.edl.style?.key} onApplied={show}
+          onVariations={async (n, preset) => {
+            try { await api.post(`/edit/${cid}/variations`, { n, preset }); setMsg(`Making ${n} variation${n === 1 ? "" : "s"}: quick previews first.`); loadVars(); }
+            catch (e: any) { setMsg(e.message); } }} />
         <Preview v={v} videoRef={vid} t={t} setT={setT} zone={zone} building={buildingNow} overlay={overlay} />
         <div className="row wrap st-under" style={{ gap: 6, justifyContent: "center" }}>
           <button onClick={() => seek(Math.max(0, t - 1 / 30))} aria-label="Previous frame">⏮</button>
@@ -405,6 +413,7 @@ function Studio({ clip, bin, onChanged, go, msg, setMsg, session }: {
           <span className="muted tiny">{fmt(t)} / {fmt(dur)}</span>
           {["tiktok", "reels", "shorts"].map((z) => <button key={z} className={zone === z ? "pill-btn on small" : "pill-btn small"} onClick={() => setZone(zone === z ? null : z)}>{z === "tiktok" ? "TikTok" : z === "reels" ? "Reels" : "Shorts"} zone</button>)}
         </div>
+        <Variations cid={cid} rows={vars} reload={loadVars} onMsg={setMsg} />
       </section>
 
       <aside className="st-right">

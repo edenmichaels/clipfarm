@@ -481,9 +481,26 @@ def _v14(conn: sqlite3.Connection) -> None:
             _set(conn, "style_notices", (_get(conn, "style_notices", []) or []) + changed)
 
 
+# ---- v15 (0.8.8): variations (cheap previews; kept ones become clips) and streamer live status ----------------
+def _v15(conn: sqlite3.Connection) -> None:
+    _script(conn, """
+    CREATE TABLE IF NOT EXISTS variations (
+        id           INTEGER PRIMARY KEY,
+        clip_id      INTEGER NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
+        batch        INTEGER NOT NULL DEFAULT 1,
+        n            INTEGER NOT NULL,
+        style_key    TEXT, edl TEXT NOT NULL, label TEXT, changes TEXT, hook TEXT,
+        status       TEXT NOT NULL DEFAULT 'preview',        -- preview | kept | discarded
+        preview_job  INTEGER, preview_path TEXT, thumb_path TEXT, kept_clip_id INTEGER,
+        created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS variations_clip ON variations(clip_id, status)
+    """)
+
+
 MIGRATIONS: list[tuple[int, Callable[[sqlite3.Connection], None]]] = [(2, _v2), (3, _v3), (4, _v4), (5, _v5), (6, _v6),
                                                                       (7, _v7), (8, _v8), (9, _v9), (10, _v10),
-                                                                      (11, _v11), (12, _v12), (13, _v13), (14, _v14)]
+                                                                      (11, _v11), (12, _v12), (13, _v13), (14, _v14), (15, _v15)]
 LATEST = MIGRATIONS[-1][0]
 
 

@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from .. import db
 
 H = 1920
-TITLE_BOXES = ["white_box", "black_box", "outline", "none"]
+TITLE_BOXES = ["white_box", "black_box", "color_box", "plain", "outline", "none"]
 LAYOUTS = ["corner", "split", "full_reaction", "gameplay", "auto"]
 
 # Every field the editor can tweak, with its allowed range. `clean()` enforces these.
@@ -40,7 +40,16 @@ FIELDS = {
     "captions.highlight": bool,
     "captions.highlight_color": str,
     "captions.uppercase": bool,
+    "captions.size": (104, 140),
+    "captions.outline": (0, 14),
+    "captions.shadow": (0, 8),
+    "captions.text_color": str,
+    "captions.box": bool,
+    "captions.box_color": str,
+    "captions.anchor": ["bottom", "seam"],
+    "layout.corner": ["auto", "tl", "tr"],
     "title.box": TITLE_BOXES,
+    "title.color": str,
     "title.whole": bool,
     "title.seconds": (1.0, 8.0),
     "pacing.zoom_cuts": bool,
@@ -55,21 +64,55 @@ FIELDS = {
 }
 
 
-def _style(key, name, desc, layout, captions, title, pacing, effects, audio) -> dict:
-    return {"key": key, "name": name, "builtin": True, "description": desc, "layout": layout,
-            "captions": captions, "title": title, "pacing": pacing, "effects": effects, "audio": audio}
+def _style(key, name, desc, layout, captions, title, pacing, effects, audio, preset: bool = False) -> dict:
+    return {"key": key, "name": name, "builtin": True, "description": desc, "layout": {**_LAY, **layout},
+            "captions": {**_CAP, **captions}, "title": {**_TITLE, **title}, "pacing": pacing, "effects": effects,
+            "audio": audio, "preset": preset}
 
 
-_CAP = {"template": "bold_pop", "words": 3, "highlight": True, "highlight_color": "FFE600", "uppercase": True}
+_CAP = {"template": "bold_pop", "words": 3, "highlight": True, "highlight_color": "FFE600", "uppercase": True,
+        "size": 124, "outline": 9, "shadow": 4, "text_color": "FFFFFF", "box": False, "box_color": "000000",
+        "anchor": "bottom"}
+_TITLE = {"box": "white_box", "whole": True, "seconds": 4.0, "color": "E53935"}
+_LAY = {"mode": "corner", "cam_ratio": 0.40, "pip_w": 0.34, "focus": True, "seam_line": False, "corner": "auto"}
 _PACE = {"zoom_cuts": False, "zoom": 0.4, "cut_silence": True, "max_gap": 0.45}
 _FX = {"flash": False, "sfx": False, "emoji": False}
 
+_NOMUSIC = {"music": False, "music_db": -3.0}
+
+# v0.8.8: the six presets on the Editor's preset bar (originals; all fixed crops, static bottom captions, Montserrat,
+# no music). The older styles below stay available (saved projects and your own styles may use them).
+PRESET_KEYS = ["streamer_corner", "split_screen", "bold_box", "clean_minimal", "hype", "facecam_focus"]
+
 BUILTINS: dict[str, dict] = {s["key"]: s for s in [
     _style("streamer_corner", "Streamer Corner",
-           "Gameplay fills the frame with the facecam in a top corner; cuts to the streamer when they're the moment.",
+           "Gameplay full frame, facecam in a corner, white captions with a yellow word, white title box.",
            {"mode": "corner", "cam_ratio": 0.40, "pip_w": 0.34, "focus": True, "seam_line": False},
            dict(_CAP), {"box": "white_box", "whole": True, "seconds": 4.0}, dict(_PACE), dict(_FX),
-           {"music": False, "music_db": -3.0}),
+           dict(_NOMUSIC), preset=True),
+    _style("split_screen", "Split Screen",
+           "Facecam on top, gameplay below, captions on the seam, bold outlined title.",
+           {"mode": "split", "cam_ratio": 0.40, "focus": False, "seam_line": True},
+           {"anchor": "seam"}, {"box": "outline", "whole": True}, dict(_PACE), dict(_FX), dict(_NOMUSIC), preset=True),
+    _style("bold_box", "Bold Box",
+           "Uppercase white captions in a solid black rounded box; title in a coloured box.",
+           {"mode": "corner"}, {"box": True, "box_color": "000000", "outline": 0, "shadow": 0, "highlight_color": "FFE600"},
+           {"box": "color_box", "color": "7C4DFF"}, dict(_PACE), dict(_FX), dict(_NOMUSIC), preset=True),
+    _style("clean_minimal", "Clean Minimal",
+           "Smaller white captions with a soft shadow, no highlight, small plain title.",
+           {"mode": "corner", "focus": False}, {"template": "minimal", "highlight": False, "highlight_color": "FFFFFF",
+                                               "size": 104, "outline": 6, "shadow": 6, "uppercase": False},
+           {"box": "plain", "whole": True}, dict(_PACE, cut_silence=False, max_gap=0.8), dict(_FX), dict(_NOMUSIC),
+           preset=True),
+    _style("hype", "Hype",
+           "Uppercase captions, green active word, extra-thick outline, emoji on key words, red title box.",
+           {"mode": "corner"}, {"template": "hype_yellow", "highlight_color": "3DFF5A", "outline": 12, "words": 2},
+           {"box": "color_box", "color": "E53935", "whole": False, "seconds": 3.0}, dict(_PACE, max_gap=0.35),
+           {"flash": True, "sfx": False, "emoji": True}, dict(_NOMUSIC), preset=True),
+    _style("facecam_focus", "Facecam Focus",
+           "The streamer fills the frame with gameplay small in a corner, centred captions, title at the top.",
+           {"mode": "full_reaction", "focus": True}, {}, {"box": "white_box", "whole": True}, dict(_PACE), dict(_FX),
+           dict(_NOMUSIC), preset=True),
     _style("streamer_split", "Streamer Split",
            "Facecam on top, gameplay below, static captions at the bottom, white-box title.",
            {"mode": "split", "cam_ratio": 0.40, "pip_w": 0.34, "focus": False, "seam_line": True},
@@ -153,6 +196,11 @@ def clean(style: dict, base: str | None = None) -> dict:
 # ---- storage -----------------------------------------------------------------------------------------
 def builtins() -> list[dict]:
     return [copy.deepcopy(s) for s in BUILTINS.values()]
+
+
+def presets() -> list[dict]:
+    """The six cards on the Editor's preset bar."""
+    return [copy.deepcopy(BUILTINS[k]) for k in PRESET_KEYS]
 
 
 def user() -> list[dict]:
@@ -284,6 +332,8 @@ def apply(edl: dict, style: dict | str) -> dict:
     if pip.get("source") != "yours":
         pip["w"] = float(lay["pip_w"])
     pip.setdefault("corner", "tr")
+    if lay.get("corner") in ("tl", "tr") and pip.get("source") != "yours":
+        pip["corner"] = lay["corner"]
     e["layout"]["pip"] = pip
     kfs = e["layout"].get("keyframes") or [{"t": e["range"][0], "layout": "blur_fill", "cam": None, "path": [[0, 0.5]]}]
     cam_lays = ("split", "pip", "cam_full", "corner", "focus")
@@ -321,13 +371,18 @@ def apply(edl: dict, style: dict | str) -> dict:
     c.pop("position", None)                   # captions have one fixed place (v0.8.5)
     c["words_per_chunk"] = int(cap["words"])
     c["style_overrides"] = {"highlight_on": cap["highlight"], "highlight": cap["highlight_color"],
-                            "uppercase": cap["uppercase"], "max_words": int(cap["words"])}
+                            "uppercase": cap["uppercase"], "max_words": int(cap["words"]),
+                            "em": float(cap["size"]), "outline_px": float(cap["outline"]),
+                            "shadow_px": float(cap["shadow"]), "text": cap["text_color"], "box": bool(cap["box"]),
+                            "box_color": cap["box_color"], "anchor": cap["anchor"]}
+    c["emoji"] = bool(fx["emoji"])
 
     # title / hook
     h = e["hook"]
     h["box"] = ttl["box"]
     h["whole"] = bool(ttl["whole"])
     h["sec"] = float(ttl["seconds"])
+    h["color"] = ttl.get("color")
     h.pop("position", None)                   # the title is fixed at the top
     if ttl["box"] == "none":
         h["hidden"] = True
