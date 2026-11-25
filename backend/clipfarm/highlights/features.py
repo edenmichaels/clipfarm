@@ -1,6 +1,6 @@
 """Features of one candidate moment, for the viral model.
 
-Built from the per-second signals the detector already has (audio events, chat, visuals, transcript words,
+Built from the per-second signals the detector already has (audio events, chat, transcript words,
 the LLM rating) plus the event tags. Everything is 0..1 so weights are comparable and the "Why this moment?"
 panel can show each feature's contribution.
 

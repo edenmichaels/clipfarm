@@ -170,7 +170,7 @@ def _signals(n=600, seed=1):
 
 def _curve(ev, loud, vis, chat=None, n=600):
     from clipfarm.highlights import detect
-    comp, parts = detect.components(detect.Signals(n, events=ev, loudness=loud, visual=vis, chat=chat))
+    comp, parts = detect.components(detect.Signals(n, events=ev, loudness=loud, chat=chat))
     return detect.curve(comp, parts), comp, parts
 
 
@@ -185,21 +185,14 @@ def test_laughter_and_explosions_raise_the_score():
     assert cv[250:256].max() > base[250:256].max() + 0.4
 
 
-def test_menus_loading_and_quiet_are_penalised():
+def test_loading_music_and_quiet_are_penalised():
+    # v0.8.9: no video analysis, so menus are no longer seen; loading music and dead air still are
     detect, ev, loud, vis = _signals()
-    ev["laughter"][100:104] = 0.5                       # the same small reaction ...
-    ev["laughter"][300:304] = 0.5
-    vis["static"][290:340] = 1                          # ... but the second one is on a menu screen
-    vis["ui"][290:340] = 0.9
-    vis["motion"][290:340] = 0.001
-    ev["music"][380:440] = 0.9                          # loading music, black screen
-    vis["dark"][380:440] = 1
+    ev["music"][380:440] = 0.9                          # loading music
     ev["silence"][500:560] = 0.95                       # dead air
     cv, _, parts = _curve(ev, loud, vis)
-    assert parts["penalty"][300:330].mean() > 0.4 and parts["penalty"][390:430].mean() > 0.5
-    assert parts["penalty"][510:550].mean() > 0.4
-    assert cv[300:304].max() < cv[100:104].max()
-    assert cv[390:430].max() < 0.05 and cv[510:550].max() < 0.1
+    assert parts["penalty"][390:430].mean() > 0.3 and parts["penalty"][510:550].mean() > 0.4
+    assert cv[390:430].max() < 0.1 and cv[510:550].max() < 0.1
 
 
 def test_constantly_loud_segment_without_events_is_not_picked():
@@ -230,11 +223,11 @@ def test_moment_types_and_focus():
     ev["explosion"][250:256] = 0.85
     vis["flash"][250:256] = 0.3
     n = 600
-    comp, parts = detect.components(detect.Signals(n, events=ev, loudness=loud, visual=vis))
+    comp, parts = detect.components(detect.Signals(n, events=ev, loudness=loud))
     assert detect.classify(parts, 98, 110) == "Funny"
     assert detect.classify(parts, 248, 258) == "Action + Reaction"
-    cf, _ = detect.components(detect.Signals(n, events=ev, loudness=loud, visual=vis), "funny")
-    ca, _ = detect.components(detect.Signals(n, events=ev, loudness=loud, visual=vis), "action")
+    cf, _ = detect.components(detect.Signals(n, events=ev, loudness=loud), "funny")
+    ca, _ = detect.components(detect.Signals(n, events=ev, loudness=loud), "action")
     assert cf["audio_events"][100:108].max() > ca["audio_events"][100:108].max()
     assert ca["audio_events"][250:256].max() >= cf["audio_events"][250:256].max()
 
@@ -267,7 +260,7 @@ def test_learning_reweights_after_enough_ratings(fresh_db):
     assert w["chat"] > 0.25 and abs(sum(w.values()) - 1) < 0.01
     learning.reset(f"streamer:{sid}")
     learning.reset(f"game:{gid}")
-    assert learning.weights_for(sid, gid)["chat"] == 0.25
+    assert learning.weights_for(sid, gid)["chat"] == 0.40          # v0.8.9: chat carries the old visual weight
 
 
 def test_yamnet_features_shape_and_mel_matrix():

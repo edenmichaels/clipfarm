@@ -96,8 +96,7 @@ def test_short_source_no_longer_crashes(n):
     """Reproduces "setting an array element with a sequence ... detected shape was (3,) + inhomogeneous part":
     a source shorter than the 9 s smoothing window (short Twitch clips) made one signal longer than the rest."""
     ch = signals.chat_reactions([(0.5, "KEKW")] * 3, n)
-    vis = {k: np.full(n, 0.1, np.float32) for k in ("motion", "cuts", "flash", "shake", "static", "dark", "ui")}
-    sig = detect.Signals(n, events=_events(n), loudness=np.full(n, -20.0, np.float32), chat=ch, visual=vis,
+    sig = detect.Signals(n, events=_events(n), loudness=np.full(n, -20.0, np.float32), chat=ch,
                          clips=[(0.0, 100)])
     comp, parts = detect.components(sig)
     assert all(v.shape == (n,) for v in comp.values()) and all(np.shape(v) == (n,) for v in parts.values())
@@ -119,14 +118,12 @@ def test_smooth_keeps_length_and_matches_old_results_for_normal_input():
 
 
 def test_detect_source_on_a_4_second_clip(tmp_path):
-    from clipfarm.highlights import run, visual
+    from clipfarm.highlights import run
     f = tmp_path / "short.mp4"
     proc.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=30:d=4", "-f", "lavfi",
               "-i", "sine=f=440:d=4", "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", str(f)],
              check=True)
-    vis = visual.analyse(f)
-    ms, dbg = run.detect_source(f, budget=1, min_len=1, max_len=60, threshold=0.0,
-                                visual_fn=lambda a, b: {k: v[int(a):int(b)] for k, v in vis.items()})
+    ms, dbg = run.detect_source(f, budget=1, min_len=1, max_len=60, threshold=0.0)
     assert dbg["duration"] in (4, 5)
 
 

@@ -41,7 +41,7 @@ DEFAULT_SETTINGS: dict = {
     "clip": {"min_sec": 15, "max_sec": 60, "pad_before": 3.0, "pad_after": 2.0,
              "top_n_per_hour": 4, "score_threshold": 0.55, "highlight_threshold": 0.42},
     "captions": {"style": "bold_pop", "profanity": "keep", "fillers": "remove", "emoji": False},
-    "highlights": {"focus": "balanced", "visual": True, "llm": True},
+    "highlights": {"focus": "balanced", "llm": True},
     "music": {"enabled": True, "duck_db": 15},
     "layout": "auto",                   # auto | split | crop | blur_fill
     "llm": {"provider": "ollama", "model": "llama3.1:8b",

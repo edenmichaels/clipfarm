@@ -199,16 +199,28 @@ function AutoPilot({ onChange }: { onChange: () => void }) {
         <h2 className="accent">Auto-pilot</h2>
         <button className={s.enabled ? "seg on" : "seg"} onClick={() => put({ enabled: !s.enabled })}>{s.enabled ? "On" : "Off"}</button>
       </div>
-      <span className="muted">Picks which campaign streamers to clip, how many clips and where to post, by projected A$ per hour of PC time. It never clips streamers without a campaign.</span>
+      <span className="muted">Watches your campaign streamers while they're live (pay-per-view first, then projected A$), reads their chat and keeps the moments the AI judge scores highly. It never clips streamers without a campaign.</span>
+      {ap.live?.note && <span className="warn-text small-text">{ap.live.note}</span>}
+      <label className="line">Max streamers at once {num("max_streamers")}</label>
+      <label className="line">Minimum judge score {num("min_score", 0.5)}</label>
+      <label className="line">Max clips per streamer per hour {num("clips_per_streamer_per_hour")}</label>
+      <label className="line">Run hours <input placeholder="any" style={{ width: 70 }} defaultValue={s.run_hours?.start ?? ""} onBlur={(e) => put({ run_hours: e.target.value ? { start: e.target.value, end: s.run_hours?.end || "07:00" } : null })} /> to <input placeholder="any" style={{ width: 70 }} defaultValue={s.run_hours?.end ?? ""} onBlur={(e) => put({ run_hours: e.target.value ? { start: s.run_hours?.start || "22:00", end: e.target.value } : null })} /></label>
+      <div className="stack tight" style={{ gap: 2 }}>
+        <span className="small-text">Campaigns to include <span className="muted">(none ticked = all)</span></span>
+        {(ap.campaigns ?? []).map((c: any) => (
+          <label key={c.id} className="row small-text" style={{ gap: 6 }}>
+            <input type="checkbox" checked={(s.campaigns ?? []).includes(c.id)} onChange={() => put({ campaigns: (s.campaigns ?? []).includes(c.id) ? s.campaigns.filter((x: number) => x !== c.id) : [...(s.campaigns ?? []), c.id] })} />
+            {c.name} <span className="muted">{c.campaign_type === "pay_per_view" ? `$${c.payout_per_1k}/1K` : (c.campaign_type || "").replace("_", " ")}{c.joined ? " · joined" : ""}</span>
+          </label>))}
+      </div>
       <label className="line">Max clips per day {num("max_clips_per_day")}</label>
       <label className="line">Max posts per account per day {num("max_posts_per_account_per_day")}</label>
       <label className="line">Minimum projected A$ per clip {num("min_projected_aud_per_clip", 0.1)}</label>
-      <label className="line">Clips per streamer per day {num("clips_per_streamer_per_day")}</label>
       <div className="row" style={{ gap: 8 }}><button className="btn-ghost" onClick={() => api.post("/autopilot/run").then((r) => { setAp(r); onChange(); }).catch((e) => setMsg(e.message))}>Decide now</button>{msg && <span className="muted">{msg}</span>}</div>
       <b>Current plan</b>
       {ap.plan.length === 0 ? <span className="muted">Nothing above your minimum right now.</span> :
         ap.plan.map((c: any) => <span key={c.streamer_id} className="small-text">{c.program}: {c.clips_per_day} clips/day → {c.platforms.map((p: string) => PLATFORM_LABEL[p] ?? p).join(", ")} · {aud(c.per_clip_likely)}/clip · {aud(c.aud_per_pc_hour)}/PC-hour</span>)}
-      <b>Why it changed</b>
+      <b>Auto-pilot log</b>
       <div className="logs" style={{ maxHeight: 200, overflow: "auto" }}>
         {ap.log.length === 0 ? <span className="muted">No decisions yet.</span> : ap.log.map((l: any) => <div key={l.id} className="small-text"><span className="muted">{l.ts}</span> {l.reason}</div>)}
       </div>

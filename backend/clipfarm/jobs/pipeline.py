@@ -23,7 +23,7 @@ from ..editing.render import RenderSpec, render
 from ..music import pick as music_pick
 from ..edit import brand as edit_brand, build as edit_build, compile as edit_compile, effects as edit_effects
 from ..edit import project as edit_project, templates as edit_templates
-from ..highlights import dedupe, detect, learning, rate, run, visual
+from ..highlights import dedupe, detect, learning, rate, run
 from ..highlights.chat_logger import ChatLogger, load_chat
 from ..highlights.transcribe import transcribe
 from ..providers import available_providers
@@ -170,10 +170,8 @@ def process_source(payload: dict, ctx: JobContext) -> None:
         db.ex("UPDATE sources SET status='ready', local_path=?, bytes=? WHERE id=?",
               (str(path), path.stat().st_size, src_id))
         ctx.progress(0.5)
-        vis_all = visual.analyse(path) if db.get_setting("highlights", {}).get("visual", True) else {}
         ms, dbg = run.detect_source(path, budget=1, min_len=cfg["min_sec"], max_len=cfg["max_sec"], threshold=0.0,
-                                    visual_fn=(lambda a, b: {k: v[int(a):int(b)] for k, v in vis_all.items()})
-                                    if vis_all else None, log=ctx.log, game_id=p.get("game_id"), viral_threshold=0)
+                                    log=ctx.log, game_id=p.get("game_id"), viral_threshold=0)
         dur = float(dbg.get("duration") or 0) or cfg["max_sec"]
         if dur <= cfg["max_sec"]:
             start, end = 0.0, dur
@@ -201,7 +199,7 @@ def process_source(payload: dict, ctx: JobContext) -> None:
             db.ex("UPDATE sources SET status='processed' WHERE id=?", (src_id,))
         return
 
-    # --- VOD: audio + chat over the whole VOD, visuals/LLM only for the shortlist ------------
+    # --- VOD ("Scan a past stream"): audio + chat over the whole VOD, transcript/LLM for the shortlist; no video --
     audio_path = media.download_audio(src["url"], work, f"src{src_id}")
     db.ex("UPDATE sources SET status='ready', local_path=? WHERE id=?", (str(audio_path), src_id))
     ctx.progress(0.25)
@@ -223,13 +221,6 @@ def process_source(payload: dict, ctx: JobContext) -> None:
     streamer = db.q1("SELECT display_name FROM streamers WHERE id=?", (src["streamer_id"],))
     game = db.q1("SELECT name FROM games WHERE id=?", (p["game_id"],)) if p["game_id"] else {"name": ""}
 
-    def visual_fn(a: float, b: float):
-        low = media.download_section(src["url"], work, f"src{src_id}_v{int(a)}", a, b, low_res=True)
-        try:
-            return visual.analyse(low)
-        finally:
-            Path(low).unlink(missing_ok=True)
-
     def words_fn(a: float, b: float):
         if not tcfg.get("enabled", True):
             return []
@@ -247,7 +238,6 @@ def process_source(payload: dict, ctx: JobContext) -> None:
     moments, _dbg = run.detect_source(
         Path(audio_path), chat=chat, clips=clip_offsets, budget=budget_n, min_len=cfg["min_sec"], max_len=cfg["max_sec"],
         focus=hcfg.get("focus", "balanced"), weights=weights,
-        visual_fn=visual_fn if hcfg.get("visual", True) else None,
         words_fn=words_fn if hcfg.get("llm", True) else None,
         rate_fn=(lambda tr, det: rate.rate(tr, det, streamer["display_name"], game["name"])) if hcfg.get("llm", True) else None,
         threshold=float(cfg.get("highlight_threshold", 0.42)), log=ctx.log, game_id=p.get("game_id"),
@@ -844,13 +834,6 @@ def viral_report(payload: dict, ctx: JobContext) -> None:
         chat += load_chat(f, vod_start)
     tcfg = db.get_setting("transcription", {})
 
-    def visual_fn(a, b):
-        low = media.download_section(vod["url"], work, f"rv{int(a)}", a, b, low_res=True)
-        try:
-            return visual.analyse(low)
-        finally:
-            Path(low).unlink(missing_ok=True)
-
     def words_fn(a, b):
         if not tcfg.get("enabled", True):
             return []
@@ -863,7 +846,7 @@ def viral_report(payload: dict, ctx: JobContext) -> None:
     game = db.q1("SELECT id, name FROM games WHERE name LIKE ?", (f"%{game_like}%",))
     try:
         ms, _ = run.detect_source(Path(audio_path), chat=chat, clips=[], budget=20, min_len=12, max_len=50,
-                                  threshold=0.2, visual_fn=visual_fn, words_fn=words_fn,
+                                  threshold=0.2, words_fn=words_fn,
                                   rate_fn=lambda tr, det: rate.rate(tr, det, vod["display_name"], game_like),
                                   game_id=game["id"] if game else None, viral_threshold=0, log=ctx.log)
     finally:

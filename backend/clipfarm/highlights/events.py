@@ -2,16 +2,13 @@
 
 Sources, cheapest first:
 - audio events (YAMNet): explosion, gunfire, crash/smash, sirens, tyre squeal
-- visuals: bright flashes (explosions), screen shake (crashes, falls), sudden motion spikes (stunts, ragdolls)
 - what the streamer and chat say ("the cops", "WASTED", "backflip", "plane", "bigfoot"...)
-- optionally a local vision model (Ollama, e.g. llava / qwen2.5-vl / moondream) on frames of shortlisted moments
 
 Each tag gets a 0..1 strength per second. Tags are what the timeline markers, the tag filters ("explosions with
 laughter") and the viral model use.
 """
 from __future__ import annotations
 
-import base64
 import re
 
 import numpy as np
@@ -52,7 +49,7 @@ def _fit(x, n):
 
 def from_signals(n: int, parts: dict, words: list[dict] | None = None, chat: list[tuple[float, str]] | None = None,
                  offset: float = 0.0) -> dict[str, np.ndarray]:
-    """Per-second tag strengths from audio events, visuals, transcript words and chat messages."""
+    """Per-second tag strengths from audio events, transcript words and chat messages (no video)."""
     tags = {t: np.zeros(n, np.float32) for t in TAGS}
     z = np.zeros(n, np.float32)
 
@@ -64,12 +61,6 @@ def from_signals(n: int, parts: dict, words: list[dict] | None = None, chat: lis
     tags["crash"] = np.maximum(tags["crash"], np.clip(p("ev_crash") * 1.3, 0, 1))
     tags["police"] = np.maximum(tags["police"], np.clip(p("ev_siren") * 1.1, 0, 1))
     tags["chase"] = np.maximum(tags["chase"], np.clip(np.minimum(p("ev_siren"), p("ev_vehicle")) * 2, 0, 1))
-    # visuals
-    flash = np.clip(p("flash") * 10, 0, 1)
-    shake = np.clip(p("shake") / 2.5, 0, 1)
-    tags["explosion"] = np.maximum(tags["explosion"], flash * np.clip(p("ev_explosion") * 3 + 0.3, 0, 1))
-    # camera shake alone is often a scene cut or facecam movement: only an impact sound makes it a crash
-    tags["crash"] = np.maximum(tags["crash"], shake * 0.6 * np.clip(p("ev_crash") * 3 + p("ev_explosion") * 2, 0, 1))
     # words: the streamer's (most reliable) and chat's
     for w in words or []:
         i = int(float(w["start"]) - offset)
@@ -96,27 +87,6 @@ VISION_PROMPT = (
     "plane = plane or helicopter; boat; chase; fail = something going wrong or a glitch; easter_egg = an animal, "
     "a secret or a myth; money = money or a heist. Return an empty list if nothing happens (menus, driving, "
     "cutscenes, talking).")
-
-
-def vision_tags(frames_png: list[bytes], model: str | None = None, timeout: float = 60) -> list[str] | None:
-    """Ask a local vision model which tags appear. None when no vision model is set up (that's fine)."""
-    from .. import db
-    cfg = db.get_setting("llm", {}) or {}
-    model = model or cfg.get("vision_model")
-    if not model or not frames_png:
-        return None
-    import requests
-    try:
-        r = requests.post(f"{cfg.get('base_url', 'http://127.0.0.1:11434')}/api/chat", timeout=timeout, json={
-            "model": model, "stream": False, "format": "json",
-            "messages": [{"role": "user", "content": VISION_PROMPT,
-                          "images": [base64.b64encode(f).decode() for f in frames_png[:8]]}]})
-        r.raise_for_status()
-        import json
-        out = json.loads(re.search(r"\{.*\}", r.json()["message"]["content"], re.S).group(0))
-        return [t for t in out.get("tags", []) if t in TAGS]
-    except Exception:            # noqa: BLE001  (vision is optional: no model, timeout, bad JSON)
-        return None
 
 
 def summarise(tags: dict[str, np.ndarray], a: int, b: int, min_strength: float = 0.45) -> list[dict]:

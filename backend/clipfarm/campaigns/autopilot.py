@@ -1,5 +1,8 @@
 """Decision engine + auto-pilot.
 
+v0.8.9: auto-pilot runs on the Live Watcher (live/pilot.py): this module ranks campaign streamers (below); the
+watcher picks the best LIVE ones every minute and reads their chat. Auto-pilot no longer scans past VODs.
+
 Every tick (30 min while auto-pilot is on):
   1. update campaign status: ended (past end date), out_of_budget, ending (< 48 h or < 15 % budget left)
   2. recompute projections for every linked streamer x active campaign x allowed platform
@@ -21,7 +24,9 @@ from . import forecast
 from .matching import sync_permissions
 
 DEFAULTS = {"enabled": False, "max_clips_per_day": 20, "max_posts_per_account_per_day": 3,
-            "min_projected_aud_per_clip": 0.50, "clips_per_streamer_per_day": 4, "tick_minutes": 30}
+            "min_projected_aud_per_clip": 0.50, "clips_per_streamer_per_day": 4, "tick_minutes": 30,
+            # v0.8.9 live auto-pilot
+            "max_streamers": 3, "min_score": 7.0, "clips_per_streamer_per_hour": 6, "campaigns": [], "run_hours": None}
 PROJECT_NAME = "Auto-pilot"
 
 
@@ -148,40 +153,6 @@ def _name(sid: int) -> str:
     return s["display_name"] if s else f"streamer {sid}"
 
 
-def apply(chosen: list[dict]) -> int | None:
-    """Point the Auto-pilot project at the chosen streamers. Returns the project id."""
-    if not chosen:
-        p = db.q1("SELECT id FROM projects WHERE name=? AND status IN ('running','paused')", (PROJECT_NAME,))
-        if p:
-            from ..jobs.engine import pause_project
-            pause_project(p["id"])
-            log("pause", "Auto-pilot paused: no campaign currently projects above your minimum $ per clip.")
-        return p["id"] if p else None
-    game = db.q1("SELECT id FROM games WHERE name='Grand Theft Auto VI'") or db.q1("SELECT id FROM games ORDER BY id DESC")
-    quotas = {str(c["streamer_id"]): {"clips_per_day": c["clips_per_day"], "platforms": c["platforms"],
-                                      "program_id": c["program_id"]} for c in chosen}
-    proj = db.q1("SELECT * FROM projects WHERE name=? AND status IN ('running','paused','draft')", (PROJECT_NAME,))
-    out = {"layout": "auto", "zoom": True, "progress_bar": True, "auto_approve": False, "autopilot": True,
-           "quotas": quotas, "platforms": sorted({p for c in chosen for p in c["platforms"]})}
-    from ..jobs import engine as eng
-    if not proj:
-        pid = db.ex("INSERT INTO projects(name, game_id, duration_sec, output_settings) VALUES (?,?,?,?)",
-                    (PROJECT_NAME, game["id"] if game else None, 30 * 86400, json.dumps(out)))
-        proj = {"id": pid, "status": "draft"}
-    else:
-        old = json.loads(db.q1("SELECT output_settings FROM projects WHERE id=?", (proj["id"],))["output_settings"])
-        db.ex("UPDATE projects SET output_settings=? WHERE id=?", (json.dumps({**old, **out}), proj["id"]))
-    with db.tx():
-        db.ex("DELETE FROM project_streamers WHERE project_id=?", (proj["id"],))
-        for c in chosen:
-            db.ex("INSERT INTO project_streamers VALUES (?,?)", (proj["id"], c["streamer_id"]))
-    if proj["status"] == "draft":
-        eng.start_project(proj["id"])
-    elif proj["status"] == "paused":
-        eng.resume_project(proj["id"])
-    return proj["id"]
-
-
 def tick() -> dict:
     s = settings()
     msgs = refresh_status()
@@ -190,7 +161,18 @@ def tick() -> dict:
     old = db.get_setting("autopilot_plan") or []
     diff_and_log(old, chosen)
     db.set_setting("autopilot_plan", chosen)
-    pid = apply(chosen) if s["enabled"] else None
+    pid = None
+    if s["enabled"]:                     # v0.8.9: the Live Watcher does the work; the old VOD project is paused
+        old_p = db.q1("SELECT id FROM projects WHERE name=? AND status='running'", (PROJECT_NAME,))
+        if old_p:
+            from ..jobs.engine import pause_project
+            pause_project(old_p["id"])
+            log("pause", "Auto-pilot now watches streamers live; the old past-stream project was paused.")
+        try:
+            from ..live import watcher
+            watcher.manager().start()
+        except Exception as e:           # noqa: BLE001
+            log("error", f"Live Watcher didn't start: {e}")
     return {"status_changes": msgs, "plan": chosen, "project_id": pid}
 
 

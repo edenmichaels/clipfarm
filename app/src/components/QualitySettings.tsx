@@ -6,7 +6,7 @@ import { api } from "../api";
 const MOODS = ["funny", "hype", "tense", "epic", "chill", "sad"];
 const SIGNAL_LABEL: Record<string, string> = {
   audio_events: "Sound events (laughs, explosions…)", chat: "Chat reactions", llm: "AI transcript rating",
-  visual: "On-screen action", community: "Community clips",
+  community: "Community clips",
 };
 
 export function CaptionSettings() {

@@ -60,7 +60,7 @@ SEGMENTS = {"explosion+laugh": (20, 50), "explosion alone": (80, 110), "funny ta
 
 def _features_by_segment():
     ev, loud, msgs, vis, words = _scene()
-    sig = detect.Signals(N, events=ev, loudness=loud, chat=signals.chat_reactions(msgs, N), visual=vis)
+    sig = detect.Signals(N, events=ev, loudness=loud, chat=signals.chat_reactions(msgs, N))
     comp, parts = detect.components(sig)
     extra = features.per_second(parts, comp, N, words)
     tags = events.from_signals(N, parts, words, msgs)
@@ -88,7 +88,6 @@ def test_end_to_end_picks_and_reasons(monkeypatch, tmp_path):
     monkeypatch.setattr(run.signals, "audio_rms", lambda media: loud)
     monkeypatch.setattr(run.audio_events, "analyse", lambda media: ev)
     picks, dbg = run.detect_source(tmp_path / "x.wav", chat=msgs, budget=5, min_len=10, max_len=45,
-                                   visual_fn=lambda a, b: {k: v[int(a):int(b)] for k, v in vis.items()},
                                    words_fn=lambda a, b: [w for w in words if a <= w["start"] < b], threshold=0.3)
     assert picks, "nothing picked"
     best = max(picks, key=lambda m: m.viral)

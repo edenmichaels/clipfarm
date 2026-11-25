@@ -250,6 +250,8 @@ def test_campaigns_projections_autopilot(client):
     run = call(client, "POST", "/autopilot/run")
     assert {"plan", "log", "status_changes"} <= set(run)
     call(client, "PUT", "/autopilot", json={"enabled": False})
+    from clipfarm.live import watcher as _lw
+    _lw.manager().shutdown()
 
 
 # ---- health, backup, dashboard, logs, events, oauth ----------------------------------------------------
@@ -746,6 +748,24 @@ def test_v087_live_watcher_routes(client, tmp_path):
         call(client, "PUT", "/live/settings", json={"streamers": blocked[:1]}, expect=400)
     from clipfarm.live import watcher
     watcher.manager().shutdown()
+
+
+def test_v089_live_rows_chat_tags_and_autopilot(client, tmp_path):
+    sid, prog, cid, f = _linked_clip(tmp_path)
+    r = call(client, "GET", "/live/streamers", params={"sort": "projected", "live_only": False})
+    assert r["view"]["sort"] == "projected" and "rows" in r and "games" in r
+    assert call(client, "GET", "/live/streamers")["view"]["sort"] == "projected"          # remembered
+    call(client, "GET", "/live/streamers", params={"sort": "nonsense"})
+    tw = db.q1("SELECT id FROM streamers WHERE platform='twitch'") or {"id": sid}
+    c = call(client, "GET", f"/live/streamers/{tw['id']}/chat", "/live/streamers/{sid}/chat")
+    assert c["tags"]["clip"] and c["trigger"]["min_unique"] == 5 and c["delay"]["delay"] == 20.0
+    c = call(client, "PUT", f"/live/streamers/{tw['id']}/chat", "/live/streamers/{sid}/chat",
+             json={"tags": {"laugh": ["kaiDance", "LUL"]}, "trigger": {"multiplier": 4, "min_unique": 8}, "delay": 15})
+    assert c["tags"]["laugh"] == ["kaiDance", "LUL"] and c["trigger"]["min_unique"] == 8 and c["delay"]["delay"] == 15
+    ap = call(client, "PUT", "/autopilot", json={"max_streamers": 2, "min_score": 8, "run_hours": {"start": "22:00",
+                                                                                               "end": "07:00"}})
+    assert ap["settings"]["max_streamers"] == 2 and "live" in ap and "campaigns" in ap
+    call(client, "PUT", "/autopilot", json={"run_hours": {"start": "late"}}, expect=400)
 
 
 def test_v088_presets_variations_live_dots(client, tmp_path):

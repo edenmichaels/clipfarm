@@ -1,4 +1,5 @@
-"""Tier 2: the LLM judge. Is this 60-90 s of a live stream a funny/entertaining short-form clip?
+"""The local LLM judge (Ollama). Is this window of a live stream a funny/entertaining short-form clip?
+Text only (v0.8.9): the transcript and the chat messages from the window. No video frames, no vision model.
 
 The prompt rewards funny, absurd, chaotic and shocking moments and scores sad, serious, calm or explaining
 moments 0. It carries short written examples of real viral streamer moments, plus your own thumbs-up clips
@@ -25,8 +26,8 @@ EXAMPLES = [
 ]
 
 SYSTEM = """You judge moments from a live gaming stream for short-form video (TikTok, YouTube Shorts, Reels).
-You get: the transcript (with seconds from the start of the cut), the chat messages in that window, and up to 3
-frames. Return JSON only: {"score": 0-10 number, "reason": "one short line", "start": seconds, "end": seconds,
+You get: the transcript (with seconds from the start of the cut) and the chat messages in that window (chat lags
+the stream by ~10-25 s, so chat reacts AFTER the moment). Return JSON only: {"score": 0-10 number, "reason": "one short line", "start": seconds, "end": seconds,
 "type": "Funny|Chaos/Fail|Rage/Reaction|Action + Reaction|Clutch/Skill"}
 
 Scoring:
@@ -76,15 +77,14 @@ def _transcript_lines(words: list[dict]) -> str:
     return "\n".join(lines) or "(no speech)"
 
 
-def judge(words: list[dict], chat: list[tuple[float, str]], images: list[bytes], length: float,
-          streamer: str, signals: dict) -> dict:
+def judge(words: list[dict], chat: list[tuple[float, str]], length: float, streamer: str, signals: dict) -> dict:
     """-> {"score", "reason", "start", "end", "type", "llm": bool}. Without a model, a cautious score from the
     signals (chat, laughter, viewer clips) is used and marked llm=False."""
     chat_txt = "\n".join(f"[{t:5.1f}s] {m[:120]}" for t, m in chat[:150]) or "(no chat)"
     user = (f"Streamer: {streamer}\nCut length: {length:.0f} s\nSignals: {json.dumps(signals)}\n\n"
             f"Transcript:\n{_transcript_lines(words)[:5000]}\n\nChat:\n{chat_txt[:5000]}")
     try:
-        out = complete_json(system_prompt(), user, timeout=120, images=images)
+        out = complete_json(system_prompt(), user, timeout=120)           # text only
         score = max(0.0, min(10.0, float(out.get("score", 0))))
         start = max(0.0, min(length, float(out.get("start", 0))))
         end = max(start, min(length, float(out.get("end", length))))
@@ -93,9 +93,8 @@ def judge(words: list[dict], chat: list[tuple[float, str]], images: list[bytes],
         return {"score": round(score, 1), "reason": str(out.get("reason", ""))[:200], "start": round(start, 2),
                 "end": round(end, 2), "type": out.get("type") or "Funny", "llm": True}
     except (LLMUnavailable, TypeError, ValueError):
-        s = 10 * min(1.0, 0.45 * signals.get("chat", 0) + 0.35 * signals.get("laughter", 0)
-                     + 0.4 * min(1, signals.get("viewer_clips", 0)))
-        return {"score": round(min(s, 7.5), 1), "reason": "AI model not running: scored from chat, laughter and viewer clips",
+        s = 10 * min(1.0, 0.7 * signals.get("chat", 0) + 0.4 * min(1, signals.get("viewer_clips", 0)))
+        return {"score": round(min(s, 7.5), 1), "reason": "AI model not running: scored from chat and viewer clips",
                 "start": max(0.0, length - 75), "end": length, "type": "Funny", "llm": False}
 
 

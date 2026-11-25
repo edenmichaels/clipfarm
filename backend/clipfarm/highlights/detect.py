@@ -2,9 +2,9 @@
 
 Score per second (weights adjustable in Settings, learned per streamer/game from your ratings):
     audio events (laughter + action sounds)  0.30
-    chat reactions                           0.25
+    chat reactions                           0.40
     LLM transcript rating                    0.20   (added at stage 3, for shortlisted moments only)
-    visual action                            0.15
+    (v0.8.9: no video analysis: frames, vision models and visual action are gone from detection)
     community clips                          0.10
   - mundane penalty (menus, loading, maps, cutscenes with no reaction, BRB/AFK, calm talking, music only)
 
@@ -22,7 +22,7 @@ import numpy as np
 
 from .signals import smooth, zscore
 
-DEFAULT_WEIGHTS = {"audio_events": 0.30, "chat": 0.25, "llm": 0.20, "visual": 0.15, "community": 0.10}
+DEFAULT_WEIGHTS = {"audio_events": 0.30, "chat": 0.40, "llm": 0.20, "community": 0.10}   # v0.8.9: no visual
 PENALTY_WEIGHT = 0.45
 TYPES = ["Funny", "Chaos/Fail", "Action + Reaction", "Rage", "Clutch/Skill", "Wholesome"]   # v0.8 names
 _OLD = {"Action/Explosion": "Action + Reaction", "Fail": "Chaos/Fail", "Rage/Reaction": "Rage"}
@@ -59,7 +59,6 @@ class Signals:
     events: dict[str, np.ndarray] | None = None       # audio_events.analyse()
     loudness: np.ndarray | None = None                 # signals.audio_rms() dBFS
     chat: dict[str, np.ndarray] | None = None          # signals.chat_reactions()
-    visual: dict[str, np.ndarray] | None = None        # visual.analyse() (may cover only some seconds)
     clips: list[tuple[float, int]] = field(default_factory=list)   # (offset sec, views) community clips
 
 
@@ -117,18 +116,6 @@ def components(s: Signals, focus: str = "balanced") -> tuple[dict[str, np.ndarra
         comp["chat"] = np.clip(comp["chat"] * (1 - np.clip((sad_share - 0.2) * 2.5, 0, 1)), 0, 1).astype(np.float32)
         parts.update(chat_laugh=ch["laugh"] / tot, chat_hype=ch["hype"] / tot, chat_fail=ch["fail"] / tot,
                      chat_sad=sad_share.astype(np.float32), chat_rate_z=rate_z.astype(np.float32))
-    if s.visual and s.visual.get("motion") is not None:
-        vi = {k: _fit(v, n) for k, v in s.visual.items()}
-        covered = vi["motion"] > 0
-        mz = np.where(covered, _sig(zscore(vi["motion"], 120), 0.8), 0)
-        v = 0.35 * mz + 0.25 * np.clip(vi["cuts"] * 2, 0, 1) + 0.25 * np.clip(vi["flash"] * 10, 0, 1) \
-            + 0.15 * np.clip(vi["shake"] / 2.5, 0, 1)
-        comp["visual"] = np.clip(smooth(v, 2), 0, 1).astype(np.float32)
-        parts.update(static=vi["static"], dark=vi["dark"], ui=vi["ui"], flash=vi["flash"], motion=vi["motion"],
-                     shake=vi.get("shake", np.zeros(n, np.float32)), cuts=vi.get("cuts", np.zeros(n, np.float32)),
-                     visual_covered=covered.astype(np.float32))
-        if "face_motion" in vi:
-            parts["face_motion"] = vi["face_motion"]
     if s.clips:
         cc = np.zeros(n, np.float32)
         t = np.arange(n)
@@ -284,7 +271,7 @@ def pick(cv: np.ndarray, parts: dict[str, np.ndarray], comp: dict[str, np.ndarra
 
 
 def _reason(sig: dict, mtype: str) -> str:
-    names = {"audio_events": "sound events", "chat": "chat reactions", "visual": "on-screen action",
+    names = {"audio_events": "sound events", "chat": "chat reactions", 
              "community": "community clips", "llm": "AI rating"}
     top = sorted(((v, k) for k, v in sig.items() if k in names), reverse=True)[:2]
     return f"{mtype}: " + ", ".join(f"{names[k]} {v:.2f}" for v, k in top if v > 0.2) if top else mtype

@@ -229,7 +229,7 @@ def test_picker_polls_every_minute_and_stops_when_closed():
     assert "POLL_MS = 60_000" in src and "setInterval(load, POLL_MS)" in src
     assert "clearInterval(timer.current)" in src and "if (!open || !key) return;" in src
     lw = (APP / "pages" / "LiveWatcher.tsx").read_text(encoding="utf-8")
-    assert "useLiveStatus(cands.map((c) => c.id), picking)" in lw               # only while the picker is open
-    for f in ("components/StreamerSections.tsx", "components/StreamerTable.tsx", "pages/LiveWatcher.tsx"):
+    assert "/live/streamers" in lw and "<LiveDot st={s.status} />" in lw        # v0.8.9: rows carry the live dot
+    for f in ("components/StreamerSections.tsx", "components/StreamerTable.tsx"):
         t = (APP / f).read_text(encoding="utf-8")
         assert "<LiveDot" in t and "liveRank" in t                              # dot + live first, everywhere

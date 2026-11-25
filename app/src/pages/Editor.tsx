@@ -437,10 +437,11 @@ function Studio({ clip, bin, onChanged, go, msg, setMsg, session }: {
                   ? <b className="warn-text" style={{ cursor: "pointer" }} onClick={() => setRight("Rules")}>⚑ {flags.length} to fix</b> : <b className="ok-text">✓ OK</b>}</span>
               </div>
               {flags.filter((f) => f.fix).map((f) => <div key={f.id} className="ed-flag bad"><span>⚑ {f.message}</span><button onClick={() => fixFlag(f.id)}>{f.fix}</button></div>)}
-              {(v.edl.moment?.why || []).length > 0 && (
+              {((v.edl.moment?.why || []).length > 0 || v.edl.moment?.reason) && (
                 <details className="ed-why" open>
                   <summary>Why this moment?{v.edl.moment?.viral != null ? ` Viral score ${v.edl.moment.viral}/100` : ""}</summary>
-                  {v.edl.moment.why.slice(0, 10).map((r: any) => (
+                  {v.edl.moment?.reason && <p className="small-text" style={{ margin: "4px 0" }}>{v.edl.moment.reason}</p>}
+                  {(v.edl.moment.why || []).slice(0, 10).map((r: any) => (
                     <div key={r.feature} className="why-row" title={`${r.feature}: ${r.value}`}>
                       <span>{r.label}</span><i className={r.contribution >= 0 ? "pos" : "neg"} style={{ width: `${Math.min(100, Math.abs(r.contribution) * 40)}%` }} />
                       <b className={r.contribution >= 0 ? "ok-text" : "warn-text"}>{r.contribution >= 0 ? "+" : ""}{r.contribution.toFixed(2)}</b></div>))}

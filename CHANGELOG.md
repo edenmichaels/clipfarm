@@ -1,5 +1,12 @@
 # ClipFarm changelog
 
+## 0.8.9
+- Chat-first detection: moments come from chat tags (clip requests > laughing > shock), counted per unique chatter vs each channel's own baseline, plus viewer-made Twitch clips. Video/vision analysis removed.
+- Clips start before the chat spike (default 20 s) using each streamer's delay learned from viewer clips, and end when chat calms; the local AI judges from transcript + chat only.
+- Editable chat tags, spike size and delay per streamer (Settings, or "chat tags" on any Live Watcher row); "Why this moment?" shows the chat evidence.
+- Auto-pilot now runs on the Live Watcher: watches the best live campaign streamers (pay-per-view first), up to 3 at once (fewer under CPU/disk pressure), with run hours and a log.
+- Live Watcher list: sort by live, viewers, projected A$, campaign type, chat activity, kept today, hit rate or name; filters remembered.
+
 ## 0.8.8: presets, variations, and live dots
 
 - **Preset bar in the Editor:** six presets, each card showing your clip in that style: Streamer Corner, Split Screen, Bold Box, Clean Minimal, Hype and Facecam Focus. Click one to apply it, or tweak it and "Save as my style". All keep the rules: fixed crops, static captions, Montserrat, no music.

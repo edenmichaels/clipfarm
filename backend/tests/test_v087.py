@@ -133,18 +133,19 @@ def test_tiktok_checklist_has_trending_step_and_sound_campaign_reminder(fresh_db
 
 # ---- 1. Live Watcher -----------------------------------------------------------------------------------------------
 def test_chat_spike_laughs_and_clip_it_trigger():
-    st = C.ChatStats()
+    st = C.ChatStats(C.DEFAULT_TAGS)
     now = 1_000_000.0
-    for i in range(300):                                    # normal: 1 message every 2 s
-        st.add(now - 600 + i * 2, "nice")
-    for _ in range(30):
-        st.stats(now - 30)
-    calm = st.score(st.stats(now - 30))
-    for i in range(40):                                     # spike: 4/s, mostly laughing
-        st.add(now - 10 + i * 0.25, "KEKW" if i % 2 else "clip it 😂")
+    for i in range(300):                                    # normal: a few tags from a few people
+        st.add(now - 600 + i * 2, f"u{i % 30}", "KEKW" if i % 10 == 0 else "nice")
+    for k in range(30):
+        st.stats(now - 300 + k * 9)
+    calm = st.stats(now - 30)
+    for i in range(40):                                     # spike: 40 different people laughing / asking for a clip
+        st.add(now - 9 + i * 0.2, f"v{i}", "KEKW" if i % 2 else "clip it 😂")
     hot = st.stats(now)
-    assert calm == 0 and hot["ratio"] > 3 and hot["clip_it"] >= 10 and st.score(hot) >= 0.5
-    assert C.LAUGH.search("OMEGALUL") and C.LAUGH.search("💀") and not C.LAUGH.search("hello")
+    assert not calm["trigger"] and hot["trigger"] and hot["ratio"] > 3 and hot["clip"] >= 10
+    t = C.Tagger(C.DEFAULT_TAGS)
+    assert t.match("OMEGALUL") and t.match("💀") and not t.match("hello")
 
 
 def test_playlist_parser_skips_twitch_ads():
@@ -180,7 +181,6 @@ def test_buffer_cut_stream_copies_and_trims(tmp_path):
     a, b = buf.span()
     s, e = buf.cut(a + 1, b - 1, tmp_path / "cut.mp4")
     assert (tmp_path / "cut.mp4").stat().st_size > 1000 and e - s == pytest.approx(8, abs=0.1)
-    assert len(B.frames(tmp_path / "cut.mp4", e - s)) == 3
     buf._trim(now=b + B.KEEP_SEC - 3)                        # only the newest segments survive
     assert len(buf.segments) == 2 and not (tmp_path / "buf" / "0000000000.ts").exists()
 
@@ -197,13 +197,13 @@ def test_judge_prompt_rewards_funny_and_uses_my_ratings(fresh_db):
 
 def test_judge_parses_and_falls_back_cautiously(monkeypatch):
     monkeypatch.setattr(J, "complete_json", lambda *a, **k: {"score": 9, "reason": "car flips", "start": 20, "end": 25})
-    r = J.judge([{"word": "no", "start": 1, "end": 1.2}], [(1.0, "KEKW")], [], 75, "Kai", {"chat": 0.8})
+    r = J.judge([{"word": "no", "start": 1, "end": 1.2}], [(1.0, "KEKW")], 75, "Kai", {"chat": 0.8})
     assert r["score"] == 9 and r["end"] - r["start"] >= 10 and r["llm"]
 
     def down(*a, **k):
         raise LLMUnavailable("off")
     monkeypatch.setattr(J, "complete_json", down)
-    r = J.judge([], [], [], 75, "Kai", {"chat": 1.0, "laughter": 1.0, "viewer_clips": 1})
+    r = J.judge([], [], 75, "Kai", {"chat": 1.0, "viewer_clips": 1})
     assert r["llm"] is False and r["score"] <= 7.5
 
 
@@ -246,56 +246,46 @@ def test_hourly_cap_but_viewer_clips_always_count(fresh_db):
     w = W.Watch({"id": 1, "login": "kai", "display_name": "Kai"})
     cfg = {**W.DEFAULTS, "per_hour": 2}
     assert w.add_trigger({"t": 1, "kind": "chat"}, cfg) and w.add_trigger({"t": 2, "kind": "chat"}, cfg)
-    assert not w.add_trigger({"t": 3, "kind": "laughter"}, cfg)
+    assert not w.add_trigger({"t": 3, "kind": "chat"}, cfg)
     assert w.add_trigger({"t": 4, "kind": "viewer_clip"}, cfg)
 
 
-def _judged(fresh, monkeypatch, score, clips=()):
+def _judged(fresh, monkeypatch, score, kind="chat"):
     sid = _streamer()
     W.save_settings(streamers=[sid])
-    m = W.Manager(provider_factory=lambda: FakeTwitch(clips=list(clips)))
+    m = W.Manager(provider_factory=lambda: FakeTwitch())
     m.sync_streamers()
     w = m.watches[sid]
     w.buffer = B.LiveBuffer("kai", fresh / "media" / "live" / "kai" / "buffer", threading.Event(), analyse_audio=False)
     w.buffer.segments = _segments(fresh / "media" / "live" / "kai" / "buffer", n=35, dur=2)   # 70 s
     a, b = w.buffer.span()
-    w.chat.add(a + 30, "KEKW")
-    monkeypatch.setattr(W.J, "judge", lambda words, chat, imgs, length, name, sig: {
+    w.chat.add(a + 30, "x1", "KEKW")
+    monkeypatch.setattr(W.J, "judge", lambda words, chat, length, name, sig: {
         "score": score, "reason": "car flips into the river", "start": 30.0, "end": 55.0, "type": "Funny", "llm": True})
-    r = m.judge(w, {"t": b - 20, "kind": "chat", "signals": {"chat": 0.8, "laughter": 0, "scream": 0,
-                                                              "viewer_clips": 0}},
-                transcribe=lambda p: [{"word": "no", "start": 31.0, "end": 31.3}, {"word": "way!", "start": 31.4,
-                                                                                    "end": 31.8}])
+    trig = {"t": b - 30, "kind": kind, "start": b - 50, "end": b - 20, "strength": 0.8,
+            "evidence": "34 people typed KEKW/💀 and 9 said 'clip it' in 8 s",
+            "signals": {"chat": 0.8, "viewer_clips": 1 if kind == "viewer_clip" else 0}}
+    r = m.judge(w, trig, transcribe=lambda p: [{"word": "no", "start": 31.0, "end": 31.3},
+                                               {"word": "way!", "start": 31.4, "end": 31.8}])
     return m, w, r, (a, b)
 
 
-def test_strong_moment_confirmed_by_a_viewer_clip_becomes_a_clip(fresh_db, monkeypatch):
+def test_strong_moment_becomes_a_clip_with_chat_evidence(fresh_db, monkeypatch):
     jobs = []
     monkeypatch.setattr("clipfarm.jobs.engine.enqueue", lambda kind, payload, *a, **k: jobs.append((kind, payload)))
-    m, w, r, (a, b) = _judged(fresh_db, monkeypatch, 6.5)
+    m, w, r, (a, b) = _judged(fresh_db, monkeypatch, 8.0)
     row = db.q1("SELECT * FROM live_moments WHERE id=?", (r["id"],))
-    assert row["status"] == "pending" and Path(row["path"]).exists()                # 6.5 >= threshold - 2: wait
-    made = a + 52
-    m.provider_factory = lambda: FakeTwitch(clips=[{"id": "c1", "created_at": W.iso(made), "duration": 20, "views": 40}])
-    db.ex("UPDATE live_moments SET confirm_at=0 WHERE id=?", (r["id"],))
-    m.confirm_due(time.time(), W.settings())
-    row = db.q1("SELECT * FROM live_moments WHERE id=?", (r["id"],))
-    assert row["status"] == "kept" and row["viewer_clips"] == 1 and row["final_score"] >= 7.5
-    assert jobs and jobs[0][0] == "render_moment"
-    mo = db.q1("SELECT * FROM moments WHERE id=?", (jobs[0][1]["moment_id"],))
-    assert mo["start_sec"] == pytest.approx(int(made) - a - 20 - 8, abs=1.5)           # a beat before the viewer clip
-    assert mo["end_sec"] == pytest.approx(min(b - a, made - a + 4), abs=1.5)
-    assert Path(jobs[0][1]["media"]).exists() and db.q1("SELECT kind FROM sources")["kind"] == "live"
+    assert row["status"] == "kept" and row["final_score"] >= 9 and "clip it" in row["reason"] and "no way!" in row["reason"]
+    assert jobs and jobs[0][0] == "render_moment" and db.q1("SELECT kind FROM sources")["kind"] == "live"
+    assert Path(jobs[0][1]["media"]).exists()
+    # a viewer clip is kept one point below the threshold
+    _, _, r2, _ = _judged(fresh_db, monkeypatch, 6.2, kind="viewer_clip")
+    assert db.q1("SELECT status FROM live_moments WHERE id=?", (r2["id"],))["status"] == "kept"
 
 
 def test_weak_moments_are_deleted_with_the_buffer(fresh_db, monkeypatch):
-    m, w, r, _ = _judged(fresh_db, monkeypatch, 2.0)
+    m, w, r, _ = _judged(fresh_db, monkeypatch, 5.5)
     row = db.q1("SELECT * FROM live_moments WHERE id=?", (r["id"],))
-    assert row["status"] == "dropped" and not Path(row["path"]).exists()
-    m2, w2, r2, _ = _judged(fresh_db, monkeypatch, 5.5)                  # pending, but nobody clipped it
-    db.ex("UPDATE live_moments SET confirm_at=0 WHERE id=?", (r2["id"],))
-    m2.confirm_due(time.time(), W.settings())
-    row = db.q1("SELECT * FROM live_moments WHERE id=?", (r2["id"],))
     assert row["status"] == "dropped" and not Path(row["path"]).exists()
 
 

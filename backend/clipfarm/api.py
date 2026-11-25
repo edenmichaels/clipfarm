@@ -1575,6 +1575,76 @@ def live_status():
     return watcher.manager().status()
 
 
+LIVE_SORTS = ["live", "viewers", "projected", "campaign_type", "chat", "kept_today", "hit_rate", "name"]
+
+
+@app.get("/live/streamers", dependencies=A)
+def live_streamers(sort: str | None = None, live_only: bool | None = None, joined_only: bool | None = None,
+                   game: str | None = None, watching: bool | None = None):
+    """Rows for the Live Watcher tab. Sort and filters are remembered (pass them to change them)."""
+    from .live import status as LS, watcher
+    view = {"sort": "live", "live_only": False, "joined_only": False, "game": "", "watching": False,
+            **(db.get_setting("live_view") or {})}
+    for k, v in (("sort", sort), ("live_only", live_only), ("joined_only", joined_only), ("game", game),
+                 ("watching", watching)):
+        if v is not None:
+            view[k] = v
+    if view["sort"] not in LIVE_SORTS:
+        view["sort"] = "live"
+    db.set_setting("live_view", view)
+    rows = watcher.rows()
+    st = LS.for_streamers([r["id"] for r in rows if r["allowed"]]) if rows else {}
+    all_rows = rows
+    for r in rows:
+        ls = st.get(r["id"]) or {"state": "unknown"}
+        r["status"] = ls
+        r["live"] = r["live"] or ls["state"] == "live"
+        r["viewers"] = r["viewers"] if r["viewers"] is not None else ls.get("viewers")
+        r["game"] = r["game"] or ls.get("game")
+    if view["live_only"]:
+        rows = [r for r in rows if r["live"]]
+    if view["joined_only"]:
+        rows = [r for r in rows if r["joined"]]
+    if view["watching"]:
+        rows = [r for r in rows if r["watching"]]
+    if view["game"]:
+        rows = [r for r in rows if (r["game"] or "").lower().find(str(view["game"]).lower()) >= 0]
+    key = {"live": lambda r: (not r["live"], -(r["viewers"] or 0), r["display_name"].lower()),
+           "viewers": lambda r: (-(r["viewers"] or 0), r["display_name"].lower()),
+           "projected": lambda r: (-(r["projected_aud"] or 0), r["display_name"].lower()),
+           "campaign_type": lambda r: ({"pay_per_view": 0}.get(r["campaign_type"] or "", 1 if r["campaign_type"] else 2),
+                                       -(r["rate"] or 0), r["display_name"].lower()),
+           "chat": lambda r: (-(r["chat_per_min"] or 0), not r["live"], r["display_name"].lower()),
+           "kept_today": lambda r: (-(r["kept_today"] or 0), r["display_name"].lower()),
+           "hit_rate": lambda r: (-(r["hit_rate"] if r["hit_rate"] is not None else -1), r["display_name"].lower()),
+           "name": lambda r: r["display_name"].lower()}[view["sort"]]
+    games = sorted({r["game"] for r in all_rows if r.get("game")})
+    return {"view": view, "sorts": LIVE_SORTS, "rows": sorted(rows, key=key), "games": games}
+
+
+@app.get("/live/streamers/{sid}/chat", dependencies=A)
+def live_chat_settings(sid: int):
+    from .live import chat, watcher
+    return {"tags": watcher.tags_for(sid), "defaults": chat.DEFAULT_TAGS, "trigger": watcher.trigger_for(sid),
+            "delay": db.get_setting(f"chat_delay:{sid}") or {"delay": watcher.DEFAULT_DELAY, "samples": 0}}
+
+
+@app.put("/live/streamers/{sid}/chat", dependencies=A)
+def live_chat_settings_put(sid: int, body: dict):
+    from .live import chat
+    if "tags" in body:
+        tags = {g: [str(t).strip() for t in (body["tags"].get(g) or []) if str(t).strip()][:200] for g in chat.GROUPS}
+        db.set_setting(f"chat_tags:{sid}", tags)
+    if "trigger" in body:
+        t = body["trigger"] or {}
+        db.set_setting(f"chat_trigger:{sid}", {"multiplier": max(1.5, min(10.0, float(t.get("multiplier", 3)))),
+                                               "min_unique": max(2, min(100, int(t.get("min_unique", 5))))})
+    if "delay" in body and body["delay"] is not None:
+        db.set_setting(f"chat_delay:{sid}", {"delay": max(5.0, min(45.0, float(body["delay"]))), "samples": 0,
+                                             "manual": True})
+    return live_chat_settings(sid)
+
+
 @app.get("/live/candidates", dependencies=A)
 def live_candidates():
     """Streamers you can watch: Twitch, permitted (campaign or permission)."""
@@ -1972,15 +2042,29 @@ def forecast_refit():
 # ---- auto-pilot --------------------------------------------------------------------------------
 @app.get("/autopilot", dependencies=A)
 def autopilot_get():
+    from .live import pilot
     return {"settings": autopilot.settings(), "plan": db.get_setting("autopilot_plan") or [],
-            "log": db.q("SELECT * FROM autopilot_log ORDER BY id DESC LIMIT 100")}
+            "log": db.q("SELECT * FROM autopilot_log ORDER BY id DESC LIMIT 100"), "live": pilot.status(),
+            "campaigns": db.q("SELECT id, name, campaign_type, payout_per_1k, joined FROM programs WHERE active=1 "
+                              "ORDER BY joined DESC, name")}
 
 
 @app.put("/autopilot", dependencies=A)
 def autopilot_put(body: dict):
     cur = autopilot.settings()
     new = {**cur, **{k: v for k, v in body.items() if k in autopilot.DEFAULTS}}
+    new["max_streamers"] = max(1, min(10, int(new["max_streamers"])))
+    new["min_score"] = max(0.0, min(10.0, float(new["min_score"])))
+    new["clips_per_streamer_per_hour"] = max(1, min(60, int(new["clips_per_streamer_per_hour"])))
+    new["campaigns"] = [int(x) for x in (new.get("campaigns") or [])]
+    rh = new.get("run_hours")
+    if rh and not (isinstance(rh, dict) and all(re.fullmatch(r"\d{1,2}:\d{2}", str(rh.get(k, ""))) for k in ("start", "end"))):
+        raise HTTPException(400, "Run hours look like 22:00 to 07:00")
+    new["run_hours"] = rh or None
     db.set_setting("autopilot", new)
+    from .live import watcher as _lw
+    if new["enabled"]:
+        _lw.manager().start()
     if new["enabled"] and not db.q1("SELECT 1 FROM jobs WHERE kind='autopilot_tick' AND status IN ('queued','running')"):
         eng.enqueue("autopilot_tick", {}, priority=1)
     if not new["enabled"] and cur["enabled"]:

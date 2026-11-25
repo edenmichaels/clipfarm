@@ -85,17 +85,11 @@ def add_example(*, game_id, streamer_id, kind, platform_id, label, features, tag
 def window_features(media: Path, a: float, b: float, *, chat: list[tuple[float, str]] | None = None,
                     words: list[dict] | None = None) -> tuple[dict, list[str], dict]:
     """Features of [a, b) seconds inside `media` (a short section with context around it)."""
-    from . import audio_events, detect, events, features, signals, visual
+    from . import audio_events, detect, events, features, signals
     loud = signals.audio_rms(media)
     n = len(loud)
     ev = audio_events.analyse(media)
-    vis = None
-    try:
-        vis = visual.analyse(media)
-    except Exception:            # noqa: BLE001
-        pass
-    sig = detect.Signals(n, events=ev, loudness=loud, chat=signals.chat_reactions(chat, n) if chat else None,
-                         visual=vis)
+    sig = detect.Signals(n, events=ev, loudness=loud, chat=signals.chat_reactions(chat, n) if chat else None)
     comp, parts = detect.components(sig)
     extra = features.per_second(parts, comp, n, words)
     tags = events.from_signals(n, parts, words, chat)

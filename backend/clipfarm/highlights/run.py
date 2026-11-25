@@ -1,7 +1,7 @@
 """Run highlight detection on one source, in three stages (shared by the pipeline and the evaluation).
 
   1. whole source: audio events (YAMNet), loudness z-score, chat reactions, community clips
-  2. shortlisted windows only: visual signals from a low-res copy (motion, cuts, flashes, shake, menus)
+  2. (v0.8.9: no video/vision analysis: moments come from chat, sound and viewer clips)
   3. final shortlist only: transcript + LLM rating
   4. the viral model: features (reaction, chat, event tags, surprise, speech, context, mundane) -> viral score
      0-100, moment type, event tags, plain-English reason and each feature's contribution. Final ranking.
@@ -19,43 +19,22 @@ from . import audio_events, detect, events, features, signals, viral_model
 def detect_source(audio_media: Path, *, chat: list[tuple[float, str]] | None = None,
                   clips: list[tuple[float, int]] | None = None, budget: int = 4, min_len: float = 15,
                   max_len: float = 60, focus: str = "balanced", weights: dict | None = None,
-                  visual_fn: Callable[[float, float], dict[str, np.ndarray] | None] | None = None,
                   words_fn: Callable[[float, float], list[dict]] | None = None,
                   rate_fn: Callable[[str, str], dict | None] | None = None,
                   threshold: float = 0.42, log: Callable[[str], None] = lambda m: None,
-                  game_id: int | None = None, viral_threshold: int = 35, model: dict | None = None,
-                  vision_fn: Callable[[float, float], list[str] | None] | None = None
+                  game_id: int | None = None, viral_threshold: int = 35, model: dict | None = None
                   ) -> tuple[list[detect.Moment], dict]:
     loud = signals.audio_rms(audio_media)
     n = len(loud)
     ev = audio_events.analyse(audio_media)
     if ev is None:
-        log("Sound-event model not installed: using chat, visuals and community clips only.")
+        log("Sound-event model not installed: using chat and community clips only.")
     sig = detect.Signals(n, events=ev, loudness=loud,
                          chat=signals.chat_reactions(chat, n) if chat else None, clips=clips or [])
     comp, parts = detect.components(sig, focus)
     cv = detect.curve(comp, parts, weights)
     shortlist = detect.pick(cv, parts, comp, loud, budget=budget * 3, min_len=min_len, max_len=max_len,
                             threshold=threshold * 0.75)
-    if visual_fn and shortlist:
-        vis = {k: np.zeros(n, np.float32) for k in ("motion", "cuts", "flash", "shake", "static", "dark", "ui",
-                                                    "face_motion")}
-        for m in shortlist:
-            a, b = max(0, int(m.start) - 8), min(n, int(m.end) + 8)
-            try:
-                v = visual_fn(a, b)
-            except Exception as e:     # a failed download mustn't sink the whole source
-                log(f"Visual check skipped for {a}-{b}s: {e}")
-                v = None
-            for k, arr in (v or {}).items():
-                if k in vis and arr is not None:
-                    seg = np.asarray(arr, np.float32)[: b - a]
-                    vis[k][a:a + seg.size] = seg
-        sig.visual = vis
-        comp, parts = detect.components(sig, focus)
-        cv = detect.curve(comp, parts, weights)
-        shortlist = detect.pick(cv, parts, comp, loud, budget=budget * 2, min_len=min_len, max_len=max_len,
-                                threshold=threshold * 0.85)
     if "face_motion" in parts and not np.asarray(parts["face_motion"]).any():
         parts.pop("face_motion")
     mdl = model or viral_model.load(game_id)
@@ -81,12 +60,6 @@ def detect_source(audio_media: Path, *, chat: list[tuple[float, str]] | None = N
     final = []
     for m in staged:
         a, b = int(m.start), int(np.ceil(m.end))
-        if vision_fn:
-            vt = vision_fn(m.start, m.end)
-            for t in vt or []:
-                if t in tags:
-                    seg = tags[t][a:b]
-                    seg[:] = np.maximum(seg, 0.6)
         f = features.window(parts, comp, extra, tags, a, b, m.signals.get("_llm"), trend)
         res = viral_model.score(f, mdl)
         tg = events.summarise(tags, a, b)

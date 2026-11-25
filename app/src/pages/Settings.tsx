@@ -6,6 +6,7 @@ import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { api, PLATFORM_LABEL } from "../api";
 import { applyAccent } from "../App";
 import Connections from "../components/Connections";
+import { ChatTagSettings } from "../components/ChatTags";
 import Disclaimer from "../components/Disclaimer";
 import type { Page } from "../App";
 import Campaigns from "./Campaigns";
@@ -115,6 +116,8 @@ export default function Settings({ initialTab, go }: { initialTab?: string; go: 
                 </>}
             <span className="muted">If no model is running, ClipFarm uses simple template hooks.</span>
           </section>
+
+          <ChatTagSettings />
 
           <section className="card stack">
             <h2 className="accent">Money</h2>

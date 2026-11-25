@@ -1,10 +1,12 @@
-"""The Live Watcher: one background loop for the streamers you picked (permitted / campaign streamers only).
+"""The Live Watcher (v0.8.9: chat-first). One background loop for the streamers you picked plus the ones auto-pilot
+chose (permitted / campaign streamers only, Twitch).
 
-Every 5 s while a streamer is live: chat stats (Tier 0) and the buffer's laughter/scream scores (Tier 1) can fire
-a trigger. Every 60 s: is anyone live (one Get Streams request) and new viewer clips (Get Clips). Triggers wait
-until the buffer holds ~25 s after them, then a worker judges them one at a time (Tier 2, max ~6/hour per
-streamer). Ten minutes later the judged moment is confirmed or dropped (Tier 3). Kept moments become normal
-clips (auto-edit, render, My Clips); everything else is deleted with the buffer.
+Every 5 s while a streamer is live: chat tags (unique chatters, vs that channel's baseline) can open a trigger.
+The trigger stays open until chat calms down or 10 s after its peak. Every 60 s: who is live (one Get Streams
+request) and new viewer-made Twitch clips (also a trigger, and they teach us this streamer's chat delay).
+A trigger is cut from the 3-minute buffer starting `delay` seconds (learned, default 20 s) before the chat spike,
+transcribed with Whisper and judged by the local LLM from TEXT only (transcript + the chat). Judge >= threshold
+(default 7) -> auto-edited clip in My Clips. Everything else is deleted. No video frames are analysed anywhere.
 """
 from __future__ import annotations
 
@@ -20,15 +22,16 @@ from pathlib import Path
 
 from .. import compliance, db
 from . import judge as J
-from .buffer import LiveBuffer, frames
-from .chat import ChatReader, ChatStats
+from .buffer import LiveBuffer
+from .chat import DEFAULT_TAGS, DEFAULT_TRIGGER, ChatReader, ChatStats, evidence
 
 log = logging.getLogger("clipfarm.live")
 
-DEFAULTS = {"streamers": [], "paused": False, "threshold": 7.0, "per_hour": 6, "trigger": 0.5,
-            "cut_before": 55, "cut_after": 25, "confirm_after": 600}
+DEFAULTS = {"streamers": [], "auto_streamers": [], "paused": False, "threshold": 7.0, "per_hour": 6,
+            "lead": 8, "tail": 5}
+DEFAULT_DELAY = 20.0
 TICK, POLL = 5.0, 60.0
-COOLDOWN = 45.0
+COOLDOWN = 30.0
 
 
 def settings() -> dict:
@@ -54,31 +57,70 @@ def folder(login: str) -> Path:
     return storage.media_dir() / "live" / login
 
 
+# ---- per-streamer settings: tags, trigger, learned delay ------------------------------------------------------------
+def tags_for(sid: int) -> dict:
+    t = db.get_setting(f"chat_tags:{sid}") or {}
+    return {g: list(t.get(g) or DEFAULT_TAGS[g]) for g in DEFAULT_TAGS}
+
+
+def trigger_for(sid: int) -> dict:
+    return {**DEFAULT_TRIGGER, **(db.get_setting(f"chat_trigger:{sid}") or {})}
+
+
+def delay_for(sid: int) -> float:
+    d = db.get_setting(f"chat_delay:{sid}") or {}
+    return float(d.get("delay", DEFAULT_DELAY))
+
+
+def learn_delay(sid: int, clip_start: float, spikes: list[float]) -> float | None:
+    """A viewer clip starts just before the moment; the chat spike after it tells us how late chat reacts."""
+    after = [t for t in spikes if clip_start <= t <= clip_start + 60]
+    if not after:
+        return None
+    sample = max(5.0, min(45.0, min(after) - clip_start))
+    d = db.get_setting(f"chat_delay:{sid}") or {"delay": DEFAULT_DELAY, "samples": 0}
+    if d.get("manual"):
+        return float(d["delay"])                     # you set it by hand: keep it
+    n = int(d.get("samples", 0))
+    a = 1.0 if n == 0 else 0.3                       # first sample replaces the default, then a moving average
+    new = round((1 - a) * float(d.get("delay", DEFAULT_DELAY)) + a * sample, 1)
+    db.set_setting(f"chat_delay:{sid}", {"delay": new, "samples": n + 1, "last_sample": round(sample, 1)})
+    return new
+
+
 class Watch:
     """One streamer."""
 
-    def __init__(self, streamer: dict):
+    def __init__(self, streamer: dict, auto: bool = False):
         self.s = streamer
+        self.auto = auto
         self.live = False
         self.stream: dict = {}
         self.stop = threading.Event()
-        self.chat = ChatStats()
+        self.chat = self._new_chat()
         self.buffer: LiveBuffer | None = None
         self.triggers: deque[float] = deque()            # judged trigger times (for the hourly cap)
         self.last_trigger = 0.0
+        self.episode: dict | None = None                 # an open chat trigger (until chat calms)
+        self.spikes: list[float] = []
         self.seen_clips: set[str] = set()
         self.last_clip_poll = 0.0
         self.waiting: list[dict] = []                    # triggers waiting for the buffer to catch up
+        self.session = {"since": time.time(), "triggers": 0, "kept": 0}
+
+    def _new_chat(self) -> ChatStats:
+        return ChatStats(tags_for(self.s["id"]), trigger_for(self.s["id"]), self.s.get("login"))
 
     # ---- live / offline ---------------------------------------------------------------------------------------
     def go_live(self, stream: dict) -> None:
         self.live, self.stream, self.stop = True, stream, threading.Event()
-        self.chat = ChatStats()
+        self.chat = self._new_chat()
         ChatReader(self.s["login"], self.chat, self.stop).start()
         self.buffer = LiveBuffer(self.s["login"], folder(self.s["login"]) / "buffer", self.stop)
         self.buffer.start()
         self.last_clip_poll = time.time()
-        db.log("info", "live", f"{self.s['display_name']} is live: watching chat and keeping a 3-minute buffer")
+        self.session = {"since": time.time(), "triggers": 0, "kept": 0}
+        db.log("info", "live", f"{self.s['display_name']} is live: reading chat and keeping a 3-minute buffer")
 
     def go_offline(self) -> None:
         if self.live:
@@ -86,6 +128,7 @@ class Watch:
         self.live = False
         self.stop.set()
         self.waiting.clear()
+        self.episode = None
 
     # ---- triggers --------------------------------------------------------------------------------------------
     def per_hour_left(self, now: float, cap: int) -> int:
@@ -94,25 +137,40 @@ class Watch:
         return max(0, cap - len(self.triggers))
 
     def check(self, now: float, cfg: dict) -> dict | None:
-        """Tier 0 + 1: should we judge the last few seconds?"""
+        """Chat tags: open a trigger on a spike, close it once chat calms (or 10 s after the peak)."""
         st = self.chat.stats(now)
-        chat = self.chat.score(st)
-        audio = self.buffer.audio_peak(now - 20, now) if self.buffer else {}
-        laugh, scream = audio.get("laughter", 0.0), audio.get("scream", 0.0)
-        strength = max(chat, laugh * 0.9 if laugh >= 0.5 else 0, scream * 0.6 if scream >= 0.6 else 0,
-                       0.5 * chat + 0.5 * laugh)
-        if strength < cfg["trigger"] or now - self.last_trigger < COOLDOWN:
+        ep = self.episode
+        if ep is None:
+            if not st["trigger"] or now - self.last_trigger < COOLDOWN:
+                return None
+            self.episode = {"spike": now - 5, "peak": now, "peak_w": st["weighted"], "strength": st["strength"]}
+            self.spikes.append(now - 5)
+            db.ex("INSERT INTO live_events(streamer_id, kind, t, data) VALUES (?, 'chat_spike', ?, ?)",
+                  (self.s["id"], now - 5, json.dumps({k: st[k] for k in ("clip", "laugh", "shock", "unique", "ratio")})))
             return None
-        kind = "chat" if chat >= max(laugh, scream) else "laughter" if laugh >= scream else "scream"
-        return {"t": now - 8, "kind": kind, "strength": round(strength, 2), "chat": st,
-                "signals": {"chat": chat, "laughter": round(laugh, 2), "scream": round(scream, 2), "viewer_clips": 0}}
+        if st["weighted"] > ep["peak_w"]:
+            ep.update(peak=now, peak_w=st["weighted"], strength=max(ep["strength"], st["strength"]))
+        calm = self.chat.calm_after(ep["peak"], now)
+        end = min(calm if calm is not None else ep["peak"] + 10, ep["peak"] + 10)
+        if now < end:
+            return None
+        self.episode = None
+        delay = delay_for(self.s["id"])
+        start = ep["spike"] - delay
+        c = self.chat.counts(ep["spike"] - 5, end)
+        return {"t": ep["spike"], "kind": "chat", "start": start, "end": end, "strength": ep["strength"],
+                "evidence": evidence(c, end - ep["spike"] + 5), "counts": c, "delay": delay,
+                "signals": {"chat": ep["strength"], "viewer_clips": 0, "clip": c["clip"], "laugh": c["laugh"],
+                            "shock": c["shock"], "unique": c["unique"]}}
 
     def add_trigger(self, trig: dict, cfg: dict) -> bool:
         now = time.time()
         if self.per_hour_left(now, cfg["per_hour"]) <= 0 and trig["kind"] != "viewer_clip":
+            db.log("info", "live", f"{self.s['display_name']}: skipped a trigger (hourly cap of {cfg['per_hour']})")
             return False
         self.last_trigger = now
         self.triggers.append(now)
+        self.session["triggers"] += 1
         self.waiting.append(trig)
         return True
 
@@ -149,9 +207,20 @@ class Manager:
         from ..providers.twitch import TwitchProvider
         return TwitchProvider()
 
+    def cfg_for(self, w: Watch, cfg: dict) -> dict:
+        """Auto-pilot's watchers use auto-pilot's min score and clips per hour."""
+        if w.auto:
+            from . import pilot
+            ps = pilot.settings()
+            return {**cfg, "threshold": float(ps["min_score"]), "per_hour": int(ps["clips_per_streamer_per_hour"])}
+        return cfg
+
     def sync_streamers(self) -> None:
-        """Match the watch list to settings; only permitted Twitch streamers are watched."""
-        want = set(int(x) for x in settings()["streamers"])
+        """Watch list = the streamers you picked + the ones auto-pilot picked; only permitted Twitch streamers."""
+        cfg = settings()
+        mine = {int(x) for x in cfg["streamers"]}
+        auto = {int(x) for x in cfg["auto_streamers"]}
+        want = mine | auto
         for sid in list(self.watches):
             if sid not in want:
                 self.watches.pop(sid).go_offline()
@@ -163,6 +232,8 @@ class Manager:
                        + ("" if not s or s["platform"] == "twitch" else " (only Twitch streams can be watched live)"))
                 continue
             self.watches[sid] = Watch(s)
+        for sid, w in self.watches.items():
+            w.auto = sid in auto and sid not in mine
 
     def _loop(self) -> None:
         while not self.stop.is_set():
@@ -176,6 +247,10 @@ class Manager:
 
     def step(self, now: float) -> None:
         cfg = settings()
+        if now - self.last_poll >= POLL:
+            from . import pilot
+            if pilot.settings()["enabled"] or cfg["auto_streamers"]:
+                pilot.step(self, now)                    # auto-pilot picks who to watch (live, best A$ first)
         self.sync_streamers()
         if cfg["paused"]:
             for w in self.watches.values():
@@ -187,19 +262,19 @@ class Manager:
         for w in self.watches.values():
             if not w.live:
                 continue
-            if (trig := w.check(now, cfg)):
-                w.add_trigger(trig, cfg)
+            wc = self.cfg_for(w, cfg)
+            if (trig := w.check(now, wc)):
+                w.add_trigger(trig, wc)
             span = w.buffer.span() if w.buffer else None
-            for trig in list(w.waiting):                 # judge once the buffer has the aftermath
-                if span and span[1] >= trig["t"] + min(cfg["cut_after"], trig.get("after", cfg["cut_after"])):
+            for trig in list(w.waiting):                 # judge once the buffer has the end of it
+                if span and span[1] >= trig["end"] + cfg["tail"]:
                     w.waiting.remove(trig)
                     self.jobs.put((w, trig))
-                elif now - trig["t"] > 120:
+                elif now - trig["end"] > 120:
                     w.waiting.remove(trig)
-        self.confirm_due(now, cfg)
 
     def poll(self, now: float, cfg: dict) -> None:
-        """Who's live (one request) and new viewer clips (Tier 0's strongest trigger)."""
+        """Who's live (one request) and new viewer clips (a trigger, and a lesson about chat delay)."""
         if not self.watches:
             return
         prov = self.provider()
@@ -212,6 +287,7 @@ class Manager:
                 w.go_offline()
             if not w.live:
                 continue
+            w.stream = live.get(uid) or w.stream
             since = iso(max(w.last_clip_poll - 90, now - 600))
             w.last_clip_poll = now
             for c in prov.recent_clips(uid, since):
@@ -219,14 +295,19 @@ class Manager:
                     continue
                 w.seen_clips.add(c["id"])
                 made = epoch(c["created_at"])
+                start = made - c["duration"]
                 db.ex("INSERT INTO live_events(streamer_id, kind, t, data) VALUES (?, 'viewer_clip', ?, ?)",
                       (w.s["id"], made, json.dumps(c)))
-                start, end = made - c["duration"] - 3, made + 2
-                w.add_trigger({"t": end - 5, "kind": "viewer_clip", "strength": 1.0, "clip": c,
-                               "window": (start - 10, end + 6), "after": 6,
-                               "signals": {"chat": 0, "laughter": 0, "scream": 0, "viewer_clips": 1}}, cfg)
+                learn_delay(w.s["id"], start, w.spikes)
+                cnt = w.chat.counts(start, made + delay_for(w.s["id"]))
+                w.add_trigger({"t": start, "kind": "viewer_clip", "start": start - 3, "end": made + 2,
+                               "strength": 1.0, "clip": c, "counts": cnt,
+                               "evidence": f"a viewer clipped it ({c.get('title') or 'untitled'}); " +
+                                           evidence(cnt, made + delay_for(w.s["id"]) - start),
+                               "signals": {"chat": 0.5, "viewer_clips": 1, "clip": cnt["clip"], "laugh": cnt["laugh"],
+                                           "shock": cnt["shock"], "unique": cnt["unique"]}}, self.cfg_for(w, cfg))
 
-    # ---- Tier 2 ---------------------------------------------------------------------------------------------------
+    # ---- judging (text only) ------------------------------------------------------------------------------------
     def _worker(self) -> None:
         while not self.stop.is_set():
             try:
@@ -240,11 +321,8 @@ class Manager:
                 db.log("warn", "live", f"Couldn't judge a {trig['kind']} moment for {w.s['display_name']}: {e}")
 
     def judge(self, w: Watch, trig: dict, transcribe=None) -> dict:
-        cfg = settings()
-        t0, t1 = trig.get("window") or (trig["t"] - cfg["cut_before"], trig["t"] + cfg["cut_after"])
-        t0, t1 = min(t0, t1 - 60), max(t1, t0 + 60)          # 60-90 s
-        if t1 - t0 > 90:
-            t0 = t1 - 90
+        cfg = self.cfg_for(w, settings())
+        t0, t1 = trig["start"] - cfg["lead"], trig["end"] + cfg["tail"]     # a little room for the judge's trim
         out = folder(w.s["login"]) / f"cut_{int(trig['t'])}.mp4"
         a, b = w.buffer.cut(t0, t1, out)
         length = b - a
@@ -253,93 +331,40 @@ class Manager:
             tc = db.get_setting("transcription", {}) or {}
             transcribe = lambda p: _tr(p, tc.get("model", "small"), tc.get("device", "auto"))   # noqa: E731
         words = transcribe(out)
-        chat = [(t - a, m) for t, m in w.chat.window(a, b)]
-        sig = dict(trig["signals"])
-        audio = w.buffer.audio_peak(a, b)
-        sig.update(laughter=max(sig.get("laughter", 0), audio["laughter"]), scream=max(sig.get("scream", 0), audio["scream"]))
-        res = J.judge(words, chat, frames(out, length), length, w.s["display_name"], sig)
+        lag = trig.get("delay") or delay_for(w.s["id"])
+        chat = [(t - a, m) for t, m in w.chat.window(a, b + lag)]          # chat lags: include its reaction
+        res = J.judge(words, chat, length, w.s["display_name"], trig["signals"])
+        if not res["llm"] or (res["start"], res["end"]) == (0, length):
+            res["start"], res["end"] = max(0.0, trig["start"] - a), min(length, trig["end"] - a)
+        nclips = trig["signals"].get("viewer_clips", 0)
+        final = round(res["score"] + 2 * float(trig.get("strength", 0)) + min(2, nclips), 1)
+        floor = cfg["threshold"] - (1 if trig["kind"] == "viewer_clip" else 0)
+        keep = res["score"] >= floor
+        quote = _quote(words, res["start"], res["end"])
+        reason = f"{res['reason']} · {trig.get('evidence', '')}" + (f"; streamer: '{quote}'" if quote else "")
         mid = db.ex("""INSERT INTO live_moments(streamer_id, trigger, trigger_t, cut_start, cut_end, path, words, chat,
-                       signals, judge_score, reason, best_start, best_end, moment_type, llm, status, confirm_at, clip_json)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       signals, judge_score, reason, best_start, best_end, moment_type, llm, status, viewer_clips,
+                       chat_bonus, final_score, clip_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (w.s["id"], trig["kind"], trig["t"], a, b, str(out), json.dumps(words), json.dumps(chat[:300]),
-                     json.dumps(sig), res["score"], res["reason"], res["start"], res["end"], res["type"],
-                     int(res["llm"]), "pending" if res["score"] >= cfg["threshold"] - 2 else "dropped",
-                     time.time() + cfg["confirm_after"], json.dumps(trig.get("clip")) if trig.get("clip") else None))
-        if res["score"] < cfg["threshold"] - 2:
-            out.unlink(missing_ok=True)                  # clearly not a clip: gone with the buffer
-        return {**res, "id": mid}
-
-    # ---- Tier 3 ---------------------------------------------------------------------------------------------------
-    def confirm_due(self, now: float, cfg: dict) -> None:
-        for m in db.q("SELECT * FROM live_moments WHERE status='pending' AND confirm_at <= ?", (now,)):
-            w = self.watches.get(m["streamer_id"])
-            try:
-                self.confirm(m, w, cfg)
-            except Exception as e:                       # noqa: BLE001
-                db.ex("UPDATE live_moments SET status='dropped', reason=reason || ? WHERE id=?",
-                      (f" (confirm failed: {e})", m["id"]))
-                Path(m["path"]).unlink(missing_ok=True)
-
-    def confirm(self, m: dict, w: Watch | None, cfg: dict) -> dict:
-        a, b = m["cut_start"], m["cut_end"]
-        ms, me = a + m["best_start"], a + m["best_end"]
-        clips = []
-        if w is not None:
-            try:
-                clips = [c for c in self.provider().recent_clips(w.s["platform_user_id"], iso(a - 60))
-                         if ms - 15 <= epoch(c["created_at"]) - c["duration"] <= me + 5 or
-                         ms <= epoch(c["created_at"]) <= me + 60]
-            except Exception:                            # noqa: BLE001
-                clips = []
-        for e in db.q("SELECT data FROM live_events WHERE streamer_id=? AND kind='viewer_clip' AND t BETWEEN ? AND ?",
-                      (m["streamer_id"], ms, me + 60)):
-            c = json.loads(e["data"])
-            if c["id"] not in {x["id"] for x in clips}:
-                clips.append(c)
-        hype = 0.0
-        if w is not None:
-            after = w.chat.window(me, me + 180)
-            before = max(1, len(w.chat.window(me - 600, me - 60)) / 540 * 180)
-            hype = min(1.0, max(0.0, (len(after) / before - 1) / 3))
-        bonus = min(2.0, 1.0 * len(clips)) + round(hype, 2)
-        final = round(m["judge_score"] + bonus, 1)
-        keep = final >= cfg["threshold"]
-        db.ex("UPDATE live_moments SET viewer_clips=?, chat_bonus=?, final_score=?, status=? WHERE id=?",
-              (len(clips), round(hype, 2), final, "kept" if keep else "dropped", m["id"]))
-        if not keep:
-            Path(m["path"]).unlink(missing_ok=True)
-            return {"kept": False, "final": final}
-        if clips:                                        # cut a better version around the viewer clip
-            c = max(clips, key=lambda x: x.get("views", 0))
-            made = epoch(c["created_at"])
-            ms = max(a, made - c["duration"] - 8)        # a beat before the setup
-            me = min(b, made + 4)                        # after the reaction
-        cid = keep_moment({**m, "best_start": ms - a, "best_end": me - a}, final)
-        return {"kept": True, "final": final, "clip_moment": cid}
+                     json.dumps({**trig["signals"], "evidence": trig.get("evidence"), "delay": lag}), res["score"],
+                     reason[:400], res["start"], res["end"], res["type"], int(res["llm"]),
+                     "kept" if keep else "dropped", nclips, trig.get("strength", 0), final,
+                     json.dumps(trig.get("clip")) if trig.get("clip") else None))
+        if keep:
+            w.session["kept"] += 1
+            keep_moment(db.q1("SELECT * FROM live_moments WHERE id=?", (mid,)), final)
+        else:
+            out.unlink(missing_ok=True)                  # not a clip: gone with the buffer
+        return {**res, "id": mid, "kept": keep, "final": final, "reason": reason}
 
     # ---- status for the panel -------------------------------------------------------------------------------------
     def status(self) -> dict:
         import psutil
         cfg = settings()
-        p = psutil.Process()
         try:
-            cpu = p.cpu_percent(interval=None) / max(1, psutil.cpu_count() or 1)
+            cpu = psutil.Process().cpu_percent(interval=None) / max(1, psutil.cpu_count() or 1)
         except Exception:                                # noqa: BLE001
             cpu = None
-        hour_ago = time.time() - 3600
-        rows = []
-        for sid in cfg["streamers"]:
-            s = db.q1("SELECT id, display_name, login, platform FROM streamers WHERE id=?", (int(sid),))
-            if not s:
-                continue
-            w = self.watches.get(int(sid))
-            trig = db.q1("SELECT COUNT(*) n FROM live_moments WHERE streamer_id=? AND created_epoch >= ?", (s["id"], hour_ago))["n"]
-            kept = db.q1("SELECT COUNT(*) n FROM live_moments WHERE streamer_id=? AND status='kept'", (s["id"],))["n"]
-            rows.append({**s, "live": bool(w and w.live), "watching": w is not None,
-                         "title": (w.stream.get("title") if w and w.live else None),
-                         "triggers_hour": trig, "kept": kept,
-                         "buffer_sec": round((lambda sp: sp[1] - sp[0] if sp else 0)(w.buffer.span() if w and w.buffer else None)),
-                         "buffer_error": w.buffer.error if w and w.buffer and w.live else None})
         disk = 0
         try:
             root = folder("x").parent
@@ -349,11 +374,62 @@ class Manager:
         recent = db.q("""SELECT lm.id, lm.trigger, lm.judge_score, lm.final_score, lm.reason, lm.status, lm.created_at,
                          s.display_name FROM live_moments lm JOIN streamers s ON s.id=lm.streamer_id
                          ORDER BY lm.id DESC LIMIT 15""")
+        from . import pilot
         return {"paused": cfg["paused"], "threshold": cfg["threshold"], "per_hour": cfg["per_hour"],
-                "streamers": rows, "cpu_percent": round(cpu, 1) if cpu is not None else None,
-                "disk_bytes": disk, "recent": recent, "error": self.error,
-                "llm_warning": None if J.llm_ok() else "AI model isn't answering: moments are scored from chat, "
-                                                       "laughter and viewer clips only (cautiously)."}
+                "streamers": [r for r in rows(self) if r["watching"] or r["id"] in cfg["streamers"]],
+                "cpu_percent": round(cpu, 1) if cpu is not None else None, "disk_bytes": disk, "recent": recent,
+                "error": self.error, "autopilot": pilot.status(),
+                "llm_warning": None if J.llm_ok() else "AI model isn't answering: moments are scored from chat and "
+                                                       "viewer clips only (cautiously)."}
+
+
+def _quote(words: list[dict], a: float, b: float) -> str:
+    ws = [w["word"] for w in words if a <= float(w["start"]) <= b]
+    txt = " ".join(ws).strip()
+    return (txt[:70] + "…") if len(txt) > 70 else txt
+
+
+def rows(m: Manager | None = None) -> list[dict]:
+    """Every Twitch streamer you can watch, with what the Live Watcher tab sorts and filters on."""
+    m = m or manager()
+    cfg = settings()
+    today = time.mktime(time.localtime()[:3] + (0, 0, 0, 0, 0, -1))
+    out = []
+    for s in db.q("""SELECT s.id, s.display_name, s.login, s.platform, s.platform_user_id FROM streamers s
+                     WHERE s.platform='twitch' ORDER BY s.display_name"""):
+        ok, why = compliance.can_clip(s["id"])
+        prog = db.q1("""SELECT p.name, p.payout_per_1k, p.campaign_type, p.joined FROM programs p
+                        JOIN streamer_programs sp ON sp.program_id=p.id
+                        WHERE sp.streamer_id=? AND p.active=1 ORDER BY p.joined DESC, p.payout_per_1k DESC LIMIT 1""",
+                        (s["id"],))
+        proj = db.q1("""SELECT MAX(per_day_likely) a FROM projections WHERE streamer_id=?""", (s["id"],)) \
+            if _has_table("projections") else None
+        w = m.watches.get(s["id"])
+        trig = db.q1("SELECT COUNT(*) n, SUM(status='kept') k FROM live_moments WHERE streamer_id=?", (s["id"],))
+        kept_today = db.q1("SELECT COUNT(*) n FROM live_moments WHERE streamer_id=? AND status='kept' AND created_epoch>=?",
+                           (s["id"], today))["n"]
+        out.append({**s, "allowed": ok, "why": None if ok else why, "watching": w is not None,
+                    "auto": bool(w and w.auto), "live": bool(w and w.live),
+                    "viewers": (w.stream.get("viewer_count") if w and w.live else None),
+                    "game": (w.stream.get("game_name") if w and w.live else None),
+                    "title": (w.stream.get("title") if w and w.live else None),
+                    "campaign": prog["name"] if prog else None, "joined": bool(prog and prog["joined"]),
+                    "rate": prog["payout_per_1k"] if prog else None,
+                    "campaign_type": prog["campaign_type"] if prog else None,
+                    "projected_aud": round(proj["a"], 2) if proj and proj["a"] is not None else None,
+                    "chat_per_min": round(w.chat.rate_per_min()) if w and w.live else None,
+                    "kept_today": kept_today, "triggers": trig["n"] or 0, "kept": trig["k"] or 0,
+                    "hit_rate": round(100 * (trig["k"] or 0) / trig["n"]) if trig["n"] else None,
+                    "triggers_hour": db.q1("SELECT COUNT(*) n FROM live_moments WHERE streamer_id=? AND created_epoch>=?",
+                                           (s["id"], time.time() - 3600))["n"],
+                    "delay": delay_for(s["id"]), "picked": s["id"] in cfg["streamers"],
+                    "buffer_sec": round(w.buffer.span()[1] - w.buffer.span()[0]) if w and w.live and w.buffer
+                    and w.buffer.span() else 0})
+    return out
+
+
+def _has_table(name: str) -> bool:
+    return bool(db.q1("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)))
 
 
 def keep_moment(m: dict, final: float) -> int:
@@ -373,9 +449,9 @@ def keep_moment(m: dict, final: float) -> int:
     words = [w for w in json.loads(m["words"] or "[]") if m["best_start"] - 1 <= w["start"] <= m["best_end"] + 1]
     mid = db.ex("""INSERT INTO moments(source_id, start_sec, end_sec, score, signals, transcript, fingerprint, status,
                    type, reason, viral_score, words) VALUES (?,?,?,?,?,?,?, 'queued', ?, ?, ?, ?)""",
-                (sid, m["best_start"], m["best_end"], final / 10, m["signals"], " ".join(w["word"] for w in words),
+                (sid, m["best_start"], m["best_end"], min(1.0, final / 10), m["signals"], " ".join(w["word"] for w in words),
                  f"live:{s['id']}:{int(m['cut_start'] + m['best_start'])}", m.get("moment_type") or "Funny",
-                 m.get("reason"), round(final * 10), json.dumps(words)))
+                 m.get("reason"), min(100, round(final * 10)), json.dumps(words)))
     final_path = keep.with_name(f"src{sid}_m{mid}.mp4")       # render_moment moves this into sources/ (no copy left)
     keep.rename(final_path)
     keep = final_path
@@ -416,5 +492,6 @@ def manager() -> Manager:
 
 
 def start_if_configured() -> None:
-    if settings()["streamers"]:
+    from . import pilot
+    if settings()["streamers"] or pilot.settings()["enabled"]:
         manager().start()

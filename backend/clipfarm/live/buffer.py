@@ -1,5 +1,5 @@
-"""Tier 1: a rolling ~3-minute buffer of the live stream, saved as the HLS segments arrive (stream copy, no
-re-encoding), plus cheap audio analysis: each new segment's audio is decoded at 16 kHz and scored by YAMNet.
+"""A rolling ~3-minute buffer of the live stream, saved as the HLS segments arrive (stream copy, no re-encoding).
+Nothing is decoded or analysed here (v0.8.9: moments come from chat); the buffer is only cut when chat triggers.
 
 The live playlist URL comes from yt-dlp (the same tool ClipFarm uses for VODs); segments are fetched with plain
 HTTP. Old segments are deleted as new ones arrive, so disk use stays at roughly 3 minutes of video.
@@ -12,7 +12,6 @@ import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 
-import numpy as np
 import requests
 
 from .. import proc
@@ -27,7 +26,6 @@ class Segment:
     t0: float          # wall-clock start (epoch seconds)
     dur: float
     path: Path
-    audio: dict | None = None      # {"laughter": [..per second..], "scream": [...]}
 
 
 def live_playlist(login: str) -> str:
@@ -68,26 +66,10 @@ def parse_playlist(text: str, base: str) -> list[tuple[int, float, str, float | 
     return out
 
 
-def segment_audio(path: Path) -> dict | None:
-    """YAMNet laughter/scream scores per second of one segment (audio only, 16 kHz)."""
-    from ..highlights import audio_events as ae
-    if not ae.available():
-        return None
-    child = ae.decode(path)
-    raw = child.stdout.read() if child.stdout else b""
-    child.wait()
-    wave = np.frombuffer(raw, np.float32)
-    if wave.size < ae.SR // 2:
-        return None
-    secs = max(1, int(round(wave.size / ae.SR)))
-    ps = ae.per_second(ae.scores(wave), secs)
-    return {g: [round(float(x), 3) for x in ps.get(g, [])] for g in ("laughter", "scream", "cheer")}
-
-
 class LiveBuffer(threading.Thread):
-    """Keeps the last KEEP_SEC of the stream on disk and scores each segment's audio."""
+    """Keeps the last KEEP_SEC of the stream on disk."""
 
-    def __init__(self, login: str, folder: Path, stop: threading.Event, analyse_audio: bool = True):
+    def __init__(self, login: str, folder: Path, stop: threading.Event, analyse_audio: bool = False):
         super().__init__(daemon=True, name=f"live-buffer-{login}")
         self.login, self.folder, self.stop, self.analyse_audio = login, folder, stop, analyse_audio
         self.segments: list[Segment] = []
@@ -129,11 +111,6 @@ class LiveBuffer(threading.Thread):
         p.write_bytes(data)
         t0 = pdt or time.time() - dur
         seg = Segment(t0, dur, p)
-        if self.analyse_audio:
-            try:
-                seg.audio = segment_audio(p)
-            except Exception:                       # noqa: BLE001
-                seg.audio = None
         with self.lock:
             self.segments.append(seg)
 
@@ -159,20 +136,6 @@ class LiveBuffer(threading.Thread):
                 return None
             return self.segments[0].t0, self.segments[-1].t0 + self.segments[-1].dur
 
-    def audio_peak(self, t0: float, t1: float) -> dict:
-        """Max laughter/scream score between two wall-clock times."""
-        out = {"laughter": 0.0, "scream": 0.0, "cheer": 0.0}
-        with self.lock:
-            segs = list(self.segments)
-        for s in segs:
-            if not s.audio:
-                continue
-            for g, vals in s.audio.items():
-                for i, v in enumerate(vals):
-                    if t0 <= s.t0 + i <= t1:
-                        out[g] = max(out[g], v)
-        return out
-
     def disk_bytes(self) -> int:
         with self.lock:
             return sum(s.path.stat().st_size for s in self.segments if s.path.exists())
@@ -196,17 +159,4 @@ def join_segments(paths: list[Path], out: Path) -> Path:
                   "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart", str(out)], check=True, capture_output=True)
     finally:
         lst.unlink(missing_ok=True)
-    return out
-
-
-def frames(video: Path, dur: float, n: int = 3, width: int = 320) -> list[bytes]:
-    """n small JPEG frames spread across the cut (for the judge)."""
-    out = []
-    for k in range(n):
-        t = dur * (k + 1) / (n + 1)
-        r = proc.run([ffmpeg_bin(), "-v", "error", "-ss", f"{t:.2f}", "-i", str(video), "-frames:v", "1",
-                      "-vf", f"scale={width}:-2", "-f", "image2", "-c:v", "mjpeg", "-q:v", "6", "-"],
-                     capture_output=True)
-        if r.returncode == 0 and r.stdout:
-            out.append(r.stdout)
     return out
