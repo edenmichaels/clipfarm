@@ -7,8 +7,12 @@ programs can't drive the app.
 from __future__ import annotations
 
 import asyncio
+import base64
+import html
 import json
+import logging
 import os
+import re
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
@@ -16,13 +20,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
-from . import __version__, compliance, db, secrets
+from . import __version__, compliance, db, library, secrets, vault
+from . import health as healthmod
+from .campaigns import autofill, autopilot, forecast, grouping, importer, matching
 from .discovery import service as disc
+from .posting import submissions as subs
+from .posting.common import connect_account
+from .redact import redact
 from .editing.ffmpeg_util import detect_encoders
 from .jobs import engine as eng
 from .jobs import pipeline, storage
 from .posting import platforms as posting
 from .providers import available_providers
+
+log = logging.getLogger("clipfarm.api")
 
 TOKEN = os.environ.get("CLIPFARM_TOKEN", "")
 app = FastAPI(title="ClipFarm", version=__version__)
@@ -55,7 +66,9 @@ def health():
 def system():
     return {"encoders": detect_encoders(), "disk": storage.disk_status(),
             "connected": list(available_providers().keys()),
-            "secrets": {k: secrets.has_secret(k) for k in SECRET_NAMES}}
+            "secrets": {k: secrets.has_secret(k) for k in SECRET_NAMES},
+            "keychain": secrets.keychain_backend if secrets.keyring else None,
+            "keychain_error": secrets.keychain_error, "vault": vault.status(), "version": __version__}
 
 
 @app.get("/settings", dependencies=A)
@@ -65,13 +78,17 @@ def get_settings():
 
 @app.put("/settings", dependencies=A)
 def put_settings(body: dict):
+    """Save settings. A group (e.g. "highlights") is merged key by key, so saving one option never wipes the
+    group's other options. Send {"group": {"key": null}} to clear one key."""
     for k, v in body.items():
+        old = db.get_setting(k)
+        if isinstance(v, dict) and isinstance(old, dict):
+            v = {kk: vv for kk, vv in {**old, **v}.items() if vv is not None}
         db.set_setting(k, v)
     return db.all_settings()
 
 
-SECRET_NAMES = ["twitch_client_id", "twitch_client_secret", "youtube_api_key", "kick_client_id",
-                "kick_client_secret", "google_oauth_client_id", "google_oauth_client_secret", "llm_api_key"]
+SECRET_NAMES = secrets.SECRET_NAMES
 
 
 class SecretIn(BaseModel):
@@ -197,16 +214,27 @@ def list_programs():
 @app.post("/programs", dependencies=A)
 def create_program(p: ProgramIn):
     pid = db.ex("""INSERT INTO programs(name, operator, url, payout_per_1k, currency, min_views, max_payout,
-                   allowed_platforms, required_tags, required_credit, disclosure, rules, source, active, verified_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now'))""", _prog_params(p))
+                   allowed_platforms, required_tags, required_credit, disclosure, rules, source, active, verified_at,
+                   joined, joined_at, status, field_sources)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now'), 1, date('now'), 'active', '{}')""",
+                _prog_params(p))
+    filled = {k: v for k, v in p.model_dump().items() if v not in (None, [], "") and k not in ("source", "active")}
+    importer.set_fields(pid, filled)        # everything typed in counts as confirmed by you
     return {"id": pid}
 
 
 @app.put("/programs/{pid}", dependencies=A)
 def update_program(pid: int, p: ProgramIn):
-    db.ex("""UPDATE programs SET name=?, operator=?, url=?, payout_per_1k=?, currency=?, min_views=?, max_payout=?,
-             allowed_platforms=?, required_tags=?, required_credit=?, disclosure=?, rules=?, source=?, active=?,
-             verified_at=datetime('now') WHERE id=?""", (*_prog_params(p), pid))
+    old = db.q1("SELECT * FROM programs WHERE id=?", (pid,))
+    if not old:
+        raise HTTPException(404)
+    new = {"name": p.name, "operator": p.operator, "url": p.url, "payout_per_1k": p.payout_per_1k,
+           "currency": p.currency, "min_views": p.min_views, "max_payout": p.max_payout,
+           "allowed_platforms": p.allowed_platforms, "required_tags": p.required_tags,
+           "required_credit": p.required_credit, "disclosure": p.disclosure, "rules": p.rules, "active": int(p.active)}
+    changed = {k: v for k, v in new.items()
+               if (json.dumps(v) if isinstance(v, list) else v) != old.get(k)}
+    importer.set_fields(pid, changed)       # edited fields count as confirmed by you
     return {"ok": True}
 
 
@@ -218,8 +246,8 @@ def delete_program(pid: int):
 
 @app.post("/streamers/{sid}/programs/{pid}", dependencies=A)
 def link_program(sid: int, pid: int):
-    db.ex("INSERT OR IGNORE INTO streamer_programs VALUES (?,?)", (sid, pid))
-    # Being in a program you joined counts as permission (unless explicitly prohibited).
+    # Linked by hand = confirmed. Being in a program you joined counts as permission (unless prohibited).
+    matching.link(pid, sid, 1.0, "Linked by you", confirmed=True)
     db.ex("UPDATE streamers SET permission_status='program_member' WHERE id=? AND permission_status='unknown'", (sid,))
     return {"ok": True}
 
@@ -238,6 +266,7 @@ class ProjectIn(BaseModel):
     duration_sec: int
     output_settings: dict = {}
     start: bool = True
+    confirm_no_payout: bool = False     # clipping streamers without an active campaign needs a yes
 
 
 @app.post("/projects", dependencies=A)
@@ -247,9 +276,18 @@ def create_project(p: ProjectIn):
     blocked = [compliance.can_clip(s)[1] for s in p.streamer_ids if not compliance.can_clip(s)[0]]
     if blocked:
         raise HTTPException(400, {"message": "Some streamers can't be clipped yet.", "reasons": blocked})
+    unpaid = [db.q1("SELECT display_name FROM streamers WHERE id=?", (s,))["display_name"]
+              for s in p.streamer_ids if not matching.active_campaigns_for(s)]
+    if unpaid and not p.confirm_no_payout:
+        raise HTTPException(409, {"message": "These streamers have no active campaign, so their clips won't be "
+                                             "paid: " + ", ".join(unpaid) + ". Clip them anyway?",
+                                  "needs_confirmation": unpaid, "reasons": []})
+    filled = autofill.fill(p.streamer_ids, p.output_settings.get("platforms"))
+    out = autofill.output_settings(p.output_settings, filled)
+    autofill.remember({**p.output_settings, "duration_sec": p.duration_sec})
     with db.tx():
         pid = db.ex("INSERT INTO projects(name, game_id, duration_sec, output_settings) VALUES (?,?,?,?)",
-                    (p.name, p.game_id, p.duration_sec, json.dumps(p.output_settings)))
+                    (p.name, p.game_id, p.duration_sec, json.dumps(out)))
         for s in p.streamer_ids:
             db.ex("INSERT INTO project_streamers VALUES (?,?)", (pid, s))
     if p.start:
@@ -290,26 +328,111 @@ def retry_job(jid: int):
     return {"ok": True}
 
 
+# ---- engine control + failed sources ----------------------------------------------------------
+@app.get("/engine/status", dependencies=A)
+def engine_status():
+    from . import proc
+    return {"paused": eng.is_paused(), "children": proc.running(),
+            "jobs_running": db.q1("SELECT COUNT(*) n FROM jobs WHERE status='running'")["n"],
+            "failed_sources": db.q1("SELECT COUNT(*) n FROM sources WHERE status='error'")["n"]}
+
+
+@app.post("/engine/pause", dependencies=A)
+def engine_pause():
+    stopped = eng.pause_engine()
+    return {**engine_status(), "stopped": stopped}
+
+
+@app.post("/engine/resume", dependencies=A)
+def engine_resume():
+    eng.resume_engine()
+    return engine_status()
+
+
+@app.post("/engine/shutdown", dependencies=A)
+def engine_shutdown():
+    """Quit: stop every child process (ffmpeg) and exit the engine. The desktop app calls this before closing."""
+    from . import proc
+    eng.PAUSED.set()                     # nothing new starts; interrupted jobs are requeued, not failed
+    n = proc.kill_all()
+
+    def bye():
+        import time as _t
+        _t.sleep(0.3)
+        proc.kill_all()
+        os._exit(0)
+    import threading as _th
+    _th.Thread(target=bye, daemon=True).start()
+    return {"ok": True, "stopped": n}
+
+
+@app.get("/sources/problems", dependencies=A)
+def sources_problems():
+    """Sources that failed (with their error and a Retry button) or are waiting to be retried."""
+    return db.q("""SELECT so.id, so.kind, so.title, so.url, so.status, so.error, so.retry_at, so.failed_at,
+                   s.display_name streamer FROM sources so JOIN streamers s ON s.id=so.streamer_id
+                   WHERE so.status='error' OR (so.error IS NOT NULL AND so.status NOT IN ('processed','deleted'))
+                   ORDER BY so.status='error' DESC, so.id DESC LIMIT 100""")
+
+
+@app.post("/sources/{sid}/retry", dependencies=A)
+def source_retry(sid: int):
+    src = db.q1("SELECT * FROM sources WHERE id=?", (sid,))
+    if not src:
+        raise HTTPException(404, "Source not found")
+    last = db.q1("""SELECT payload, project_id FROM jobs WHERE kind='process_source'
+                    AND json_extract(payload,'$.source_id')=? ORDER BY id DESC LIMIT 1""", (sid,))
+    if not last:
+        raise HTTPException(409, "This source was never processed, so there's nothing to retry.")
+    if db.q1("""SELECT 1 FROM jobs WHERE kind='process_source' AND status IN ('queued','running')
+                AND json_extract(payload,'$.source_id')=?""", (sid,)):
+        return {"ok": True, "already_queued": True}
+    db.ex("UPDATE sources SET status='new', error=NULL, retry_at=NULL, failed_at=NULL WHERE id=?", (sid,))
+    jid = eng.enqueue("process_source", json.loads(last["payload"]), last["project_id"], priority=3)
+    return {"ok": True, "job_id": jid}
+
+
 # ---- clips ---------------------------------------------------------------------------
 @app.get("/clips", dependencies=A)
 def clips(game_id: int | None = None, streamer_id: int | None = None, review_status: str | None = None,
-          posted: bool | None = None, project_id: int | None = None, limit: int = 200):
-    cond, params = [], []
-    for col, val in (("c.game_id", game_id), ("c.streamer_id", streamer_id),
-                     ("c.review_status", review_status), ("c.project_id", project_id)):
-        if val is not None:
-            cond.append(f"{col}=?")
-            params.append(val)
-    if posted is not None:
-        cond.append(("" if posted else "NOT ") + "EXISTS (SELECT 1 FROM posts p WHERE p.clip_id=c.id AND p.status='posted')")
-    where = ("WHERE " + " AND ".join(cond)) if cond else ""
-    return db.q(f"""SELECT c.*, s.display_name streamer, g.name game, pr.name program, m.score,
-        (SELECT COALESCE(SUM(pm.views),0) FROM posts p JOIN post_metrics pm ON pm.post_id=p.id
-           WHERE p.clip_id=c.id AND pm.taken_at=(SELECT MAX(taken_at) FROM post_metrics WHERE post_id=p.id)) views,
-        (SELECT COALESCE(SUM(amount),0) FROM payouts py JOIN posts p ON p.id=py.post_id WHERE p.clip_id=c.id) earnings
-        FROM clips c LEFT JOIN streamers s ON s.id=c.streamer_id LEFT JOIN games g ON g.id=c.game_id
-        LEFT JOIN programs pr ON pr.id=c.program_id LEFT JOIN moments m ON m.id=c.moment_id
-        {where} ORDER BY c.id DESC LIMIT ?""", (*params, limit))
+          posted: bool | None = None, project_id: int | None = None, limit: int = 200, sort: str | None = None):
+    return library.list_clips(game_id=game_id, streamer_id=streamer_id, review_status=review_status, posted=posted,
+                              project_id=project_id, limit=limit, sort=sort)
+
+
+@app.get("/clips/sorts", dependencies=A)
+def clip_sorts():
+    return {"sorts": [{"key": k, "label": v} for k, v in library.SORT_LABELS.items()], "current": library.sort_key(None)}
+
+
+class IdsIn(BaseModel):
+    ids: list[int]
+
+
+@app.post("/clips/delete-preview", dependencies=A)
+def clips_delete_preview(b: IdsIn):
+    return library.preview(b.ids)
+
+
+@app.post("/clips/delete", dependencies=A)
+def clips_delete(b: IdsIn):
+    return library.delete(b.ids)
+
+
+@app.post("/clips/restore", dependencies=A)
+def clips_restore(b: IdsIn):
+    return library.restore(b.ids)
+
+
+@app.get("/clips/deleted", dependencies=A)
+def clips_deleted():
+    return library.trash()
+
+
+@app.post("/clips/deleted/empty", dependencies=A)
+def clips_deleted_empty(b: IdsIn | None = None):
+    """Empty now: remove the files of everything in Recently deleted (or just the ids given)."""
+    return library.purge(b.ids if b and b.ids else None, expired_only=False)
 
 
 class ClipPatch(BaseModel):
@@ -350,12 +473,941 @@ def checklist(cid: int):
 
 @app.get("/media", dependencies=A)
 def media(path: str):
-    """Serve thumbnails/videos for the UI — only from inside the media folder."""
+    """Serve thumbnails/videos for the UI — only from inside the media folder or your own B-roll / sticker
+    folders (their thumbnails in the Editor)."""
     p = Path(path).resolve()
-    root = storage.media_dir().resolve()
-    if root not in p.parents or not p.exists():
+    lib = db.get_setting("music", {}) or {}
+    roots = [storage.media_dir().resolve()] + [Path(lib[k]).resolve() for k in ("broll_dir", "stickers_dir") if lib.get(k)]
+    if not any(r in p.parents for r in roots) or not p.is_file():
         raise HTTPException(404)
     return FileResponse(p)
+
+
+# ---- v0.4: captions, Review editing, feedback, highlight weights, music, trending sounds -------------
+from .editing import captions as capmod  # noqa: E402
+from .highlights import learning  # noqa: E402
+from .music import library as musiclib, trending as trendmod  # noqa: E402
+
+
+@app.get("/captions/presets", dependencies=A)
+def caption_presets():
+    return {"presets": capmod.presets_public(), "default": (db.get_setting("captions") or {}).get("style", "bold_pop"),
+            "safe_zone": capmod.SAFE, "canvas": [capmod.W, capmod.H]}
+
+
+@app.get("/fonts/{name}")
+def font_file(name: str):
+    """Bundled caption fonts for the Review preview (public: fonts are OFL, nothing secret)."""
+    d = capmod.fonts_dir()
+    if not d or name not in capmod.FONTS.values():
+        raise HTTPException(404)
+    return FileResponse(d / name, media_type="font/ttf")
+
+
+def _clip(cid: int) -> dict:
+    c = db.q1("SELECT * FROM clips WHERE id=?", (cid,))
+    if not c:
+        raise HTTPException(404)
+    return c
+
+
+@app.get("/clips/{cid}/edit", dependencies=A)
+def clip_edit_info(cid: int):
+    """What Review needs to preview and edit captions on the actual clip."""
+    c = _clip(cid)
+    d = _edit_render_view(cid) or json.loads(c.get("render_spec") or "{}")
+    ev = Path(c["file_path"]).with_suffix(".events.json") if c.get("file_path") else None
+    fb = db.q1("SELECT rating, tags FROM clip_feedback WHERE clip_id=?", (cid,))
+    track = musiclib.get(c["music_track_id"]) if c.get("music_track_id") else None
+    return {
+        "clip_id": cid, "editable": bool(d.get("base") and Path(d["base"]).exists()),
+        "base_path": d.get("base"), "words": json.loads(c.get("words") or "[]"), "offset": d.get("start", 0.0),
+        "events": json.loads(ev.read_text(encoding="utf-8")) if ev and ev.exists() else [],
+        "preset": c.get("caption_preset") or d.get("caption_style") or "bold_pop", "nudge": c.get("caption_nudge") or 0,
+        "moment_type": c.get("moment_type"), "moment_reason": c.get("moment_reason"),
+        "music": {"title": track["title"], "licence": track["licence"], "source": track["source"],
+                  "plan": json.loads(c.get("music_plan") or "null")} if track else None,
+        "original_audio_only": bool(c.get("original_audio_only")),
+        "nomusic_path": c.get("nomusic_path"),
+        "feedback": {"rating": fb["rating"], "tags": json.loads(fb["tags"])} if fb else None,
+        "feedback_tags": learning.TAGS,
+        "trending": trendmod.suggest(c.get("moment_type") or "Funny"),
+    }
+
+
+class RerenderIn(BaseModel):
+    words: list[dict] | None = None
+    caption_nudge: float | None = None
+    caption_style: str | None = None
+    uppercase: bool | None = None
+    emoji: bool | None = None
+    profanity: str | None = None
+    hook: str | None = None
+    original_audio_only: bool | None = None
+
+
+def _edit_render_view(cid: int) -> dict | None:
+    """For edit-project clips: the same shape Review's caption studio reads from v0.4 clips."""
+    from .edit import compile as ec, project as ep
+    p = ep.get(cid)
+    if not p:
+        return None
+    e = p["edl"]
+    try:
+        key = ec.base_key(e)
+    except Exception:
+        return None
+    base = storage.media_dir() / "edit_cache" / f"c{cid}" / f"base_{key}.mp4"
+    if not base.exists():
+        m = db.q1("SELECT moment_id FROM clips WHERE id=?", (cid,))
+        alt = storage.media_dir() / "edit_cache" / f"m{m['moment_id']}" / f"base_{key}.mp4" if m else None
+        base = alt if alt and alt.exists() else base
+    tmpl = e["captions"]["template"]
+    first = (e["layout"]["keyframes"] or [{"layout": "blur_fill"}])[0]["layout"]
+    return {"base": str(base) if base.exists() else (e["source"]["path"] if Path(e["source"]["path"]).exists() else None),
+            "start": e["range"][0], "caption_style": tmpl if isinstance(tmpl, str) else "bold_pop",
+            "layout": "crop" if first in ("speaker", "pip", "cam_full") else first, "keep_clear": e["rules"].get("onscreen"),
+            "music": e["music"].get("path") if e["music"].get("enabled") else None}
+
+
+@app.post("/clips/{cid}/rerender", dependencies=A)
+def clip_rerender(cid: int, b: RerenderIn):
+    c = _clip(cid)
+    d = _edit_render_view(cid) or json.loads(c.get("render_spec") or "{}")
+    if not d.get("base") or not Path(d["base"]).exists():
+        raise HTTPException(409, "This clip was made before captions could be edited (or its base file was "
+                                 "cleaned up). New clips can be re-rendered.")
+    changes = {k: v for k, v in b.model_dump().items() if v is not None}
+    if "words" in changes:
+        for w in changes["words"]:
+            if not {"word", "start", "end"} <= set(w):
+                raise HTTPException(400, "Each word needs word, start and end.")
+    if "caption_nudge" in changes:
+        changes["caption_nudge"] = max(-400.0, min(400.0, float(changes["caption_nudge"])))
+    jid = eng.enqueue("rerender_clip", {"clip_id": cid, "changes": changes}, c["project_id"], priority=1)
+    return {"job_id": jid}
+
+
+class FeedbackIn(BaseModel):
+    rating: int
+    tags: list[str] = []
+
+
+@app.post("/clips/{cid}/feedback", dependencies=A)
+def clip_feedback(cid: int, b: FeedbackIn):
+    _clip(cid)
+    if b.rating not in (-1, 1):
+        raise HTTPException(400, "rating is 1 (thumbs up) or -1 (thumbs down)")
+    res = learning.record(cid, b.rating, b.tags)
+    n = db.q1("SELECT COUNT(*) n FROM clip_feedback")["n"]
+    return {**res, "ratings": n, "needed": learning.MIN_RATINGS}
+
+
+@app.post("/clips/{cid}/export-for-trending", dependencies=A)
+def clip_export_trending(cid: int):
+    c = _clip(cid)
+    jid = eng.enqueue("export_for_trending", {"clip_id": cid}, c["project_id"], priority=1)
+    return {"job_id": jid}
+
+
+@app.get("/highlights/weights", dependencies=A)
+def highlight_weights():
+    w = learning.all_weights()
+    hs = db.get_setting("highlights", {}) or {}
+    names = {}
+    for scope in {**w["learned"], **w.get("virality_learned", {})}:
+        kind, sid = scope.split(":", 1)
+        row = db.q1("SELECT display_name n FROM streamers WHERE id=?", (sid,)) if kind == "streamer" else \
+            db.q1("SELECT name n FROM games WHERE id=?", (sid,))
+        names[scope] = row["n"] if row else scope
+    return {**w, "names": names, "focus": hs.get("focus", "balanced"), "min_ratings": learning.MIN_RATINGS,
+            "ratings": db.q1("SELECT COUNT(*) n FROM clip_feedback")["n"]}
+
+
+@app.put("/highlights/weights", dependencies=A)
+def highlight_weights_set(body: dict):
+    if "weights" in body:
+        from .highlights.detect import DEFAULT_WEIGHTS
+        cur = {**DEFAULT_WEIGHTS, **(db.get_setting("highlight_weights") or {})}
+        w = {k: max(0.0, float(body["weights"].get(k, cur[k]))) for k in DEFAULT_WEIGHTS}
+        tot = sum(w.values()) or 1.0
+        db.set_setting("highlight_weights", {k: round(v / tot, 3) for k, v in w.items()})
+    if "focus" in body:
+        if body["focus"] not in ("balanced", "funny", "action"):
+            raise HTTPException(400, "focus is balanced, funny or action")
+        db.set_setting("highlights", {**(db.get_setting("highlights", {}) or {}), "focus": body["focus"]})
+    return highlight_weights()
+
+
+@app.post("/highlights/weights/reset", dependencies=A)
+def highlight_weights_reset(body: dict):
+    learning.reset(body.get("scope"))
+    return highlight_weights()
+
+
+@app.get("/music/tracks", dependencies=A)
+def music_tracks():
+    try:
+        musiclib.ensure_bundled()
+    except Exception as e:
+        db.log("warn", "music", f"Bundled music couldn't be built: {e}")
+    return {"tracks": musiclib.tracks(), "settings": db.get_setting("music", {}) or {},
+            "local_warning": musiclib.LOCAL_LICENCE}
+
+
+@app.post("/music/scan", dependencies=A)
+def music_scan(body: dict):
+    folder = body.get("folder") or (db.get_setting("music", {}) or {}).get("folder")
+    if not folder:
+        raise HTTPException(400, "Choose your music folder first.")
+    try:
+        res = musiclib.scan_local(folder)
+    except FileNotFoundError as e:
+        raise HTTPException(400, str(e))
+    db.set_setting("music", {**(db.get_setting("music", {}) or {}), "folder": folder})
+    return res
+
+
+@app.patch("/music/tracks/{tid}", dependencies=A)
+def music_edit(tid: int, body: dict):
+    if not musiclib.get(tid):
+        raise HTTPException(404)
+    return musiclib.edit(tid, body)
+
+
+@app.put("/music/settings", dependencies=A)
+def music_settings(body: dict):
+    cur = db.get_setting("music", {}) or {}
+    for k in ("enabled", "duck_db", "folder"):
+        if k in body:
+            cur[k] = body[k]
+    if "duck_db" in cur:
+        cur["duck_db"] = max(12.0, min(18.0, float(cur["duck_db"])))
+    db.set_setting("music", cur)
+    return cur
+
+
+@app.get("/trending", dependencies=A)
+def trending_list():
+    return trendmod.listing(active_only=False)
+
+
+@app.post("/trending/import", dependencies=A)
+def trending_import(body: dict):
+    if not (body.get("text") or "").strip():
+        raise HTTPException(400, "Paste one sound per line.")
+    return trendmod.import_text(body["text"])
+
+
+@app.delete("/trending/{tid}", dependencies=A)
+def trending_delete(tid: int):
+    db.ex("UPDATE trending_sounds SET active=0 WHERE id=?", (tid,))
+    return {"ok": True}
+
+
+# ---- v0.5: edit projects (EDL), transcript editor, reframe, caption templates -------------------------
+from .edit import build as edit_build, compile as edit_compile, project as edit_project  # noqa: E402
+from .edit import reframe as edit_reframe, templates as edit_templates, timeline as edit_tl  # noqa: E402
+from .edit import transcript as edit_tr  # noqa: E402
+
+
+def _ep(cid: int) -> dict:
+    _clip(cid)
+    p = edit_build.ensure_project(cid)
+    if not p:
+        raise HTTPException(409, "This clip can't be edited: its source file is gone (it was cleaned up or made "
+                                 "before v0.4).")
+    return p
+
+
+def _pip_rect(e: dict) -> list[int] | None:
+    """Where the corner facecam sits on the 1080x1920 frame (for the Editor's drag handle)."""
+    from .edit import facecam as F
+    lay = e["layout"]
+    if not lay.get("facecam") or not any(k["layout"] == "corner" for k in lay.get("keyframes") or []):
+        return None
+    src = e["source"]
+    return list(F.pip_rect(lay.get("pip"), F.cam_aspect(lay["facecam"], src.get("width", 1920), src.get("height", 1080)),
+                           edit_compile._has_title(e)))
+
+
+def _caption_y(e: dict) -> float | None:
+    try:
+        tm = e["captions"].get("template")
+        return edit_compile.caption_y(e, edit_templates.get(tm) if isinstance(tm, str) else None)
+    except Exception:                                  # noqa: BLE001  (only the drag handle needs it)
+        return None
+
+
+def _view(p: dict) -> dict:
+    e = p["edl"]
+    words = e["captions"]["words"]
+    proxy = db.get_setting(f"proxy:{p['clip_id']}") or {}
+    return {**p, "duration": edit_tl.duration(e), "kept": edit_tl.kept(e), "segments": edit_tl.out_segments(e),
+            "words_out": [{"i": i, **w, "out": edit_tl.to_out(e, float(w["start"]))} for i, w in enumerate(words)],
+            "fillers": edit_tr.filler_indices(e), "silences": edit_tr.silences(e),
+            "layout_segments": edit_compile.layout_segments(e),
+            "caption_y": _caption_y(e),
+            "notice": edit_project.notice(p["clip_id"]),
+            "pip_rect": _pip_rect(e),
+            "rule_fixes": edit_reframe.enforce_rules(e["layout"]["keyframes"], e["rules"].get("onscreen") or [],
+                                                     e["layout"].get("facecam"))[1],
+            "proxy": proxy.get("path") if proxy.get("head") == p["head"] and proxy.get("path") and Path(proxy["path"]).exists() else None}
+
+
+@app.get("/edit/{cid}", dependencies=A)
+def edit_get(cid: int):
+    return _view(_ep(cid))
+
+
+class EdlIn(BaseModel):
+    edl: dict
+    label: str = "Edit"
+
+
+@app.put("/edit/{cid}", dependencies=A)
+def edit_put(cid: int, b: EdlIn):
+    cur = _ep(cid)
+    e = b.edl
+    for k in ("source", "range", "cuts", "layout", "captions", "music", "rules"):
+        if k not in e:
+            raise HTTPException(400, f"Edit project is missing '{k}'.")
+    e["source"] = cur["edl"]["source"]                       # the source can't be swapped from the UI
+    if edit_tl.duration(e) < 1:
+        raise HTTPException(400, "The clip has to be at least 1 second long.")
+    return _view(edit_project.save(cid, e, b.label[:60]))
+
+
+@app.post("/edit/{cid}/undo", dependencies=A)
+def edit_undo(cid: int):
+    _ep(cid)
+    return _view(edit_project.undo(cid))
+
+
+@app.post("/edit/{cid}/redo", dependencies=A)
+def edit_redo(cid: int):
+    _ep(cid)
+    return _view(edit_project.redo(cid))
+
+
+@app.get("/edit/{cid}/history", dependencies=A)
+def edit_history(cid: int):
+    _ep(cid)
+    return edit_project.history(cid)
+
+
+@app.post("/edit/{cid}/transcript", dependencies=A)
+def edit_transcript(cid: int, body: dict):
+    """op: delete | restore (indices) · fillers · silences · range (start, end, source time) · fix (index, text)."""
+    _ep(cid)
+    op = body.get("op")
+    try:
+        if op == "delete":
+            fn, label = (lambda e: edit_tr.delete_words(e, body.get("indices", []))), "Delete words"
+        elif op == "restore":
+            fn, label = (lambda e: edit_tr.restore_words(e, body.get("indices", []))), "Restore words"
+        elif op == "fillers":
+            fn, label = edit_tr.remove_fillers, "Remove filler words"
+        elif op == "silences":
+            fn, label = (lambda e: edit_tr.remove_silences(e, float(body.get("min_gap", edit_tr.SILENCE)))), "Remove silences"
+        elif op == "range":
+            fn, label = (lambda e: edit_tr.set_range(e, body["start"], body["end"])), "Change clip range"
+        elif op == "fix":
+            fn, label = (lambda e: edit_tr.fix_word(e, int(body["index"]), str(body["text"]))), "Fix word"
+        else:
+            raise HTTPException(400, "op is delete, restore, fillers, silences, range or fix")
+        p = edit_project.update(cid, fn, label)
+    except (ValueError, KeyError, IndexError) as e:
+        raise HTTPException(400, str(e))
+    if edit_tl.duration(p["edl"]) < 1:
+        edit_project.undo(cid)
+        raise HTTPException(400, "That would leave less than 1 second of clip.")
+    return _view(p)
+
+
+@app.post("/edit/{cid}/reframe", dependencies=A)
+def edit_reframe_auto(cid: int):
+    """Re-run AI reframe on the current range (keeps your facecam box)."""
+    p = _ep(cid)
+    e = p["edl"]
+    fc = e["layout"].get("facecam")
+    from .editing.layout import Box
+    lay = edit_reframe.analyse(Path(e["source"]["path"]), e["range"][0], e["range"][1],
+                               facecam=Box(**{k: fc[k] for k in ("x", "y", "w", "h")}) if fc else None,
+                               onscreen=e["rules"].get("onscreen") or [],
+                               speech=[(w["start"], w["end"]) for w in e["captions"]["words"]], detect_cam=fc is None,
+                               words=e["captions"]["words"], has_title=edit_compile._has_title(e),
+                               pip=e["layout"].get("pip"))
+    return _view(edit_project.update(cid, lambda x: {**x, "layout": {**x["layout"], **lay}}, "AI reframe"))
+
+
+@app.post("/edit/{cid}/facecam", dependencies=A)
+def edit_facecam(cid: int, body: dict):
+    """Set the facecam box (fractions of the source frame); remember=True saves it for the streamer."""
+    _ep(cid)
+    box = {k: float(body[k]) for k in ("x", "y", "w", "h")}
+    if not (0 <= box["x"] < 1 and 0 <= box["y"] < 1 and 0.03 < box["w"] <= 1 and 0.03 < box["h"] <= 1
+            and box["x"] + box["w"] <= 1.001 and box["y"] + box["h"] <= 1.001):
+        raise HTTPException(400, "The facecam box has to be inside the video.")
+
+    def apply(e):
+        e["layout"]["facecam"] = box
+        e["layout"]["facecam_source"] = "saved"
+        e["layout"].pop("facecam_ask", None)
+        for k in e["layout"]["keyframes"]:
+            if k["layout"] in ("split", "pip", "corner", "focus", "cam_full") or k.get("cam"):
+                k["cam"] = box
+        return e
+    out = edit_project.update(cid, apply, "Move facecam")
+    if body.get("remember", True):
+        c = db.q1("SELECT streamer_id FROM clips WHERE id=?", (cid,))
+        if c and c["streamer_id"]:
+            db.set_setting(f"facecam:{c['streamer_id']}", {**box, "by": "you"})
+    return _view(out)
+
+
+@app.post("/edit/{cid}/fix-rules", dependencies=A)
+def edit_fix_rules(cid: int):
+    p = _ep(cid)
+    e = p["edl"]
+    kfs, fixed = edit_reframe.enforce_rules(e["layout"]["keyframes"], e["rules"].get("onscreen") or [], e["layout"].get("facecam"))
+    if not fixed:
+        return _view(p)
+    return _view(edit_project.update(cid, lambda x: {**x, "layout": {**x["layout"], "keyframes": kfs}}, "Fix campaign rules"))
+
+
+@app.post("/edit/{cid}/translate", dependencies=A)
+def edit_translate(cid: int, body: dict):
+    from .edit import translate as edit_trans
+    p = _ep(cid)
+    lang = body.get("language")
+    if not lang:
+        return _view(edit_project.update(cid, lambda e: {**e, "captions": {**e["captions"], "translate_to": None}},
+                                         "Original-language captions"))
+    try:
+        tr = edit_trans.translate_words(p["edl"]["captions"]["words"], lang, p["edl"]["captions"].get("language"))
+    except (ValueError, RuntimeError) as e:
+        raise HTTPException(400, str(e))
+
+    def apply(e):
+        e["captions"].setdefault("translations", {})[lang] = tr
+        e["captions"]["translate_to"] = lang
+        return e
+    return _view(edit_project.update(cid, apply, f"Captions in {edit_trans.LANGUAGES[lang]}"))
+
+
+@app.post("/edit/{cid}/preview", dependencies=A)
+def edit_preview(cid: int):
+    """Fast low-res preview render of the current edit (background job)."""
+    _ep(cid)
+    c = db.q1("SELECT project_id FROM clips WHERE id=?", (cid,))
+    queued = db.q1("""SELECT id FROM jobs WHERE kind='export_edit' AND status='queued'
+                      AND json_extract(payload,'$.clip_id')=? AND json_extract(payload,'$.quality')='proxy'""", (cid,))
+    if queued:                      # one waiting preview is enough: it renders the latest version when it runs
+        return {"job_id": queued["id"]}
+    out = storage.media_dir() / "edit_cache" / f"c{cid}" / "preview.mp4"
+    return {"job_id": eng.enqueue("export_edit", {"clip_id": cid, "quality": "proxy", "out": str(out)},
+                                  c["project_id"], priority=0)}
+
+
+@app.get("/edit/{cid}/frame", dependencies=A)
+def edit_frame(cid: int, t: float = 0.0):
+    """A still of the current edit at time t, drawn by the export renderer (same captions, zooms, overlays)."""
+    from fastapi.responses import FileResponse
+    p = _ep(cid)
+    d = storage.media_dir() / "edit_cache" / f"c{cid}" / "frames"
+    d.mkdir(parents=True, exist_ok=True)
+    out = d / f"h{p['head']}_{max(0.0, t):.2f}.png"
+    if not out.exists():
+        for old in sorted(d.glob("*.png"), key=lambda f: f.stat().st_mtime)[:-40]:      # keep the cache small
+            old.unlink(missing_ok=True)
+        try:
+            edit_compile.render_frame(p["edl"], t, out, storage.media_dir() / "edit_cache" / f"c{cid}")
+        except Exception as e:                      # noqa: BLE001
+            raise HTTPException(500, f"Couldn't draw the preview frame: {e}")
+    return FileResponse(out, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+@app.post("/edit/{cid}/export", dependencies=A)
+def edit_export(cid: int, body: dict):
+    _ep(cid)
+    preset = body.get("preset") or "tiktok"
+    if preset not in edit_compile.PRESETS:
+        raise HTTPException(400, f"preset is one of {', '.join(edit_compile.PRESETS)}")
+    c = db.q1("SELECT project_id FROM clips WHERE id=?", (cid,))
+    return {"job_id": eng.enqueue("export_edit", {"clip_id": cid, "preset": preset, "music": body.get("music", True)},
+                                  c["project_id"], priority=1)}
+
+
+# ---- v0.6: Editor list, scores, rule fixes, fix my clip, batch, trends --------------------------------
+EDITOR_SORT = {"profit": "c.profit_likely DESC NULLS LAST, c.virality DESC", "virality": "c.virality DESC NULLS LAST",
+               "newest": "c.id DESC"}
+
+
+@app.get("/editor/clips", dependencies=A)
+def editor_clips(sort: str = "profit", min_score: int | None = None, program_id: int | None = None,
+                 streamer_id: int | None = None, moment_type: str | None = None, status: str | None = None,
+                 project_id: int | None = None, tag: str | None = None, reaction: str | None = None,
+                 limit: int = 300):
+    if sort not in EDITOR_SORT:
+        raise HTTPException(400, "sort is profit, virality or newest")
+    # only clips that can be opened in the Editor (older clips whose source was cleaned up stay in My Clips)
+    cond, params = ["c.deleted_at IS NULL", "c.review_status != 'rejected'",
+                    "(ep.id IS NOT NULL OR c.source_path IS NOT NULL OR c.base_path IS NOT NULL)"], []
+    for col, val in (("c.program_id", program_id), ("c.streamer_id", streamer_id), ("c.project_id", project_id),
+                     ("COALESCE(m.type, c.moment_type)", moment_type)):
+        if val is not None:
+            cond.append(f"{col}=?")
+            params.append(val)
+    if min_score is not None:
+        cond.append("c.virality >= ?")
+        params.append(min_score)
+    if tag:                                     # e.g. "explosion": event tags from the viral model
+        cond.append("m.tags LIKE ?")
+        params.append(f'%"{tag}"%')
+    if reaction in ("laugh", "scream", "disbelief", "chat_laugh", "face"):   # "... with laughter"
+        cond.append(f"CAST(json_extract(m.features, '$.{reaction}') AS REAL) >= 0.45")
+    rows = db.q(f"""SELECT c.id, c.title, c.file_path, c.thumb_path, c.virality, c.virality_reason, c.virality_parts,
+        c.profit_low, c.profit_likely, c.profit_high, c.profit_platform, c.expected_views, c.rule_flags, c.review_status,
+        c.streamer_id, c.program_id, c.project_id, c.duration_sec, c.variant_of, c.variant_label,
+        s.display_name streamer, pr.name program,
+        COALESCE(m.type, c.moment_type) moment_type, m.reason moment_reason, ep.status edit_status, ep.updated_at edited_at,
+        m.viral_score, m.tags moment_tags,
+        EXISTS (SELECT 1 FROM posts p WHERE p.clip_id=c.id AND p.status='posted') posted
+        FROM clips c LEFT JOIN streamers s ON s.id=c.streamer_id LEFT JOIN programs pr ON pr.id=c.program_id
+        LEFT JOIN moments m ON m.id=c.moment_id LEFT JOIN edit_projects ep ON ep.clip_id=c.id
+        WHERE {" AND ".join(cond)} ORDER BY {EDITOR_SORT[sort]} LIMIT ?""", (*params, limit))
+    out = []
+    for r in rows:
+        st = "posted" if r["posted"] else (r["edit_status"] or "new")
+        if status and st != status:
+            continue
+        flags = json.loads(r["rule_flags"] or "[]")
+        out.append({**r, "status": st, "rule_flags": flags, "virality_parts": json.loads(r["virality_parts"] or "{}"),
+                    "moment_tags": json.loads(r["moment_tags"] or "[]"),
+                    "rules_ok": not any(f.get("severity") == "error" for f in flags)})
+    if sort == "profit":
+        from .scoring import clipscore
+        out = clipscore.rank_for_posting(out)
+    return out
+
+
+@app.post("/edit/{cid}/score", dependencies=A)
+def edit_score(cid: int):
+    from .scoring import clipscore
+    p = _ep(cid)
+    return clipscore.score_clip(cid, p["edl"])
+
+
+@app.post("/edit/{cid}/fix", dependencies=A)
+def edit_fix(cid: int, body: dict):
+    """One-click fix for one campaign-rule flag ({"id": ...}) or all of them ({"all": true})."""
+    from .scoring import rules_check
+    _ep(cid)
+    if body.get("all"):
+        return _view(edit_project.update(cid, lambda e: rules_check.fix_all(e)[0], "Fix campaign rules"))
+    fid = body.get("id")
+    if not fid:
+        raise HTTPException(400, "id or all is required")
+    return _view(edit_project.update(cid, lambda e: rules_check.fix(e, fid), f"Fix: {fid}"))
+
+
+@app.post("/edit/{cid}/fix-my-clip", dependencies=A)
+def edit_fix_my_clip(cid: int):
+    from .scoring import fixclip
+    p = _ep(cid)
+    e, done = fixclip.fix_my_clip(p["edl"])
+    v = _view(edit_project.save(cid, e, "Fix my clip: " + ", ".join(done)) if done else p)
+    return {**v, "changes": done}
+
+
+@app.post("/edit/{cid}/auto-edit", dependencies=A)
+def edit_auto(cid: int):
+    """Back to the automatic edit (first version), then the one-click clean-up."""
+    from .scoring import fixclip
+    p = _ep(cid)
+    first = db.q1("SELECT data FROM edit_versions WHERE project_id=? ORDER BY version LIMIT 1", (p["id"],))
+    e = json.loads(first["data"]) if first else p["edl"]
+    e, done = fixclip.fix_my_clip(e)
+    return {**_view(edit_project.save(cid, e, "Auto-edit")), "changes": done}
+
+
+@app.post("/edit/{cid}/signal", dependencies=A)
+def edit_signal(cid: int, body: dict):
+    """Implicit learning signals from the Editor: keep, delete, edit, export."""
+    kind = body.get("kind")
+    if kind not in ("keep", "delete", "edit", "export"):
+        raise HTTPException(400, "kind is keep, delete, edit or export")
+    _clip(cid)
+    db.ex("INSERT INTO clip_signals(clip_id, kind) VALUES (?,?)", (cid, kind))
+    if kind in ("keep", "delete", "export"):
+        try:
+            learning.refit_for_clip(cid)
+        except Exception as e:                          # noqa: BLE001
+            log.warning("learning refit failed: %s", e)
+    if kind == "delete":
+        library.delete([cid])                            # Recently deleted (7 days), renders/posts stopped
+    elif kind == "keep":
+        db.ex("UPDATE clips SET review_status='approved' WHERE id=? AND review_status='pending'", (cid,))
+    return {"ok": True}
+
+
+@app.post("/editor/batch", dependencies=A)
+def editor_batch(body: dict):
+    """Apply one action to many clips: template, captions (regenerate), fix, export, delete."""
+    ids = [int(i) for i in body.get("ids") or []]
+    action = body.get("action")
+    if not ids or action not in ("template", "captions", "fix", "export", "delete", "keep"):
+        raise HTTPException(400, "ids and action (template, captions, fix, export, delete, keep) are required")
+    from .scoring import fixclip
+    done, failed, jobs = [], [], []
+    for cid in ids:
+        try:
+            if action == "template":
+                t = body.get("template")
+                if not t or not edit_templates.get(t):
+                    raise HTTPException(400, "unknown template")
+                _ep(cid)
+                edit_project.update(cid,
+                                    lambda e: {**e, "captions": {**e["captions"], "template": t}}, f"Template: {t}")
+            elif action == "captions":
+                _ep(cid)
+                edit_project.update(cid, lambda e: {**e, "captions": {**e["captions"], "enabled": True, "nudge": 0.0,
+                                                                         "translate_to": None}}, "Regenerate captions")
+            elif action == "fix":
+                p = _ep(cid)
+                e, ch = fixclip.fix_my_clip(p["edl"])
+                if ch:
+                    edit_project.save(cid, e, "Fix my clip: " + ", ".join(ch))
+            elif action == "export":
+                jobs.append(edit_export(cid, {"preset": body.get("preset") or "tiktok", "music": body.get("music", True)})["job_id"])
+            else:
+                edit_signal(cid, {"kind": action})
+            done.append(cid)
+        except HTTPException as e:
+            if e.status_code == 400:
+                raise
+            failed.append({"id": cid, "error": e.detail})
+    return {"done": done, "failed": failed, "jobs": jobs}
+
+
+# ---- v0.7: hooks, effects, variants, music re-plan, SFX/B-roll libraries, brand templates, learning ------
+def _clip_context(cid: int) -> tuple[dict, dict | None, dict | None]:
+    c = _clip(cid)
+    st = db.q1("SELECT * FROM streamers WHERE id=?", (c["streamer_id"],)) if c.get("streamer_id") else None
+    g = db.q1("SELECT * FROM games WHERE id=?", (c["game_id"],)) if c.get("game_id") else None
+    return c, st, g
+
+
+@app.post("/edit/{cid}/hooks", dependencies=A)
+def edit_hooks(cid: int):
+    """3-5 hook options + title, description and hashtags per platform (campaign hashtags always included)."""
+    from .editing.hooks import generate_options
+    p = _ep(cid)
+    _, st, g = _clip_context(cid)
+    e = p["edl"]
+    words = [w["word"] for w in edit_tl.words_out(e)]
+    o = generate_options(" ".join(words), (st or {}).get("display_name") or "the streamer", (g or {}).get("name") or "the game",
+                         e["moment"].get("type"), e["rules"].get("tags") or [], e["rules"].get("disclosure"),
+                         e["rules"].get("credit"))
+    def upd(x):
+        x["hook"]["options"] = o["hooks"]
+        x["hook"]["text"] = x["hook"].get("text") or (o["hooks"][0] if o["hooks"] else None)
+        x["texts"] = o["texts"]
+        return x
+    return {**_view(edit_project.update(cid, upd, "AI hooks and titles")), "llm": o["llm"]}
+
+
+@app.post("/edit/{cid}/effects", dependencies=A)
+def edit_auto_effects(cid: int, body: dict):
+    """Automatic zooms, punch-ins, flashes, shake, emojis, SFX and B-roll (replaces only the automatic ones)."""
+    from .edit import effects as edit_fx
+    _ep(cid)
+    if body.get("clear"):
+        return _view(edit_project.update(cid, lambda e: {**e, **{k: [x for x in e.get(k, []) if not x.get("auto")]
+                                                               for k in ("zooms", "overlays", "sfx", "broll")}},
+                                         "Remove automatic effects"))
+    return _view(edit_project.update(cid, lambda e: edit_fx.auto_effects(
+        e, emoji=body.get("emoji", True), sfx=body.get("sfx", True), broll=body.get("broll", True)), "Auto effects"))
+
+
+@app.post("/edit/{cid}/music", dependencies=A)
+def edit_music(cid: int, body: dict):
+    """Pick a track (or let ClipFarm pick) and re-plan the drop on the payoff, beats and zooms."""
+    p = _ep(cid)
+    c = _clip(cid)
+    prog = db.q1("SELECT * FROM programs WHERE id=?", (c["program_id"],)) if c.get("program_id") else None
+    try:
+        musiclib.ensure_bundled()
+    except Exception as e:                              # noqa: BLE001
+        log.warning("bundled music unavailable: %s", e)
+    track = None
+    if body.get("track_id"):
+        from .music import library as ml
+        track = next((t for t in ml.tracks(True) if t["id"] == int(body["track_id"])), None)
+        if not track:
+            raise HTTPException(404, "Track not found (or switched off).")
+    settings = {**(db.get_setting("music", {}) or {}), "enabled": True}
+    e = edit_build.plan_music(json.loads(json.dumps(p["edl"])), [], settings, prog, track=track)
+    if not e["music"].get("enabled"):
+        raise HTTPException(409, e["music"].get("why_off") or "Music isn't allowed for this clip.")
+    e["music"]["manual"] = True                          # you chose it: styles and re-edits keep it
+    return _view(edit_project.save(cid, e, f"Music: {e['music'].get('title')}"))
+
+
+@app.post("/edit/{cid}/variants", dependencies=A)
+def edit_variants(cid: int, body: dict):
+    """2-3 versions of this moment (different hook, length, layout) as new clips, for A/B tests."""
+    from .edit import variants
+    _ep(cid)
+    n = int(body.get("n", 2))
+    if not 1 <= n <= 3:
+        raise HTTPException(400, "n is 1, 2 or 3")
+    made = variants.make(cid, n)
+    return {"variants": made}
+
+
+@app.get("/sfx", dependencies=A)
+def sfx_list():
+    from .music import sfx as sfxlib
+    return sfxlib.listing()
+
+
+@app.post("/edit/{cid}/sfx", dependencies=A)
+def edit_add_sfx(cid: int, body: dict):
+    from .music import sfx as sfxlib
+    p = _ep(cid)
+    s = sfxlib.get(str(body.get("id")))
+    if not s:
+        raise HTTPException(404, "Unknown sound effect.")
+    t = edit_tl.to_src(p["edl"], float(body.get("t_out", 0)))
+    item = {"id": s["id"], "path": s["path"], "t": round(t, 3), "gain_db": float(body.get("gain_db", -8)),
+            "licence": s["licence"]}
+    return _view(edit_project.update(cid, lambda e: {**e, "sfx": [*e.get("sfx", []), item]}, f"Add {s['title']}"))
+
+
+@app.get("/broll", dependencies=A)
+def broll_list():
+    from .edit import effects as edit_fx
+    return {"dir": (db.get_setting("music", {}) or {}).get("broll_dir"), "items": edit_fx.broll_library()}
+
+
+@app.post("/edit/{cid}/broll", dependencies=A)
+def edit_add_broll(cid: int, body: dict):
+    p = _ep(cid)
+    path = str(body.get("path") or "")
+    if not edit_compile.broll_licensed(path):
+        raise HTTPException(400, "B-roll must come from your B-roll folder (Settings › Music).")
+    t = edit_tl.to_src(p["edl"], float(body.get("t_out", 0)))
+    item = {"path": path, "t": round(t, 3), "dur": max(0.5, min(6.0, float(body.get("dur", 1.6)))),
+            "licence": "Your own B-roll library: you confirmed you have the rights"}
+    return _view(edit_project.update(cid, lambda e: {**e, "broll": [*e.get("broll", []), item]}, "Add B-roll"))
+
+
+@app.put("/library-folders", dependencies=A)
+def library_folders(body: dict):
+    """Your own SFX and B-roll folders. You confirm you have the rights to everything in them."""
+    cur = db.get_setting("music", {}) or {}
+    for k in ("sfx_dir", "broll_dir", "stickers_dir"):
+        if k in body:
+            v = body[k]
+            if v and not Path(str(v)).is_dir():
+                raise HTTPException(400, f"{v} isn't a folder.")
+            if v and not body.get("confirm_rights"):
+                raise HTTPException(400, "Confirm you have the rights to use everything in this folder.")
+            cur[k] = str(v) if v else None
+    db.set_setting("music", cur)
+    return {"sfx_dir": cur.get("sfx_dir"), "broll_dir": cur.get("broll_dir"), "stickers_dir": cur.get("stickers_dir")}
+
+
+@app.get("/brand-templates", dependencies=A)
+def brand_templates():
+    from .edit import brand
+    return {"templates": brand.all_templates(), "accounts": db.q("SELECT id, platform, handle, brand_template_id FROM accounts")}
+
+
+@app.post("/brand-templates", dependencies=A)
+def brand_template_save(body: dict):
+    from .edit import brand
+    try:
+        t = brand.save(body.get("name"), body.get("data") or {}, body.get("id"))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    for aid in body.get("account_ids") or []:
+        brand.assign(int(aid), t["id"])
+    return brand.get(t["id"])
+
+
+@app.delete("/brand-templates/{bid}", dependencies=A)
+def brand_template_delete(bid: int):
+    from .edit import brand
+    brand.delete(bid)
+    return {"ok": True}
+
+
+@app.put("/accounts/{aid}/brand", dependencies=A)
+def account_brand(aid: int, body: dict):
+    from .edit import brand
+    bid = body.get("brand_template_id")
+    if bid is not None and not brand.get(int(bid)):
+        raise HTTPException(404, "Brand template not found.")
+    if not db.q1("SELECT id FROM accounts WHERE id=?", (aid,)):
+        raise HTTPException(404, "Account not found.")
+    brand.assign(aid, int(bid) if bid is not None else None)
+    return {"ok": True}
+
+
+@app.post("/edit/{cid}/brand", dependencies=A)
+def edit_apply_brand(cid: int, body: dict):
+    from .edit import brand
+    _ep(cid)
+    bid = body.get("brand_template_id")
+    t = brand.get(int(bid)) if bid else None
+    if bid and not t:
+        raise HTTPException(404, "Brand template not found.")
+    return _view(edit_project.update(cid, lambda e: brand.apply(e, t), f"Brand: {t['name']}" if t else "No brand"))
+
+
+@app.get("/learning", dependencies=A)
+def learning_stats():
+    """Weights in use (highlights + virality), learned per streamer/game, and predicted vs actual views."""
+    return {**highlight_weights(), "predicted_vs_actual": learning.predicted_vs_actual(),
+            "signals": db.q("SELECT kind, COUNT(*) n FROM clip_signals GROUP BY kind")}
+
+
+@app.put("/virality/weights", dependencies=A)
+def virality_weights_set(body: dict):
+    from .scoring.virality import DEFAULT_WEIGHTS as VW
+    cur = {**VW, **(db.get_setting("virality_weights") or {})}
+    w = {k: max(0.0, float((body.get("weights") or {}).get(k, cur[k]))) for k in VW}
+    tot = sum(w.values()) or 1.0
+    db.set_setting("virality_weights", {k: round(v / tot, 3) for k, v in w.items()})
+    return learning_stats()
+
+
+@app.post("/virality/weights/reset", dependencies=A)
+def virality_weights_reset(body: dict):
+    scope = body.get("scope")
+    if scope:
+        db.ex("DELETE FROM settings WHERE key=?", (f"virality_weights:{scope}",))
+    else:
+        db.ex("DELETE FROM settings WHERE key LIKE 'virality_weights%'")
+    return learning_stats()
+
+
+# ---- viral moment model --------------------------------------------------------------------------------
+@app.get("/viral/status", dependencies=A)
+def viral_status():
+    from .highlights import viral_data, viral_model
+    models = []
+    for r in db.q("SELECT game_id, data, trained_at FROM viral_models ORDER BY game_id"):
+        d = json.loads(r["data"])
+        g = db.q1("SELECT name FROM games WHERE id=?", (r["game_id"],)) if r["game_id"] else None
+        models.append({"game_id": r["game_id"], "game": g["name"] if g else "All games", "trained_at": d.get("trained_at"),
+                       "positives": d.get("n_pos"), "negatives": d.get("n_neg"), "metrics": d.get("metrics", {})})
+    games = db.q("SELECT DISTINCT g.id, g.name FROM games g JOIN projects p ON p.game_id=g.id")
+    return {"models": models, "dataset": viral_data.stats(), "min_examples": viral_model.MIN_EXAMPLES,
+            "trends": {g["name"]: viral_model.trend_tags(g["id"]) for g in games},
+            "settings": {"viral_dataset": (db.get_setting("highlights", {}) or {}).get("viral_dataset", True),
+                         "viral_threshold": (db.get_setting("highlights", {}) or {}).get("viral_threshold", 35)},
+            "jobs": db.q("""SELECT kind, status, COUNT(*) n FROM jobs WHERE kind LIKE 'viral_%'
+                            AND status IN ('queued','running') GROUP BY kind, status""")}
+
+
+@app.post("/viral/refresh", dependencies=A)
+def viral_refresh_now():
+    if not db.q1("SELECT 1 FROM jobs WHERE kind='viral_refresh' AND status IN ('queued','running') AND run_after <= datetime('now')"):
+        db.ex("DELETE FROM jobs WHERE kind='viral_refresh' AND status='queued'")
+        eng.enqueue("viral_refresh", {}, priority=5)
+    return viral_status()
+
+
+@app.post("/viral/report", dependencies=A)
+def viral_report_start(body: dict):
+    """Make the detection report on a real VOD (runs in the background; needs Twitch connected)."""
+    jid = eng.enqueue("viral_report", {"source_id": body.get("source_id"), "game": body.get("game")}, priority=4)
+    return {"job_id": jid}
+
+
+@app.get("/viral/report", dependencies=A)
+def viral_report_last():
+    r = db.get_setting("viral_report_last")
+    if not r or not Path(r["path"]).exists():
+        return {"report": None}
+    return {**r, "report": Path(r["path"]).read_text(encoding="utf-8")}
+
+
+@app.post("/viral/retrain", dependencies=A)
+def viral_retrain():
+    from .highlights import viral_model
+    res = [viral_model.train(None)] + [viral_model.train(g["game_id"]) for g in
+                                       db.q("SELECT DISTINCT game_id FROM viral_examples WHERE game_id IS NOT NULL")]
+    return {**viral_status(), "result": res}
+
+
+@app.post("/viral/reset", dependencies=A)
+def viral_reset(body: dict):
+    from .highlights import viral_model
+    viral_model.reset(body.get("game_id"))
+    return viral_status()
+
+
+@app.get("/trends", dependencies=A)
+def trends():
+    return db.q("SELECT * FROM trend_topics ORDER BY active DESC, id DESC")
+
+
+@app.post("/trends", dependencies=A)
+def trends_add(body: dict):
+    """Topics you're watching (game updates, memes, events): one per line. Used by the virality score."""
+    n = 0
+    for line in str(body.get("text") or "").splitlines():
+        t = line.strip().lstrip("#").strip()
+        if 1 < len(t) <= 60:
+            db.ex("INSERT OR IGNORE INTO trend_topics(topic) VALUES (?)", (t,))
+            n += 1
+    return {"added": n, "topics": trends()}
+
+
+@app.delete("/trends/{tid}", dependencies=A)
+def trends_delete(tid: int):
+    db.ex("DELETE FROM trend_topics WHERE id=?", (tid,))
+    return {"ok": True}
+
+
+@app.get("/export-presets", dependencies=A)
+def export_presets():
+    return edit_compile.PRESETS
+
+
+@app.get("/caption-templates", dependencies=A)
+def caption_templates():
+    from .editing import captions as cm
+    return {"templates": edit_templates.all_templates(), "defaults": edit_templates.defaults(),
+            "fonts": [{"family": f, "file": p.name, "bundled": f in cm.FONTS} for f, p in cm.all_fonts().items()],
+            "font_licence": "Montserrat, Anton and Archivo Black: SIL Open Font License 1.1 (assets/fonts/OFL-*.txt)"}
+
+
+@app.post("/caption-templates", dependencies=A)
+def caption_template_save(body: dict):
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "Give the template a name.")
+    return edit_templates.save(name[:40], body.get("template") or {}, body.get("id"))
+
+
+@app.delete("/caption-templates/{tid}", dependencies=A)
+def caption_template_delete(tid: int):
+    edit_templates.delete(tid)
+    return {"ok": True}
+
+
+@app.put("/caption-templates/defaults", dependencies=A)
+def caption_template_defaults(body: dict):
+    scope = body.get("scope", "global")
+    if not re.fullmatch(r"global|account:\d+|program:\d+", scope):
+        raise HTTPException(400, "scope is global, account:<id> or program:<id>")
+    return edit_templates.set_default(scope, body.get("key"))
 
 
 # ---- dashboard / analytics / logs -----------------------------------------------------
@@ -371,7 +1423,28 @@ def dashboard():
                             FROM payouts py JOIN programs pr ON pr.id=py.program_id
                             GROUP BY pr.name, py.status, py.currency"""),
         "disk": storage.disk_status(),
+        **_home_extras(),
     }
+
+
+def _home_extras() -> dict:
+    rate = float(db.get_setting("usd_to_aud", 1.53))
+    week = db.q1("""SELECT COALESCE(SUM(COALESCE(amount_aud, amount * ?)),0) v FROM payouts
+                    WHERE status IN ('estimated','pending','approved','paid')
+                    AND COALESCE(paid_at, submitted_at) >= datetime('now','-7 days')""", (rate,))
+    est = db.q1("""SELECT COALESCE(SUM(projected_aud),0) v FROM posts WHERE status='posted'
+                   AND posted_at >= datetime('now','-7 days')""")
+    to_submit = db.q1("SELECT COUNT(*) n FROM submissions WHERE status='todo'")
+    projects = db.q("""SELECT p.id, p.name, p.status, p.started_at, p.ends_at, p.duration_sec,
+                       (SELECT COUNT(*) FROM clips c WHERE c.project_id=p.id) clips
+                       FROM projects p WHERE p.status IN ('running','paused') ORDER BY p.id DESC""")
+    for p in projects:
+        p["progress"] = db.q1("""SELECT CASE WHEN ? IS NULL OR ? IS NULL THEN 0 ELSE
+                                 MIN(1.0, MAX(0.0, (julianday('now') - julianday(?)) / (julianday(?) - julianday(?))))
+                                 END v""", (p["started_at"], p["ends_at"], p["started_at"], p["ends_at"],
+                                             p["started_at"]))["v"]
+    return {"earnings_week_aud": round(max(week["v"] or 0, est["v"] or 0), 2), "to_submit": to_submit["n"],
+            "projects_progress": projects}
 
 
 @app.get("/logs", dependencies=A)
@@ -399,21 +1472,1039 @@ async def events():
 @app.get("/oauth/youtube/start", dependencies=A)
 def yt_start():
     from .posting.youtube import auth_url
-    return {"url": auth_url()}
+    try:
+        return {"url": auth_url()}
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.get("/oauth/youtube/callback")   # opened by the system browser; protected by OAuth state instead
 def yt_callback(code: str = Query(...), state: str = Query(...)):
     from .posting.youtube import exchange_code
-    res = exchange_code(code, state)
-    aid = db.ex("""INSERT INTO accounts(platform, handle, external_id) VALUES ('youtube', ?, ?)
-                   ON CONFLICT(platform, external_id) DO UPDATE SET handle=excluded.handle""",
-                (res["handle"], res["channel_id"]))
-    aid = aid or db.q1("SELECT id FROM accounts WHERE platform='youtube' AND external_id=?", (res["channel_id"],))["id"]
+    try:
+        res = exchange_code(code, state)
+    except Exception as e:
+        return HTMLResponse(f"<h2>YouTube sign-in failed</h2><p>{html.escape(redact(e))}</p>", status_code=400)
+    aid = connect_account("youtube", res["handle"], res["channel_id"])
     secrets.set_secret(f"account:{aid}", res["token"])
     return HTMLResponse("<h2>YouTube connected to ClipFarm. You can close this tab.</h2>")
+
+
+@app.get("/streamers/live", dependencies=A)
+def streamers_live(ids: str = ""):
+    """Live / offline / unknown for the streamers in a picker (Twitch: one Get Streams call per 100)."""
+    from .live import status as live_status_
+    want = [int(x) for x in ids.split(",") if x.strip().isdigit()][:500]
+    return {str(k): v for k, v in live_status_.for_streamers(want).items()}
+
+
+# ---- v0.8.8: preset bar and variations --------------------------------------------------------------------------
+@app.get("/presets", dependencies=A)
+def presets_list():
+    return edit_styles.presets()
+
+
+@app.get("/edit/{cid}/preset-thumb/{key}", dependencies=A)
+def preset_thumb(cid: int, key: str):
+    """A still of THIS clip in a preset (frame + layout + caption + title), small JPEG, cached per edit version."""
+    from fastapi.responses import FileResponse
+    from .editing.ffmpeg_util import ffmpeg_bin
+    from .edit import timeline as T
+    if key not in edit_styles.BUILTINS:
+        raise HTTPException(404, "No such preset")
+    p = _ep(cid)
+    d = storage.media_dir() / "edit_cache" / f"c{cid}" / "presets"
+    d.mkdir(parents=True, exist_ok=True)
+    out = d / f"h{p['head']}_{key}.jpg"
+    if not out.exists():
+        from . import proc
+        e = edit_styles.apply(p["edl"], key)
+        ws = T.words_out(e)                         # a moment with a caption on screen, while the title shows
+        t = min(float(ws[0]["start"]) + 0.2 if ws else 1.0, float(e["hook"].get("sec") or 2.2) - 0.3, T.duration(e) - 0.2)
+        png = d / f"h{p['head']}_{key}.png"
+        try:
+            edit_compile.render_frame(e, max(0.0, t), png, storage.media_dir() / "edit_cache" / f"c{cid}")
+            proc.run([ffmpeg_bin(), "-v", "error", "-y", "-i", str(png), "-vf", "scale=270:480", "-q:v", "4", str(out)],
+                     check=True, capture_output=True)
+        except Exception as ex:                      # noqa: BLE001
+            raise HTTPException(500, f"Couldn't draw the preset preview: {ex}")
+        finally:
+            png.unlink(missing_ok=True)
+    return FileResponse(out, media_type="image/jpeg", headers={"Cache-Control": "max-age=3600"})
+
+
+@app.post("/edit/{cid}/variations", dependencies=A)
+def variations_make(cid: int, body: dict | None = None):
+    from .edit import variations
+    body = body or {}
+    _ep(cid)
+    n = int(body.get("n", 4))
+    if not 1 <= n <= 10:
+        raise HTTPException(400, "Make 1 to 10 variations.")
+    preset = body.get("preset") or "mix"
+    if preset != "mix" and preset not in edit_styles.BUILTINS:
+        raise HTTPException(400, "Unknown preset.")
+    return variations.make(cid, n, preset)
+
+
+@app.get("/edit/{cid}/variations", dependencies=A)
+def variations_list(cid: int):
+    from .edit import variations
+    return variations.list_for(cid)
+
+
+@app.post("/variations/keep", dependencies=A)
+def variations_keep(body: dict):
+    from .edit import variations
+    ids = [int(x) for x in body.get("ids") or []]
+    if not ids:
+        raise HTTPException(400, "Pick at least one variation.")
+    return variations.keep(ids, export=bool(body.get("export")))
+
+
+@app.post("/edit/{cid}/variations/discard", dependencies=A)
+def variations_discard(cid: int, body: dict | None = None):
+    from .edit import variations
+    return {"discarded": variations.discard(cid, [int(x) for x in (body or {}).get("keep_ids") or []])}
+
+
+# ---- v0.8.7: Live Watcher ---------------------------------------------------------------------------------------
+@app.get("/live/status", dependencies=A)
+def live_status():
+    from .live import watcher
+    return watcher.manager().status()
+
+
+LIVE_SORTS = ["live", "viewers", "projected", "campaign_type", "chat", "kept_today", "hit_rate", "name"]
+
+
+@app.get("/live/streamers", dependencies=A)
+def live_streamers(sort: str | None = None, live_only: bool | None = None, joined_only: bool | None = None,
+                   game: str | None = None, watching: bool | None = None):
+    """Rows for the Live Watcher tab. Sort and filters are remembered (pass them to change them)."""
+    from .live import status as LS, watcher
+    view = {"sort": "live", "live_only": False, "joined_only": False, "game": "", "watching": False,
+            **(db.get_setting("live_view") or {})}
+    for k, v in (("sort", sort), ("live_only", live_only), ("joined_only", joined_only), ("game", game),
+                 ("watching", watching)):
+        if v is not None:
+            view[k] = v
+    if view["sort"] not in LIVE_SORTS:
+        view["sort"] = "live"
+    db.set_setting("live_view", view)
+    rows = watcher.rows()
+    st = LS.for_streamers([r["id"] for r in rows if r["allowed"]]) if rows else {}
+    all_rows = rows
+    for r in rows:
+        ls = st.get(r["id"]) or {"state": "unknown"}
+        r["status"] = ls
+        r["live"] = r["live"] or ls["state"] == "live"
+        r["viewers"] = r["viewers"] if r["viewers"] is not None else ls.get("viewers")
+        r["game"] = r["game"] or ls.get("game")
+    if view["live_only"]:
+        rows = [r for r in rows if r["live"]]
+    if view["joined_only"]:
+        rows = [r for r in rows if r["joined"]]
+    if view["watching"]:
+        rows = [r for r in rows if r["watching"]]
+    if view["game"]:
+        rows = [r for r in rows if (r["game"] or "").lower().find(str(view["game"]).lower()) >= 0]
+    key = {"live": lambda r: (not r["live"], -(r["viewers"] or 0), r["display_name"].lower()),
+           "viewers": lambda r: (-(r["viewers"] or 0), r["display_name"].lower()),
+           "projected": lambda r: (-(r["projected_aud"] or 0), r["display_name"].lower()),
+           "campaign_type": lambda r: ({"pay_per_view": 0}.get(r["campaign_type"] or "", 1 if r["campaign_type"] else 2),
+                                       -(r["rate"] or 0), r["display_name"].lower()),
+           "chat": lambda r: (-(r["chat_per_min"] or 0), not r["live"], r["display_name"].lower()),
+           "kept_today": lambda r: (-(r["kept_today"] or 0), r["display_name"].lower()),
+           "hit_rate": lambda r: (-(r["hit_rate"] if r["hit_rate"] is not None else -1), r["display_name"].lower()),
+           "name": lambda r: r["display_name"].lower()}[view["sort"]]
+    games = sorted({r["game"] for r in all_rows if r.get("game")})
+    return {"view": view, "sorts": LIVE_SORTS, "rows": sorted(rows, key=key), "games": games}
+
+
+@app.get("/live/streamers/{sid}/chat", dependencies=A)
+def live_chat_settings(sid: int):
+    from .live import chat, watcher
+    return {"tags": watcher.tags_for(sid), "defaults": chat.DEFAULT_TAGS, "trigger": watcher.trigger_for(sid),
+            "delay": db.get_setting(f"chat_delay:{sid}") or {"delay": watcher.DEFAULT_DELAY, "samples": 0}}
+
+
+@app.put("/live/streamers/{sid}/chat", dependencies=A)
+def live_chat_settings_put(sid: int, body: dict):
+    from .live import chat
+    if "tags" in body:
+        tags = {g: [str(t).strip() for t in (body["tags"].get(g) or []) if str(t).strip()][:200] for g in chat.GROUPS}
+        db.set_setting(f"chat_tags:{sid}", tags)
+    if "trigger" in body:
+        t = body["trigger"] or {}
+        db.set_setting(f"chat_trigger:{sid}", {"multiplier": max(1.5, min(10.0, float(t.get("multiplier", 3)))),
+                                               "min_unique": max(2, min(100, int(t.get("min_unique", 5))))})
+    if "delay" in body and body["delay"] is not None:
+        db.set_setting(f"chat_delay:{sid}", {"delay": max(5.0, min(45.0, float(body["delay"]))), "samples": 0,
+                                             "manual": True})
+    return live_chat_settings(sid)
+
+
+@app.get("/live/candidates", dependencies=A)
+def live_candidates():
+    """Streamers you can watch: Twitch, permitted (campaign or permission)."""
+    out = []
+    for s in db.q("SELECT id, display_name, login, platform FROM streamers WHERE platform='twitch' ORDER BY display_name"):
+        ok, why = compliance.can_clip(s["id"])
+        out.append({**s, "allowed": ok, "why": None if ok else why})
+    return out
+
+
+@app.put("/live/settings", dependencies=A)
+def live_settings(body: dict):
+    from .live import watcher
+    kw = {}
+    if "streamers" in body:
+        ids = [int(x) for x in body["streamers"]]
+        bad = [i for i in ids if not compliance.can_clip(i)[0]]
+        if bad:
+            raise HTTPException(400, "Only streamers you have permission (or a campaign) for can be watched.")
+        kw["streamers"] = ids
+    if "paused" in body:
+        kw["paused"] = bool(body["paused"])
+    if "threshold" in body:
+        kw["threshold"] = max(1.0, min(10.0, float(body["threshold"])))
+    if "per_hour" in body:
+        kw["per_hour"] = max(1, min(20, int(body["per_hour"])))
+    s = watcher.save_settings(**kw)
+    if s["streamers"]:
+        watcher.manager().start()
+    return watcher.manager().status()
+
+
+# ---- v0.8.6: TikTok and Instagram sign-in, posting overview, Post Kit, Send to phone, audit ----------------
+@app.get("/oauth/tiktok/start", dependencies=A)
+def tiktok_start():
+    from .posting import tiktok
+    try:
+        return {"url": tiktok.auth_url()}
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/oauth/tiktok/callback/")    # opened by the system browser; protected by OAuth state + PKCE instead
+def tiktok_callback(code: str = Query(""), state: str = Query(""), error_description: str = Query("")):
+    from .posting import tiktok
+    if not code:
+        return HTMLResponse(f"<h2>TikTok sign-in cancelled</h2><p>{html.escape(error_description)}</p>", status_code=400)
+    try:
+        res = tiktok.exchange_code(code, state)
+    except Exception as e:                       # noqa: BLE001
+        return HTMLResponse(f"<h2>TikTok sign-in failed</h2><p>{html.escape(redact(e))}</p>", status_code=400)
+    free = db.q("SELECT id, handle FROM accounts WHERE platform='tiktok' AND external_id IS NULL")
+    handle = free[0]["handle"] if len(free) == 1 else res["name"]     # claim the preloaded @handle
+    aid = connect_account("tiktok", handle, res["open_id"])
+    secrets.set_secret(f"account:{aid}", {**res["token"], "scope": res["scope"]})
+    return HTMLResponse("<h2>TikTok connected to ClipFarm. You can close this tab.</h2>")
+
+
+@app.get("/oauth/instagram/start", dependencies=A)
+def instagram_start():
+    from .posting import instagram
+    try:
+        return {"url": instagram.auth_url(), "steps": instagram.SETUP_STEPS}
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/accounts/instagram/connect", dependencies=A)
+def instagram_connect(body: dict):
+    from .posting import instagram
+    try:
+        return instagram.connect(str(body.get("paste") or ""))
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/posting/overview", dependencies=A)
+def posting_overview():
+    return posting.overview()
+
+
+@app.post("/posting/post-all", dependencies=A)
+def posting_post_all():
+    return posting.post_all()
+
+
+@app.get("/posting/audit", dependencies=A)
+def posting_audit():
+    from .posting import audit
+    return {"table": audit.TABLE, "last_check": db.get_setting("posting_check")}
+
+
+@app.post("/posting/check-accounts", dependencies=A)
+def posting_check_accounts():
+    from .posting import audit
+    return {"results": audit.check_all()}
+
+
+@app.get("/posts/{post_id}/kit", dependencies=A)
+def post_kit(post_id: int):
+    try:
+        return posting.kit(post_id)
+    except KeyError:
+        raise HTTPException(404, "Post not found")
+
+
+@app.post("/posts/{post_id}/reveal", dependencies=A)
+def post_reveal(post_id: int, body: dict | None = None):
+    k = post_kit(post_id)
+    path = k["nomusic_file"] if (body or {}).get("nomusic") and k.get("nomusic_file") else k["file"]
+    try:
+        return {"opened": posting.reveal(path), "file": path}
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/clips/{cid}/phone", dependencies=A)
+def clip_to_phone(cid: int, body: dict | None = None):
+    from .posting import common, phone
+    c = _clip(cid)
+    if not c.get("file_path") or not Path(c["file_path"]).exists():
+        raise HTTPException(400, "Export the clip first: there's no video file yet.")
+    plat = (body or {}).get("platform") or "tiktok"
+    t = common.post_text(c, plat)
+    path = Path(c["nomusic_path"]) if (body or {}).get("nomusic") and c.get("nomusic_path") else Path(c["file_path"])
+    return phone.create(cid, path, t["caption"], c.get("title") or "")
+
+
+@app.post("/clips/{cid}/sync-folder", dependencies=A)
+def clip_to_sync_folder(cid: int, body: dict | None = None):
+    from .posting import common, phone
+    c = _clip(cid)
+    if not c.get("file_path") or not Path(c["file_path"]).exists():
+        raise HTTPException(400, "Export the clip first: there's no video file yet.")
+    try:
+        dest = phone.to_sync_folder(Path(c["file_path"]), common.post_text(c, (body or {}).get("platform") or "tiktok")["caption"])
+    except (ValueError, OSError) as e:
+        raise HTTPException(400, str(e))
+    return {"path": str(dest)}
 
 
 @app.get("/accounts", dependencies=A)
 def accounts():
     return db.q("SELECT * FROM accounts")
+
+
+@app.patch("/accounts/{aid}", dependencies=A)
+def patch_account(aid: int, body: dict):
+    for col in ("handle", "followers", "max_posts_per_day"):
+        if col in body:
+            db.ex(f"UPDATE accounts SET {col}=? WHERE id=?", (body[col], aid))
+    return db.q1("SELECT * FROM accounts WHERE id=?", (aid,))
+
+
+# ---- setup health ------------------------------------------------------------------------
+@app.get("/health/checks", dependencies=A)
+def health_checks():
+    return {"checks": healthmod.latest(), "summary": healthmod.summary()}
+
+
+@app.post("/health/run", dependencies=A)
+def health_run(body: dict | None = None):
+    res = healthmod.run_all((body or {}).get("only"))
+    return {"checks": healthmod.latest(), "summary": healthmod.summary(), "ran": len(res)}
+
+
+@app.post("/health/fix/{fix_id}", dependencies=A)
+def health_fix(fix_id: str):
+    out = healthmod.fix(fix_id)
+    healthmod.run_all()
+    return {**out, "checks": healthmod.latest(), "summary": healthmod.summary()}
+
+
+@app.get("/health/diagnostics", dependencies=A)
+def diagnostics():
+    path = healthmod.write_diagnostics()
+    return {"text": path.read_text(encoding="utf-8"), "path": str(path)}
+
+
+# ---- backup: export / import keys + settings (password-protected) ----------------------------
+class BackupIn(BaseModel):
+    password: str
+    path: str | None = None
+    data: str | None = None          # base64 file contents (alternative to path)
+
+
+@app.post("/backup/export", dependencies=A)
+def backup_export(b: BackupIn):
+    ids = [a["id"] for a in db.q("SELECT id FROM accounts")]
+    try:
+        blob = vault.export_bundle(secrets.all_secrets(ids), db.all_settings(), b.password)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if b.path:
+        Path(b.path).write_bytes(blob)
+        return {"ok": True, "path": b.path}
+    return {"ok": True, "data": base64.b64encode(blob).decode("ascii")}
+
+
+@app.post("/backup/import", dependencies=A)
+def backup_import(b: BackupIn):
+    raw = Path(b.path).read_bytes() if b.path else base64.b64decode(b.data or "")
+    try:
+        bundle = vault.import_bundle(raw, b.password)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    for name, value in bundle.get("secrets", {}).items():
+        secrets.set_secret(name, value)
+    keep_local = {"media_dir"}          # folder paths belong to the old PC
+    for k, v in bundle.get("settings", {}).items():
+        if k not in keep_local and not k.startswith(("facecam:", "yt_discovery_at:")):
+            db.set_setting(k, v)
+    return {"ok": True, "secrets": len(bundle.get("secrets", {})), "settings": len(bundle.get("settings", {}))}
+
+
+# ---- campaigns -------------------------------------------------------------------------------
+def _campaign_row(r: dict) -> dict:
+    for k in ("allowed_platforms", "required_tags", "required_onscreen", "needs_confirming", "channel_hints",
+              "field_sources", "last_changes"):
+        try:
+            r[k] = json.loads(r[k]) if r.get(k) else ([] if k not in ("channel_hints", "field_sources") else {})
+        except ValueError:
+            pass
+    r["streamers"] = db.q("""SELECT s.id, s.display_name, s.platform, s.login, sp.match_confidence, sp.matched_by,
+                             sp.confirmed FROM streamers s JOIN streamer_programs sp ON sp.streamer_id=s.id
+                             WHERE sp.program_id=?""", (r["id"],))
+    pj = db.q("SELECT * FROM projections WHERE program_id=? ORDER BY aud_per_pc_hour DESC", (r["id"],))
+    for x in pj:
+        x["warnings"] = json.loads(x["warnings"] or "[]")
+        x["details"] = json.loads(x["details"] or "{}")
+    r["projections"] = pj
+    r["best"] = pj[0] if pj else None
+    return r
+
+
+@app.get("/campaigns", dependencies=A)
+def campaigns(include_inactive: bool = False):
+    where = "" if include_inactive else "WHERE active=1"
+    return [_campaign_row(r) for r in db.q(f"SELECT * FROM programs {where} ORDER BY joined DESC, name")]
+
+
+class ImportIn(BaseModel):
+    text: str
+    url: str | None = None
+    operator: str = "content_rewards"
+    joined: bool = True
+
+
+@app.post("/campaigns/import", dependencies=A)
+def campaign_import(b: ImportIn):
+    parsed = importer.parse(b.text, b.url)
+    if not parsed.get("_sources") and not parsed.get("external_id"):
+        raise HTTPException(400, "Couldn't find any campaign details in that text. Copy the whole campaign page "
+                                 "(Ctrl+A, Ctrl+C) and paste it again.")
+    pid = importer.upsert(parsed, b.operator, b.joined)
+    res = matching.match_program(pid)
+    matching.sync_permissions()
+    return {"id": pid, "found": sorted(parsed.get("_sources", {})), "match": res,
+            "campaign": _campaign_row(db.q1("SELECT * FROM programs WHERE id=?", (pid,)))}
+
+
+class PageIn(BaseModel):
+    """Sent by the in-app browser ONLY when the user presses "Import this page": the visible page's
+    URL, text and campaign links. ClipFarm never fetches Whop / Content Rewards pages itself."""
+    url: str
+    text: str
+    title: str = ""
+    links: list[dict] = []
+
+
+@app.post("/campaigns/import-page", dependencies=A)
+def campaign_import_page(b: PageIn):
+    if len(b.text) > 400_000:
+        raise HTTPException(413, "That page is too big to import.")
+    src = importer.PageSource(importer.PageInput(url=b.url, text=b.text, title=b.title, links=b.links[:200]))
+    summary = importer.run_import(src)
+    for item in summary.new + summary.updated:
+        matching.match_program(item["id"]) if item["joined"] else None
+    matching.sync_permissions()
+    return summary.as_dict()
+
+
+@app.post("/campaigns/import-paste", dependencies=A)
+def campaign_import_paste(b: ImportIn):
+    summary = importer.run_import(importer.PasteSource(b.text, b.url))
+    if not summary.total:
+        raise HTTPException(400, "Couldn't find any campaign details in that text. Copy the whole campaign page "
+                                 "(Ctrl+A, Ctrl+C) and paste it again.")
+    matching.sync_permissions()
+    return summary.as_dict()
+
+
+@app.post("/campaigns/{pid}/joined", dependencies=A)
+def campaign_set_joined(pid: int, body: dict):
+    """The user ticks "I've joined" after clicking Join themselves on the site."""
+    if not db.q1("SELECT 1 FROM programs WHERE id=?", (pid,)):
+        raise HTTPException(404)
+    j = bool(body.get("joined", True))
+    db.ex("UPDATE programs SET joined=?, joined_at=CASE WHEN ? THEN COALESCE(joined_at, date('now')) ELSE joined_at END "
+          "WHERE id=?", (int(j), int(j), pid))
+    if j:
+        matching.match_program(pid)
+    matching.sync_permissions()
+    return _campaign_row(db.q1("SELECT * FROM programs WHERE id=?", (pid,)))
+
+
+@app.patch("/campaigns/{pid}", dependencies=A)
+def campaign_patch(pid: int, body: dict):
+    if not db.q1("SELECT 1 FROM programs WHERE id=?", (pid,)):
+        raise HTTPException(404)
+    importer.set_fields(pid, body)
+    matching.sync_permissions()
+    return _campaign_row(db.q1("SELECT * FROM programs WHERE id=?", (pid,)))
+
+
+@app.post("/campaigns/match", dependencies=A)
+def campaign_match():
+    return {"results": matching.match_all(), "pending": matching.pending_matches()}
+
+
+@app.get("/campaigns/matches", dependencies=A)
+def campaign_matches():
+    return matching.pending_matches()
+
+
+@app.post("/campaigns/matches/{mid}", dependencies=A)
+def campaign_match_decide(mid: int, body: dict):
+    try:
+        matching.confirm_match(mid, bool(body.get("accept")))
+    except KeyError:
+        raise HTTPException(404)
+    return {"ok": True, "pending": matching.pending_matches()}
+
+
+@app.post("/streamers/{sid}/match", dependencies=A)
+def streamer_match(sid: int):
+    """Called when the user clicks a streamer: assigns a confident match, or returns one question."""
+    try:
+        return matching.match_streamer(sid)
+    except KeyError:
+        raise HTTPException(404)
+
+
+@app.post("/streamers/{sid}/match/answer", dependencies=A)
+def streamer_match_answer(sid: int, body: dict):
+    try:
+        return matching.answer(sid, body.get("program_id"))
+    except KeyError:
+        raise HTTPException(404)
+
+
+@app.get("/games/{game_id}/streamers/grouped", dependencies=A)
+def streamers_grouped(game_id: int):
+    return grouping.grouped(game_id)
+
+
+class FillIn(BaseModel):
+    streamer_ids: list[int]
+    platforms: list[str] | None = None
+
+
+@app.get("/projects/defaults", dependencies=A)
+def project_defaults():
+    return autofill.defaults()
+
+
+@app.post("/projects/autofill", dependencies=A)
+def project_autofill(b: FillIn):
+    return autofill.fill(b.streamer_ids, b.platforms)
+
+
+@app.get("/projections", dependencies=A)
+def projections():
+    rows = db.q("""SELECT pj.*, s.display_name streamer, s.platform streamer_platform, p.name program,
+                   p.campaign_type, p.status FROM projections pj JOIN streamers s ON s.id=pj.streamer_id
+                   JOIN programs p ON p.id=pj.program_id ORDER BY pj.aud_per_pc_hour DESC""")
+    for x in rows:
+        x["warnings"] = json.loads(x["warnings"] or "[]")
+        x["details"] = json.loads(x["details"] or "{}")
+    return rows
+
+
+@app.post("/projections/refresh", dependencies=A)
+def projections_refresh():
+    autopilot.refresh_status()
+    forecast.project_all()
+    return projections()
+
+
+@app.post("/forecast/refit", dependencies=A)
+def forecast_refit():
+    return forecast.refit()
+
+
+# ---- auto-pilot --------------------------------------------------------------------------------
+@app.get("/autopilot", dependencies=A)
+def autopilot_get():
+    from .live import pilot
+    return {"settings": autopilot.settings(), "plan": db.get_setting("autopilot_plan") or [],
+            "log": db.q("SELECT * FROM autopilot_log ORDER BY id DESC LIMIT 100"), "live": pilot.status(),
+            "campaigns": db.q("SELECT id, name, campaign_type, payout_per_1k, joined FROM programs WHERE active=1 "
+                              "ORDER BY joined DESC, name")}
+
+
+@app.put("/autopilot", dependencies=A)
+def autopilot_put(body: dict):
+    cur = autopilot.settings()
+    new = {**cur, **{k: v for k, v in body.items() if k in autopilot.DEFAULTS}}
+    new["max_streamers"] = max(1, min(10, int(new["max_streamers"])))
+    new["min_score"] = max(0.0, min(10.0, float(new["min_score"])))
+    new["clips_per_streamer_per_hour"] = max(1, min(60, int(new["clips_per_streamer_per_hour"])))
+    new["campaigns"] = [int(x) for x in (new.get("campaigns") or [])]
+    rh = new.get("run_hours")
+    if rh and not (isinstance(rh, dict) and all(re.fullmatch(r"\d{1,2}:\d{2}", str(rh.get(k, ""))) for k in ("start", "end"))):
+        raise HTTPException(400, "Run hours look like 22:00 to 07:00")
+    new["run_hours"] = rh or None
+    db.set_setting("autopilot", new)
+    from .live import watcher as _lw
+    if new["enabled"]:
+        _lw.manager().start()
+    if new["enabled"] and not db.q1("SELECT 1 FROM jobs WHERE kind='autopilot_tick' AND status IN ('queued','running')"):
+        eng.enqueue("autopilot_tick", {}, priority=1)
+    if not new["enabled"] and cur["enabled"]:
+        p = db.q1("SELECT id FROM projects WHERE name=? AND status='running'", (autopilot.PROJECT_NAME,))
+        if p:
+            eng.pause_project(p["id"])
+        autopilot.log("pause", "Auto-pilot switched off by you.")
+    return autopilot_get()
+
+
+@app.post("/autopilot/run", dependencies=A)
+def autopilot_run():
+    matching.match_all()
+    res = autopilot.tick()
+    return {**autopilot_get(), "status_changes": res["status_changes"]}
+
+
+# ---- why a streamer is ranked where it is ---------------------------------------------------
+@app.get("/streamers/{sid}/why", dependencies=A)
+def streamer_why(sid: int, game_id: int | None = None):
+    from .discovery.ranking import WEIGHTS
+    s = db.q1("SELECT * FROM streamers WHERE id=?", (sid,))
+    if not s:
+        raise HTTPException(404)
+    r = db.q1("SELECT * FROM rankings WHERE streamer_id=?" + (" AND game_id=?" if game_id else "") +
+              " ORDER BY computed_at DESC", (sid, game_id) if game_id else (sid,))
+    parts = []
+    if r:
+        for k, label in (("audience", "Audience size"), ("payout", "Projected earnings (A$/PC-hour)"),
+                         ("competition", "Few other clippers"), ("highlight", "How often big moments happen"),
+                         ("growth", "Growing viewership")):
+            v = r.get(f"{k}_score")
+            if v is not None:
+                parts.append({"part": k, "label": label, "value": v, "weight": WEIGHTS[k],
+                              "points": round(v * WEIGHTS[k] * 100, 1)})
+    camps = matching.active_campaigns_for(sid)
+    pj = db.q("""SELECT pj.*, p.name program FROM projections pj JOIN programs p ON p.id=pj.program_id
+                 WHERE pj.streamer_id=? ORDER BY aud_per_pc_hour DESC""", (sid,))
+    for x in pj:
+        x["warnings"] = json.loads(x["warnings"] or "[]")
+        x["details"] = json.loads(x["details"] or "{}")
+    notes = []
+    if s["permission_status"] == "unknown":
+        notes.append("Permission unknown: score halved and can't be clipped until you record permission.")
+    if not camps:
+        notes.append("No payout: no active campaign you've joined. Auto-pilot never clips this streamer; "
+                     "clipping by hand asks you to confirm first.")
+    return {"streamer": s, "score": r["profit_score"] if r else None, "parts": parts, "projections": pj,
+            "campaigns": [{"id": c["id"], "name": c["name"], "status": c["status"]} for c in camps],
+            "no_payout": not camps, "notes": notes}
+
+
+# ---- posting & submissions ---------------------------------------------------------------------
+class ScheduleIn(BaseModel):
+    account_ids: list[int]
+
+
+@app.post("/clips/{cid}/schedule", dependencies=A)
+def clip_schedule(cid: int, b: ScheduleIn):
+    try:
+        return subs.schedule(cid, b.account_ids)
+    except subs.PostingBlocked as e:
+        raise HTTPException(409, str(e))
+
+
+class PostedIn(BaseModel):
+    account_id: int
+    url: str
+
+
+@app.post("/clips/{cid}/posted", dependencies=A)
+def clip_posted(cid: int, b: PostedIn):
+    try:
+        return subs.record_posted(cid, b.account_id, b.url)
+    except subs.PostingBlocked as e:
+        raise HTTPException(409, str(e))
+
+
+@app.get("/posts", dependencies=A)
+def posts(status: str | None = None):
+    where = "WHERE p.status=?" if status else ""
+    rows = db.q(f"""SELECT p.*, a.platform, a.handle, c.title, c.file_path, c.caption_text, c.moment_type,
+                    c.nomusic_path, pr.name program
+                    FROM posts p JOIN accounts a ON a.id=p.account_id JOIN clips c ON c.id=p.clip_id
+                    LEFT JOIN programs pr ON pr.id=p.program_id {where} ORDER BY p.scheduled_at""",
+                (status,) if status else ())
+    from .music import trending as tm
+    for r in rows:      # a trending sound to add in the app when posting (names only, never embedded)
+        if r["platform"] in ("tiktok", "instagram"):
+            s = tm.suggest(r.get("moment_type") or "Funny", r["platform"], 1)
+            r["trending"] = s[0] if s else None
+    return rows
+
+
+@app.post("/posts/{post_id}/cancel", dependencies=A)
+def post_cancel(post_id: int):
+    db.ex("UPDATE posts SET status='cancelled' WHERE id=? AND status IN ('scheduled','failed')", (post_id,))
+    return {"ok": True}
+
+
+@app.get("/submissions", dependencies=A)
+def submissions_list(status: str | None = "todo"):
+    return subs.checklist(status if status != "all" else None)
+
+
+@app.post("/submissions/{sub_id}", dependencies=A)
+def submission_mark(sub_id: int, body: dict):
+    try:
+        return subs.mark_submitted(sub_id, bool(body.get("done", True)))
+    except subs.AlreadySubmitted as e:
+        raise HTTPException(409, str(e))
+    except KeyError:
+        raise HTTPException(404)
+
+
+class PayoutIn(BaseModel):
+    status: str
+    amount: float | None = None
+    currency: str = "USD"
+
+
+@app.post("/posts/{post_id}/payout", dependencies=A)
+def record_payout(post_id: int, b: PayoutIn):
+    if b.status not in ("pending", "approved", "paid", "rejected"):
+        raise HTTPException(400, "bad status")
+    post = db.q1("SELECT * FROM posts WHERE id=?", (post_id,))
+    if not post or not post["program_id"]:
+        raise HTTPException(404, "Post isn't linked to a campaign")
+    rate = float(db.get_setting("usd_to_aud", 1.53))
+    aud = None if b.amount is None else (b.amount * rate if b.currency == "USD" else b.amount)
+    if db.q1("SELECT 1 FROM payouts WHERE post_id=?", (post_id,)):
+        db.ex("""UPDATE payouts SET status=?, amount=COALESCE(?, amount), currency=?, amount_aud=COALESCE(?, amount_aud),
+                 paid_at=CASE WHEN ?='paid' THEN datetime('now') ELSE paid_at END WHERE post_id=?""",
+              (b.status, b.amount, b.currency, aud, b.status, post_id))
+    else:
+        db.ex("""INSERT INTO payouts(program_id, post_id, amount, currency, amount_aud, status) VALUES (?,?,?,?,?,?)""",
+              (post["program_id"], post_id, b.amount or 0, b.currency, aud, b.status))
+    return {"ok": True}
+
+
+class MetricIn(BaseModel):
+    views: int
+    likes: int | None = None
+
+
+@app.post("/posts/{post_id}/metrics", dependencies=A)
+def record_metric(post_id: int, b: MetricIn):
+    """Views typed in by hand for platforms ClipFarm can't read (TikTok, Instagram, X)."""
+    db.ex("INSERT OR REPLACE INTO post_metrics(post_id, views, likes) VALUES (?,?,?)", (post_id, b.views, b.likes))
+    return {"ok": True}
+
+
+@app.get("/earnings", dependencies=A)
+def earnings():
+    rate = float(db.get_setting("usd_to_aud", 1.53))
+    by_status = db.q("""SELECT status, ROUND(SUM(COALESCE(amount_aud, amount * ?)),2) aud, COUNT(*) n
+                        FROM payouts GROUP BY status""", (rate,))
+    projected = db.q("""SELECT p.name program, pj.platform, s.display_name streamer, pj.per_day_likely, pj.d7_low,
+                        pj.d7_likely, pj.d7_high, pj.d30_low, pj.d30_likely, pj.d30_high
+                        FROM projections pj JOIN programs p ON p.id=pj.program_id
+                        JOIN streamers s ON s.id=pj.streamer_id ORDER BY pj.d30_likely DESC""")
+    model = db.get_setting("fitted_model")
+    return {"usd_to_aud": rate, "by_status": by_status, "est_vs_actual": forecast.estimated_vs_actual(),
+            "projected": projected, "model": model or {"fitted": False}}
+
+
+# ---- v0.8.2: Trending Styles + your style references -------------------------------------------------
+from .edit import style_refs as edit_style_refs, styles as edit_styles  # noqa: E402
+
+
+@app.get("/styles", dependencies=A)
+def styles_list():
+    return {"styles": edit_styles.all_styles(), "defaults": edit_styles.defaults(),
+            "notices": db.get_setting("style_notices", []) or [],
+            "last_updated": edit_styles.last_updated(), "refs": db.q1("SELECT COUNT(*) n FROM style_refs")["n"],
+            "streamers": db.q("SELECT id, COALESCE(display_name, login) name FROM streamers "
+                              "WHERE permission_status IN ('allowed','program_member') ORDER BY name LIMIT 200"),
+            "fields": {k: (v if isinstance(v, list) else (list(v) if isinstance(v, tuple) else v.__name__))
+                       for k, v in edit_styles.FIELDS.items()}}
+
+
+@app.post("/styles", dependencies=A)
+def styles_save(body: dict):
+    if not isinstance(body.get("style"), dict):
+        raise HTTPException(400, "style is required")
+    return edit_styles.save(body.get("name") or body["style"].get("name") or "My style", body["style"],
+                            body.get("id"), body.get("ref_id"))
+
+
+@app.delete("/styles/{sid}", dependencies=A)
+def styles_delete(sid: int):
+    edit_styles.delete(sid)
+    return {"ok": True}
+
+
+@app.put("/styles/defaults", dependencies=A)
+def styles_default(body: dict):
+    key = body.get("key")
+    if key and not (key in edit_styles.BUILTINS or (key.startswith("user:") and db.q1(
+            "SELECT 1 FROM styles WHERE id=?", (int(key.split(":")[1]),)))):
+        raise HTTPException(400, "unknown style")
+    try:
+        return {"defaults": edit_styles.set_default(body.get("scope") or "global", key)}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/edit/{cid}/style", dependencies=A)
+def edit_apply_style(cid: int, body: dict):
+    """Apply a style to one clip: {"key": "streamer_split"} or a full/partial {"style": {...}} (tweaked here)."""
+    _ep(cid)
+    st = body.get("style") if isinstance(body.get("style"), dict) else (body.get("key") or edit_styles.DEFAULT)
+    if isinstance(st, str) and not (st in edit_styles.BUILTINS or st.startswith("user:")):
+        raise HTTPException(400, "unknown style")
+    name = st["name"] if isinstance(st, dict) and st.get("name") else edit_styles.get(st)["name"] if isinstance(st, str) else "Custom"
+
+    def go(e):
+        e = edit_styles.apply(e, st)
+        e["style"]["source"] = "clip"
+        return e
+    return _view(edit_project.update(cid, go, f"Style: {name}"))
+
+
+@app.get("/style-refs", dependencies=A)
+def style_refs_list():
+    return {"refs": edit_style_refs.all_refs(), "last_updated": edit_styles.last_updated(),
+            "tags": edit_style_refs.tag_counts()}
+
+
+@app.post("/style-refs", dependencies=A)
+def style_refs_add(body: dict):
+    """Add one of YOUR screenshots: {"data": base64 image, "notes", "tags": [...], "source_note"}. Not scraped."""
+    if len(body.get("data") or "") > 34_000_000:
+        raise HTTPException(413, "That image is too big (25 MB max).")
+    try:
+        raw = base64.b64decode(body.get("data") or "", validate=False)
+        return edit_style_refs.add(raw, body.get("notes") or "", body.get("tags") or [], body.get("source_note") or "")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.put("/style-refs/{rid}", dependencies=A)
+def style_refs_update(rid: int, body: dict):
+    r = edit_style_refs.update(rid, body.get("notes"), body.get("tags"))
+    if not r:
+        raise HTTPException(404, "Reference not found.")
+    return r
+
+
+@app.delete("/style-refs/{rid}", dependencies=A)
+def style_refs_delete(rid: int):
+    edit_style_refs.delete(rid)
+    return {"ok": True}
+
+
+@app.get("/style-refs/{rid}/image", dependencies=A)
+def style_refs_image(rid: int):
+    r = edit_style_refs.get(rid)
+    if not r or not r.get("image_path") or not Path(r["image_path"]).exists():
+        raise HTTPException(404, "Reference not found.")
+    return FileResponse(r["image_path"], media_type="image/png")
+
+
+@app.post("/style-refs/{rid}/make-style", dependencies=A)
+def style_refs_make(rid: int, body: dict | None = None):
+    """'Make a style from this'. {"save": true, "name": ...} also saves it as one of your styles."""
+    body = body or {}
+    try:
+        res = edit_style_refs.make_style_for_ref(rid, body.get("name"))
+    except KeyError:
+        raise HTTPException(404, "Reference not found.")
+    if body.get("save"):
+        saved = edit_styles.save(res["style"]["name"], res["style"], ref_id=rid)
+        db.ex("UPDATE style_refs SET style_id=? WHERE id=?", (saved["id"], rid))
+        res["saved"] = saved
+    return res
+
+
+@app.post("/styles/from-image", dependencies=A)
+def styles_from_image(body: dict):
+    """Analyse a screenshot without adding it to the library: {"data": base64, "name"}."""
+    if len(body.get("data") or "") > 34_000_000:
+        raise HTTPException(413, "That image is too big (25 MB max).")
+    raw = base64.b64decode(body.get("data") or "", validate=False)
+    try:
+        return edit_style_refs.make_style(raw, body.get("name") or "From screenshot")
+    except Exception as e:                                # noqa: BLE001
+        raise HTTPException(400, f"Couldn't read that image: {e}")
+
+
+from datetime import datetime, timezone  # noqa: E402
+
+
+# ---- v0.8.3: the Editor is the app -- sequences, source frames (facecam editor), stickers, session restore ----
+@app.get("/edit/{cid}/source-frame", dependencies=A)
+def edit_source_frame(cid: int, t: float | None = None, item: int = 0):
+    """The untouched source picture (16:9) at source time t: the facecam editor draws the cam box on it."""
+    p = _ep(cid)
+    e = p["edl"]
+    seq = e.get("sequence") or []
+    src = e["source"] if item == 0 else seq[item - 1]["source"] if 0 < item <= len(seq) else None
+    if not src:
+        raise HTTPException(404, "No such item.")
+    t = float(t if t is not None else (e["range"][0] + 1.0))
+    d = storage.media_dir() / "edit_cache" / f"c{cid}" / "src_frames"
+    d.mkdir(parents=True, exist_ok=True)
+    out = d / f"i{item}_{max(0.0, t):.2f}.jpg"
+    if not out.exists():
+        for old in sorted(d.glob("*.jpg"), key=lambda f: f.stat().st_mtime)[:-20]:
+            old.unlink(missing_ok=True)
+        from . import proc
+        from .editing.ffmpeg_util import ffmpeg_bin
+        r = proc.run([ffmpeg_bin(), "-y", "-v", "error", "-ss", f"{max(0.0, t):.3f}", "-i", src["path"], "-frames:v", "1",
+                      "-vf", "scale=960:-2", "-q:v", "4", str(out)], capture_output=True, text=True)
+        if r.returncode != 0 or not out.exists():
+            raise HTTPException(500, "Couldn't read that frame of the source.")
+    return FileResponse(out, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+@app.post("/edit/{cid}/sequence", dependencies=A)
+def edit_sequence_add(cid: int, body: dict):
+    """Append another clip to this one (multi-clip sequence): {"clip_id": n}. Its cuts and layout come along."""
+    _ep(cid)
+    other = body.get("clip_id")
+    if not other or int(other) == cid:
+        raise HTTPException(400, "clip_id of another clip is required")
+    o = edit_build.ensure_project(int(other))
+    if not o:
+        raise HTTPException(404, "That clip has no editable source.")
+    oe = o["edl"]
+    item = {"clip_id": int(other), "source": oe["source"], "range": oe["range"], "cuts": oe.get("cuts", []),
+            "speed": oe.get("speed", []), "freezes": oe.get("freezes", []),
+            "words": [w for w in oe["captions"]["words"] if not w.get("deleted")],
+            "layout": {"keyframes": oe["layout"].get("keyframes", []), "facecam": oe["layout"].get("facecam")},
+            "label": body.get("label") or f"Clip #{other}"}
+
+    def go(e):
+        e.setdefault("sequence", []).append(item)
+        return e
+    return _view(edit_project.update(cid, go, f"Append clip #{other}"))
+
+
+@app.delete("/edit/{cid}/sequence/{idx}", dependencies=A)
+def edit_sequence_remove(cid: int, idx: int):
+    p = _ep(cid)
+    if not 0 <= idx < len(p["edl"].get("sequence") or []):
+        raise HTTPException(404, "No such item in the sequence.")
+
+    def go(e):
+        e["sequence"].pop(idx)
+        return e
+    return _view(edit_project.update(cid, go, "Remove appended clip"))
+
+
+@app.get("/stickers", dependencies=A)
+def stickers_list():
+    """Bundled reaction emojis (Noto Emoji, Apache 2.0) + images in YOUR sticker folder. Nothing is downloaded."""
+    from .editing.render import _emoji_dir
+    emo = []
+    d = _emoji_dir()
+    if d:
+        for f in sorted(d.glob("emoji_u*.png")):
+            try:
+                emo.append("".join(chr(int(x, 16)) for x in f.stem[7:].split("_")))
+            except ValueError:
+                continue
+    lib = (db.get_setting("music", {}) or {}).get("stickers_dir")
+    imgs = []
+    if lib and Path(lib).is_dir():
+        imgs = [{"path": str(f), "name": f.stem} for f in sorted(Path(lib).iterdir())
+                if f.suffix.lower() in (".png", ".webp", ".gif", ".jpg", ".jpeg")][:300]
+    return {"emoji": emo, "images": imgs, "folder": lib}
+
+
+@app.get("/editor/session", dependencies=A)
+def editor_session_get():
+    """Where you were: the Editor reopens it after a restart or a crash."""
+    return db.get_setting("editor_session", {}) or {}
+
+
+@app.put("/editor/session", dependencies=A)
+def editor_session_put(body: dict):
+    keep = {k: body[k] for k in ("clip_id", "t", "panel", "inspector", "zoom", "draft") if k in body}
+    if "draft" in keep and keep["draft"] is not None:
+        if not isinstance(keep["draft"], dict) or len(json.dumps(keep["draft"])) > 2_000_000:
+            raise HTTPException(400, "draft must be an edit project under 2 MB")
+    db.set_setting("editor_session", {**(db.get_setting("editor_session", {}) or {}), **keep,
+                                      "saved_at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+    return db.get_setting("editor_session")
+
+
+
+# ---- v0.8.5: fixed framing notices ----------------------------------------------------------------------
+@app.post("/edit/{cid}/notice/dismiss", dependencies=A)
+def edit_notice_dismiss(cid: int):
+    edit_project.notice(cid, clear=True)
+    return {"ok": True}
+
+
+
+@app.post("/edit/{cid}/pip", dependencies=A)
+def edit_pip(cid: int, body: dict):
+    """Move / resize the corner facecam: {"corner": "tl|tr|bl|br", "w": 0.25-0.45, "remember": bool}.
+    remember=True makes it the default for this streamer."""
+    from .edit import facecam as F
+    _ep(cid)
+    corner = body.get("corner")
+    if corner not in F.CORNERS:
+        raise HTTPException(400, "corner must be tl, tr, bl or br")
+    w = float(min(F.PIP_RANGE[1], max(F.PIP_RANGE[0], float(body.get("w", F.PIP_W)))))
+    pip = {"corner": corner, "w": round(w, 3), "source": "yours"}
+
+    def go(e):
+        e["layout"]["pip"] = pip
+        return e
+    out = edit_project.update(cid, go, "Move facecam corner")
+    if body.get("remember"):
+        c = db.q1("SELECT streamer_id FROM clips WHERE id=?", (cid,))
+        if c and c["streamer_id"]:
+            db.set_setting(f"pip:{c['streamer_id']}", {"corner": corner, "w": round(w, 3)})
+    return _view(out)
+
+
+
+@app.post("/styles/notices/dismiss", dependencies=A)
+def styles_notices_dismiss():
+    db.set_setting("style_notices", [])
+    return {"ok": True}
+
+
+@app.get("/vocabulary", dependencies=A)
+def vocabulary_get():
+    from .editing import vocab
+    return vocab.get()
+
+
+@app.put("/vocabulary", dependencies=A)
+def vocabulary_put(body: dict):
+    """Your caption vocabulary: {"terms": [...], "fixes": [{"from", "to"}]}."""
+    from .editing import vocab
+    if not isinstance(body.get("terms", []), list) or not isinstance(body.get("fixes", []), list):
+        raise HTTPException(400, "terms and fixes are lists")
+    return vocab.set_(body.get("terms", []), body.get("fixes", []))

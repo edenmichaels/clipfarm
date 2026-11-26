@@ -14,6 +14,25 @@ def media_dir() -> Path:
     return p
 
 
+TEMP_PREFIXES = ("cff_",)
+
+
+def cleanup_stale_temp(min_age_sec: float = 600) -> int:
+    """Remove work folders left in the system temp folder by renders that were killed (crash, power cut, Task
+    Manager). Only ClipFarm's own prefixes, and only ones older than min_age_sec. Returns how many were removed."""
+    import tempfile
+    import time
+    root, n = Path(tempfile.gettempdir()), 0
+    for d in root.iterdir() if root.exists() else []:
+        try:
+            if d.is_dir() and d.name.startswith(TEMP_PREFIXES) and time.time() - d.stat().st_mtime > min_age_sec:
+                shutil.rmtree(d, ignore_errors=True)
+                n += 1
+        except OSError:
+            continue
+    return n
+
+
 def folder_size(p: Path) -> int:
     return sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
 
@@ -40,7 +59,9 @@ def _delete_source(row: dict) -> int:
 def cleanup() -> dict:
     """1) delete processed sources if enabled  2) if still over cap, delete oldest sources, then
     rejected clips. Approved/posted clips are never auto-deleted."""
-    freed = 0
+    from .. import library
+    freed = library.purge()["freed"]                 # deleted clips whose 7 days are up
+    freed += library.remove_orphan_sources()         # source sections only deleted clips used
     if db.get_setting("delete_sources_after_processing", True):
         for row in db.q("SELECT * FROM sources WHERE status='processed' AND local_path IS NOT NULL"):
             freed += _delete_source(row)
@@ -51,7 +72,8 @@ def cleanup() -> dict:
             if folder_size(media_dir()) <= status["cap"]:
                 break
     if folder_size(media_dir()) > status["cap"]:
-        for c in db.q("SELECT * FROM clips WHERE review_status='rejected' AND file_path IS NOT NULL ORDER BY id"):
+        for c in db.q("SELECT * FROM clips WHERE review_status='rejected' AND file_path IS NOT NULL "
+                      "AND NOT EXISTS (SELECT 1 FROM posts p WHERE p.clip_id=clips.id AND p.status='posted') ORDER BY id"):
             for p in (c["file_path"], c["thumb_path"]):
                 if p and Path(p).exists():
                     freed += Path(p).stat().st_size

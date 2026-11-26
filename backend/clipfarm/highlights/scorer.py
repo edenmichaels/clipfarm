@@ -75,7 +75,9 @@ def pick_moments(curve: np.ndarray, normed: dict[str, np.ndarray], *, min_len: f
             end = start + max_len
         start, end = max(0.0, start), min(float(n), end)
         sig = {k: round(float(v[idx]), 3) for k, v in normed.items()}
-        taken.append(Moment(round(start, 2), round(end, 2), float(idx), round(val, 3), sig))
+        # plain floats: numpy ints/floats were stored by sqlite3 as raw byte blobs
+        taken.append(Moment(float(round(float(start), 2)), float(round(float(end), 2)), float(idx),
+                            float(round(float(val), 3)), sig))
     return sorted(taken, key=lambda m: m.start)
 
 

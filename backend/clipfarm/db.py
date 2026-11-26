@@ -10,13 +10,25 @@ from typing import Any, Iterable
 
 from . import config
 
-SCHEMA_VERSION = 1
+try:   # numpy numbers would otherwise be stored as raw byte blobs (that broke VOD moment rendering)
+    import numpy as _np
+    for _t in (_np.int64, _np.int32, _np.int16, _np.uint32, _np.uint64):
+        sqlite3.register_adapter(_t, int)
+    for _t in (_np.float64, _np.float32):
+        sqlite3.register_adapter(_t, float)
+    sqlite3.register_adapter(_np.bool_, bool)
+except ImportError:
+    pass
+
+SCHEMA_VERSION = 1          # version written by schema.sql; later versions come from migrations.py
 _local = threading.local()
 _db_file: Path | None = None
 
 
-def init_db(path: Path | None = None) -> None:
-    """Create tables and default settings. Safe to call repeatedly."""
+def init_db(path: Path | None = None, upto: int | None = None) -> None:
+    """Create tables, run migrations and add default settings. Safe to call repeatedly.
+
+    `upto` stops migrations at a version (tests use it to build an old-version database)."""
     global _db_file
     _db_file = Path(path) if path else config.db_path()
     conn = connect()
@@ -26,7 +38,8 @@ def init_db(path: Path | None = None) -> None:
         conn.execute("INSERT INTO schema_version(version) VALUES (?)", (SCHEMA_VERSION,))
     for key, value in config.DEFAULT_SETTINGS.items():
         conn.execute("INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)", (key, json.dumps(value)))
-    conn.commit()
+    from . import migrations
+    migrations.run(conn, upto=upto)
 
 
 def connect() -> sqlite3.Connection:
@@ -72,6 +85,8 @@ def get_setting(key: str, default: Any = None) -> Any:
 
 
 def set_setting(key: str, value: Any) -> None:
+    if isinstance(key, str) and (key.startswith("account:") or key.endswith(("_secret", "_api_key", "_token"))):
+        raise ValueError(f"'{key}' looks like a secret; store it with secrets.set_secret, not in settings")
     ex("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
        (key, json.dumps(value)))
 
@@ -81,4 +96,6 @@ def all_settings() -> dict:
 
 
 def log(level: str, source: str, message: str, job_id: int | None = None) -> None:
-    ex("INSERT INTO logs(level, source, message, job_id) VALUES (?,?,?,?)", (level, source, message, job_id))
+    from .redact import redact
+    ex("INSERT INTO logs(level, source, message, job_id) VALUES (?,?,?,?)",
+       (level, source, redact(message), job_id))

@@ -16,6 +16,7 @@ from pathlib import Path
 import numpy as np
 
 from ..editing.ffmpeg_util import ffmpeg_bin
+from .. import proc
 
 HYPE_TOKENS = {
     "lul", "lol", "lmao", "lmfao", "kekw", "omegalul", "pog", "pogchamp", "poggers", "pogu",
@@ -29,18 +30,18 @@ def audio_rms(media: Path, sample_rate: int = 8000) -> np.ndarray:
     """Per-second RMS loudness in dBFS, streamed so multi-hour VODs don't blow up memory."""
     cmd = [ffmpeg_bin(), "-v", "error", "-i", str(media), "-vn", "-ac", "1", "-ar", str(sample_rate),
            "-f", "s16le", "-"]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    child = proc.popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     out: list[float] = []
     chunk = sample_rate * 2  # one second of int16
-    assert proc.stdout
+    assert child.stdout
     while True:
-        buf = proc.stdout.read(chunk)
+        buf = child.stdout.read(chunk)
         if not buf:
             break
         x = np.frombuffer(buf, dtype=np.int16).astype(np.float32) / 32768.0
         rms = float(np.sqrt(np.mean(x * x))) if x.size else 0.0
         out.append(20 * np.log10(rms + 1e-6))
-    proc.wait()
+    child.wait()
     return np.array(out, dtype=np.float32)
 
 
@@ -59,6 +60,59 @@ def chat_series(messages: list[tuple[float, str]], duration_sec: int) -> tuple[n
         caps = len(letters) >= 4 and sum(c.isupper() for c in letters) / len(letters) > 0.7
         burst[i] += hype + (1 if caps else 0) + (1 if "!!" in text else 0)
     return rate, burst
+
+
+# v0.4: reactions by kind. Tokens are matched lower-case after stripping punctuation.
+LAUGH_TOKENS = {"kekw", "lul", "lulw", "omegalul", "lmao", "lmfao", "lol", "lolol", "xd", "pepelaugh", "icant",
+                "kekwait", "😂", "🤣", "💀", "haha", "hahaha", "ahaha", "dead", "dying", "kek", "lulw", "omegalulw"}
+HYPE_TOKENS2 = {"pog", "pogchamp", "poggers", "pogu", "w", "ww", "www", "insane", "holy", "noway", "omg", "wtf",
+                "🔥", "clutch", "goated", "sheesh", "monkaw", "monkas", "pogcrazy", "ez", "gg", "letsgo", "lets"}
+CLIP_TOKENS = {"clip", "clipit", "clipped", "clipthat"}
+FAIL_TOKENS = {"l", "ll", "fail", "noo", "nooo", "omegalul", "classic", "bruh", "throw", "throwing", "bozo"}
+# Condolences / sad chat ("F", "o7", "Sadge", "rip"): chat is reacting to something sad, which doesn't go viral.
+# (These used to count as "fail" reactions, so sad moments scored as hype.)
+SAD_TOKENS = {"f", "ff", "o7", "sadge", "rip", "pepehands", "biblethump", "feelsbadman", "sadcat", "🥺", "😢", "💔",
+              "condolences", "prayers", "rip"}
+# Chat during subs, gifted subs, raids, follows, bits and giveaways is about the event, not the gameplay.
+ANNOUNCE = re.compile(r"\b(sub(s|bed|scribed|scriber|scribing)?|gift(ed|ing|s)?|raid(ed|ers?)?|follow(ed|s)?|"
+                      r"prime|bits|cheer\d+|donat\w*|tier ?[123]|giveaway|hype ?train|resub)\b", re.I)
+_PHRASES = {"no way": "hype", "clip it": "clip", "clip that": "clip", "lets go": "hype", "let's go": "hype"}
+
+
+def chat_reactions(messages: list[tuple[float, str]], duration_sec: int) -> dict[str, np.ndarray]:
+    """Per-second counts of laugh / hype / clip / fail reactions plus messages per second."""
+    out = {k: np.zeros(duration_sec, dtype=np.float32) for k in ("rate", "laugh", "hype", "clip", "fail", "announce",
+                                                                 "sad")}
+    for t, text in messages:
+        i = int(t)
+        if not 0 <= i < duration_sec:
+            continue
+        out["rate"][i] += 1
+        if ANNOUNCE.search(text):
+            out["announce"][i] += 1
+            continue                    # its emotes are for the sub/raid, not a reaction to the game
+        low = text.lower()
+        toks = _word.findall(low)
+        kinds = set()
+        for tok in toks:
+            if tok in LAUGH_TOKENS or (tok.startswith("ha") and set(tok) <= set("ha") and len(tok) >= 4):
+                kinds.add("laugh")
+            if tok in HYPE_TOKENS2:
+                kinds.add("hype")
+            if tok in CLIP_TOKENS:
+                kinds.add("clip")
+            if tok in FAIL_TOKENS:
+                kinds.add("fail")
+            if tok in SAD_TOKENS:
+                kinds.add("sad")
+        for ph, kind in _PHRASES.items():
+            if ph in low:
+                kinds.add(kind)
+        if "CLIP" in text:
+            kinds.add("clip")
+        for k in kinds:
+            out[k][i] += 1
+    return out
 
 
 def viewer_delta(samples: list[tuple[float, int]], duration_sec: int) -> np.ndarray:
@@ -85,6 +139,11 @@ def zscore(x: np.ndarray, window: int = 300) -> np.ndarray:
 
 
 def smooth(x: np.ndarray, sec: int = 3) -> np.ndarray:
+    """Moving average that always returns exactly len(x) values.
+    (np.convolve(mode="same") returns max(len(x), sec) values, so a source shorter than the window gave a longer
+    array than every other signal, and combining them crashed with "inhomogeneous shape".)"""
+    x = np.asarray(x, dtype=np.float32)
     if x.size == 0 or sec <= 1:
         return x
-    return np.convolve(x, np.ones(sec) / sec, mode="same")
+    start = (sec - 1) // 2                      # same centring as mode="same" for normal-length input
+    return np.convolve(x, np.ones(sec) / sec, mode="full")[start:start + x.size].astype(np.float32)

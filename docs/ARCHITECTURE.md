@@ -157,3 +157,39 @@ Per-second signals → rolling z-score (5-min window, so a loud streamer isn't "
 - **Facecam detection** is a Haar-cascade heuristic (saved per streamer once found); action tracking follows motion, not objects. A manual box editor is planned.
 - **Follower counts** on Twitch may need a user token; they show "—" if refused.
 - **Earnings tiers are coarse estimates from public viewer counts**, labelled as such everywhere.
+
+---
+
+## v0.2 additions (19 Nov 2026)
+
+| Area | Where | What |
+|---|---|---|
+| Migrations | `backend/clipfarm/migrations.py` | Additive only (v2 columns/tables, v3 seed). Runs on every start; existing rows kept. |
+| Keys | `secrets.py`, `vault.py` | Credential Manager ("ClipFarm") + DPAPI vault `%APPDATA%\ClipFarm\vault.dat`, restored on start; password export/import (scrypt + AES-GCM). |
+| Redaction | `redact.py` | Known secret values + token/key patterns scrubbed from logs, job errors, diagnostics, engine.log. |
+| Setup Health | `health.py`, `netcheck.py`, `pages/Health.tsx` | Green/yellow/red checks with fixes; run quietly on start; banner; diagnostics file. |
+| Campaigns | `campaigns/` (`seed`, `importer`, `matching`, `fields`) | Paste-to-import (no public API), channel matching with confirmation, "needs confirming" flags. |
+| Projections | `campaigns/forecast.py` | Port of `market_forecast.py`: per streamer × campaign × platform, AUD low/likely/high, per clip/day/7d/30d, A$/PC-hour; refit after 2 weeks. |
+| Auto-pilot | `campaigns/autopilot.py` | Status refresh, plan within limits, switch log, drives the "Auto-pilot" project with per-streamer quotas. |
+| Render rules | `campaigns/rules.py` | Tags/credit/disclosure in the caption; overlay/face rules pick a safe layout or flag for review. |
+| Posting | `posting/submissions.py` | Scheduling with safety rules, manual post links, one submission per post, payouts. |
+| Shell | `app/src-tauri/src/main.rs` | Engine watchdog (restart with back-off), resource dir, updater plugin. |
+| Installer | `app/src-tauri/windows/hooks.nsh` | Uninstall keeps data unless "Delete the application data" is ticked; then wipes keys + data. |
+| CI | `.github/workflows/build.yml` | Contract + e2e tests, frozen-engine smoke test, silent install + `--self-test` with no Python/FFmpeg on PATH, optional signed updates. |
+
+Clip Profit Score: the payout part now uses projected A$ per PC-hour (`AUD_PER_HOUR_MAX = 20` = full marks) when a
+campaign projection exists. Streamers without an active campaign are "no payout": auto-pilot never clips them and
+manual clipping asks for confirmation (`confirm_no_payout`).
+
+## v0.3 additions (20 Nov 2026)
+
+| Area | Where | What |
+|---|---|---|
+| Campaign sources | `backend/clipfarm/campaigns/importer.py` | One `CampaignSource` interface: `PageSource` (in-app browser), `PasteSource`, `ApiSource` (placeholder for an official API). `run_import()` upserts, diffs ("Rate: $1.00/1K → $1.50/1K") and summarises. Rules first, then the LLM for missing fields; LLM values not found in the page text are stored with source `llm` and stay "needs confirming". |
+| In-app browser | `app/src-tauri/src/campaign_browser.rs`, `campaign_browser.js` | Separate WebView2 window (`campaign-browser`) on contentrewards.com; persistent profile. Injected toolbar reads the visible page only on "Import this page" and hands it over by navigating to `https://clipfarm.import/chunk?...`, which `on_navigation` cancels and forwards to the main window. The site gets no Tauri IPC. Nothing clicks or submits. |
+| Match on click | `campaigns/matching.py` (`match_streamer`, `answer`) | Scores a streamer against every campaign (page link 0.97, single-platform name 0.92, multi-platform name 0.85, other platform 0.6). ≥ 0.9 with a clear winner = linked; otherwise one question. Answers in `match_decisions`, never asked again. |
+| Grouped list | `campaigns/grouping.py` | Joined / Worth joining / No campaign, sorted by projected A$ per clip (rank value). Worth joining excludes ended, out-of-budget, ending (< 48 h or < 15 % budget) and non-AU campaigns, and anything under the minimum $/clip. |
+| Project auto-fill | `campaigns/autofill.py` | Whop username, every posting account limited to each campaign's allowed platforms, campaign rules, per-streamer daily quotas from "clips per day". `last_project` setting = next project's defaults. |
+| Routes | `api.py` | `POST /campaigns/import-page`, `/campaigns/import-paste`, `/campaigns/{pid}/joined`, `/streamers/{sid}/match`, `/streamers/{sid}/match/answer`, `GET /games/{id}/streamers/grouped`, `GET /projects/defaults`, `POST /projects/autofill`; `/dashboard` adds progress, clips to submit, earnings this week. |
+| Migration v4 | `migrations.py` | `programs.last_changes`, `import_source`, `last_imported_at`; `streamer_programs.decided_by_user`; `match_decisions` table (v0.2 confirmations copied in as answered). |
+| UI | `app/src` | Menu: Home, New Project, My Clips (Review, Post & Submit), Earnings, Settings (+ Campaigns, Rewards programs, Setup health, Logs). Old page names still route (`MOVED` in `App.tsx`). New Project = 3 steps (`components/StreamerSections.tsx`). |

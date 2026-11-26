@@ -81,6 +81,21 @@ class TwitchProvider:
                 if u:
                     h.avatar_url = u.get("profile_image_url")
 
+    def users_by_login(self, logins: list[str]) -> list[StreamerHit]:
+        """Exact login lookup (used to match campaigns to channels)."""
+        out = []
+        for i in range(0, len(logins), 100):
+            params = [("login", l.lower().lstrip("@")) for l in logins[i:i + 100]]
+            for u in self.http.get("users", self._headers(), params)["data"]:
+                out.append(StreamerHit("twitch", u["id"], u["login"], u["display_name"], False,
+                                       avatar_url=u.get("profile_image_url")))
+        return out
+
+    def search_channels(self, query: str, n: int = 10) -> list[StreamerHit]:
+        data = self.http.get("search/channels", self._headers(), {"query": query, "first": n})["data"]
+        return [StreamerHit("twitch", c["id"], c["broadcaster_login"], c["display_name"], bool(c.get("is_live")),
+                            avatar_url=c.get("thumbnail_url")) for c in data]
+
     def follower_count(self, user_id: str) -> int | None:
         """Total followers. Helix may require a user token for this; returns None if refused."""
         try:
@@ -99,6 +114,57 @@ class TwitchProvider:
         kind = "featured_clip" if featured else "community_clip"
         return [SourceHit(kind, c["id"], c["url"], c["title"], c["view_count"], c["duration"],
                           c["created_at"], vod_offset_sec=c.get("vod_offset")) for c in data]
+
+    def live_status(self, user_ids: list[str]) -> dict[str, dict]:
+        """{user_id: stream} for those of user_ids that are live right now (Get Streams, one light request)."""
+        if not user_ids:
+            return {}
+        params = [("user_id", u) for u in user_ids[:100]] + [("first", "100")]
+        data = self.http.get("streams", self._headers(), params).get("data", [])
+        return {d["user_id"]: d for d in data}
+
+    def recent_clips(self, user_id: str, since_iso: str) -> list[dict]:
+        """Viewer-made clips created since a time (Get Clips). created_at is when the clip was made; a clip covers
+        roughly the `duration` seconds before that."""
+        data = self.http.get("clips", self._headers(), {"broadcaster_id": user_id, "started_at": since_iso,
+                                                         "first": 50}).get("data", [])
+        return [{"id": c["id"], "created_at": c["created_at"], "duration": float(c.get("duration") or 30),
+                 "views": c.get("view_count", 0), "title": c.get("title"), "url": c.get("url"),
+                 "vod_offset": c.get("vod_offset")} for c in data]
+
+    def top_clips_for_game(self, game_id: str, days: int = 7, n: int = 100) -> list[dict]:
+        """The most-viewed community clips for a game over the last `days` (Helix returns them by views).
+        Official API only: https://dev.twitch.tv/docs/api/reference/#get-clips"""
+        started = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        out, cursor = [], None
+        while len(out) < n:
+            params = {"game_id": game_id, "started_at": started, "first": min(100, n - len(out))}
+            if cursor:
+                params["after"] = cursor
+            r = self.http.get("clips", self._headers(), params)
+            out += r.get("data", [])
+            cursor = (r.get("pagination") or {}).get("cursor")
+            if not cursor or not r.get("data"):
+                break
+        return [{"id": c["id"], "broadcaster_id": c["broadcaster_id"], "broadcaster": c.get("broadcaster_name"),
+                 "video_id": c.get("video_id") or None, "vod_offset": c.get("vod_offset"), "views": c["view_count"],
+                 "duration": c["duration"], "created_at": c["created_at"], "title": c.get("title"), "url": c["url"]}
+                for c in out[:n]]
+
+    def clips_in_vod(self, user_id: str, video_id: str, started_at: str, n: int = 100) -> list[dict]:
+        """Community clips made from one VOD (most-viewed first), with their offsets into it."""
+        out, cursor = [], None
+        while len(out) < n:
+            params = {"broadcaster_id": user_id, "started_at": started_at, "first": 100}
+            if cursor:
+                params["after"] = cursor
+            r = self.http.get("clips", self._headers(), params)
+            out += [c for c in r.get("data", []) if c.get("video_id") == video_id and c.get("vod_offset") is not None]
+            cursor = (r.get("pagination") or {}).get("cursor")
+            if not cursor or not r.get("data"):
+                break
+        return sorted(({"id": c["id"], "vod_offset": float(c["vod_offset"]), "duration": float(c["duration"]),
+                        "views": c["view_count"], "title": c.get("title")} for c in out), key=lambda c: -c["views"])[:n]
 
     def vods(self, user_id: str, n: int = 5) -> list[SourceHit]:
         data = self.http.get("videos", self._headers(), {"user_id": user_id, "type": "archive", "first": n})["data"]

@@ -1,6 +1,7 @@
 // Streamer discovery readout: sortable table + card view, permission editing, program linking.
 import { useEffect, useMemo, useState } from "react";
 import { api, PERMISSIONS } from "../api";
+import { LiveDot, liveRank, useLiveStatus } from "./LiveDot";
 
 type Props = { gameId: number; streamers: any[]; selected: number[]; onSelect: (ids: number[]) => void; reload: () => void };
 type PermKey = keyof typeof PERMISSIONS;
@@ -13,7 +14,9 @@ const clippable = (s: any) => s.permission_status === "allowed" || s.permission_
 const bestProgram = (s: any) => [...(s.programs || [])].sort((a, b) => (b.payout_per_1k || 0) - (a.payout_per_1k || 0))[0];
 const programText = (s: any) => {
   const p = bestProgram(s);
-  return p ? `${p.name} · ${p.payout_per_1k != null ? `$${p.payout_per_1k}/1k` : "rate ?"}` : "none known";
+  if (!p) return "No payout";
+  const est = s.projection ? ` · est. A$${s.projection.per_clip_likely?.toFixed(2)}/clip` : "";
+  return `${p.name} · ${p.payout_per_1k != null ? `$${p.payout_per_1k}/1k` : "pool"}${est}`;
 };
 const nice = (a: string) => ({ youtube_shorts: "Shorts", tiktok: "TikTok", instagram_reels: "Reels", x: "X" } as any)[a] || a;
 
@@ -32,12 +35,15 @@ export default function StreamerTable({ gameId, streamers, selected, onSelect, r
   const [view, setView] = useState<"table" | "cards">("table");
   const [editing, setEditing] = useState<any>(null);
   const [hideBlocked, setHideBlocked] = useState(true);
+  const [why, setWhy] = useState<any>(null);
 
+  const live = useLiveStatus(streamers.map((s) => s.id));
   const rows = useMemo(() => {
     const r = streamers.filter((s) => !hideBlocked || s.permission_status !== "prohibited");
     const [k, dir] = sort;
-    return [...r].sort((a, b) => ((a[k] ?? -1) > (b[k] ?? -1) ? dir : -dir));
-  }, [streamers, sort, hideBlocked]);
+    return [...r].sort((a, b) => liveRank(live[String(a.id)]) - liveRank(live[String(b.id)])     // live first
+      || ((a[k] ?? -1) > (b[k] ?? -1) ? dir : -dir));
+  }, [streamers, sort, hideBlocked, live]);
 
   const toggle = (s: any) => {
     if (!clippable(s)) return setEditing(s);
@@ -71,14 +77,14 @@ export default function StreamerTable({ gameId, streamers, selected, onSelect, r
                   <td><button className={on ? "tick on" : "tick"} aria-label={`Select ${s.display_name}`} onClick={() => toggle(s)}>{on ? "✓" : ""}</button></td>
                   <td><Score v={s.profit_score} /></td>
                   <td>{s.avatar_url && <img className="avatar" src={s.avatar_url} alt="" />}<span style={{ fontWeight: 600 }}>{s.display_name}</span> <span className="muted">{s.platform}</span></td>
-                  <td>{s.is_live ? <span className="pill live">LIVE</span> : <span className="muted">offline</span>}</td>
+                  <td>{live[String(s.id)] ? <LiveDot st={live[String(s.id)]} /> : s.is_live ? <span className="pill live">LIVE</span> : <span className="muted">offline</span>}</td>
                   <td>{s.current_viewers?.toLocaleString() ?? "—"}</td>
                   <td>{s.avg_viewers ? Math.round(s.avg_viewers).toLocaleString() : "—"}</td>
                   <td>{s.earnings_tier}</td>
                   <td><Perm s={s} /></td>
                   <td>{programText(s)}</td>
                   <td className="muted">{(s.best_platforms || []).map(nice).join(", ") || "—"}</td>
-                  <td><button onClick={() => setEditing(s)}>Edit</button></td>
+                  <td className="row" style={{ gap: 4, flexWrap: "nowrap" }}><button onClick={() => setWhy(s)}>Why?</button><button onClick={() => setEditing(s)}>Edit</button></td>
                 </tr>);
             })}</tbody>
           </table>
@@ -88,7 +94,7 @@ export default function StreamerTable({ gameId, streamers, selected, onSelect, r
           {rows.map((s) => (
             <div key={s.id} className={`card scard ${selected.includes(s.id) ? "on" : ""} ${clippable(s) ? "" : "blocked"}`}>
               <div className="row between" style={{ width: "100%" }}>
-                <span style={{ fontWeight: 700, fontSize: 16 }}>{s.display_name}</span><Score v={s.profit_score} />
+                <span style={{ fontWeight: 700, fontSize: 16 }}>{s.display_name} <LiveDot st={live[String(s.id)]} /></span><Score v={s.profit_score} />
               </div>
               <span className="muted">{s.platform} · {s.is_live ? "LIVE" : "offline"} · {s.current_viewers?.toLocaleString() ?? "—"} viewers</span>
               <Perm s={s} />
@@ -96,12 +102,14 @@ export default function StreamerTable({ gameId, streamers, selected, onSelect, r
               <div className="row" style={{ gap: 8 }}>
                 <button className={selected.includes(s.id) ? "seg on" : "seg"} onClick={() => toggle(s)}>{selected.includes(s.id) ? "Selected" : "Select"}</button>
                 <button onClick={() => setEditing(s)}>Edit</button>
+                <button onClick={() => setWhy(s)}>Why this rank?</button>
               </div>
             </div>
           ))}
         </div>
       )}
       {editing && <EditStreamer s={editing} gameId={gameId} onClose={() => { setEditing(null); reload(); }} />}
+      {why && <WhyRanked s={why} gameId={gameId} onClose={() => setWhy(null)} />}
     </div>
   );
 }
@@ -158,6 +166,32 @@ function EditStreamer({ s, gameId, onClose }: { s: any; gameId: number; onClose:
         </div>
         {err && <span className="bad-text">{err}</span>}
         <div className="row"><button className="btn-primary" onClick={save}>Save</button><button className="btn-ghost" onClick={onClose}>Cancel</button></div>
+      </div>
+    </div>
+  );
+}
+
+export function WhyRanked({ s, gameId, onClose }: { s: any; gameId: number; onClose: () => void }) {
+  const [w, setW] = useState<any>(null);
+  useEffect(() => { api.get(`/streamers/${s.id}/why?game_id=${gameId}`).then(setW).catch(() => {}); }, [s.id]);
+  return (
+    <div className="modal" onClick={onClose}>
+      <div className="modal-body stack tight" onClick={(e) => e.stopPropagation()} role="dialog" aria-label={`Why ${s.display_name} is ranked here`}>
+        <h2>Why {s.display_name} is ranked here</h2>
+        {!w ? <span className="muted">Loading…</span> : <>
+          <b>Clip Profit Score {w.score != null ? Math.round(w.score) : "—"} / 100</b>
+          {w.parts.map((p: any) => (
+            <div key={p.part} className="why-part">
+              <span>{p.label}</span>
+              <div className="bar thin"><div style={{ width: `${Math.round(p.value * 100)}%` }} /></div>
+              <span className="num">+{p.points}</span>
+            </div>))}
+          {w.projections.slice(0, 4).map((p: any) => (
+            <span key={`${p.program_id}-${p.platform}`} className="small-text">{p.program} on {nice(p.platform)}: A${p.per_clip_likely?.toFixed(2)}/clip (A${p.per_clip_low?.toFixed(0)}–{p.per_clip_high?.toFixed(0)}), A${p.aud_per_pc_hour?.toFixed(2)} per PC-hour
+              {p.details?.effective_min_views ? ` · needs ${p.details.effective_min_views.toLocaleString()} views before a clip pays` : ""}{p.warnings?.length ? " · ⚠ some campaign fields need confirming" : ""}</span>))}
+          {w.notes.map((n: string, i: number) => <span key={i} className="warn-text">{n}</span>)}
+        </>}
+        <div><button className="btn-ghost" onClick={onClose}>Close</button></div>
       </div>
     </div>
   );

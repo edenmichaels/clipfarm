@@ -39,17 +39,25 @@ DEFAULT_SETTINGS: dict = {
     "delete_sources_after_processing": True,
     "render": {"encoder": "auto", "quality": "high", "fps": 30, "width": 1080, "height": 1920},
     "clip": {"min_sec": 15, "max_sec": 60, "pad_before": 3.0, "pad_after": 2.0,
-             "top_n_per_hour": 4, "score_threshold": 0.55},
-    "captions": {"style": "bold_pop", "words_per_chunk": 3},
+             "top_n_per_hour": 4, "score_threshold": 0.55, "highlight_threshold": 0.42},
+    "captions": {"style": "bold_pop", "profanity": "keep", "fillers": "remove", "emoji": False},
+    "highlights": {"focus": "balanced", "llm": True},
+    "music": {"enabled": True, "duck_db": 15},
     "layout": "auto",                   # auto | split | crop | blur_fill
     "llm": {"provider": "ollama", "model": "llama3.1:8b",
             "base_url": "http://127.0.0.1:11434", "cloud_base_url": "https://api.openai.com/v1",
             "cloud_model": "gpt-4o-mini"},
     "transcription": {"enabled": True, "model": "small", "device": "auto"},
-    "posting": {"mode": "manual", "posts_per_day_per_account": 3,
+    "posting": {"mode": "manual", "posts_per_day_per_account": 3, "youtube_daily_uploads": 100, "tiktok_direct": False,
                 "window_start_hour": 9, "window_end_hour": 22, "min_gap_minutes": 90},
     "block_unknown_permission": True,   # unknown streamers need explicit opt-in per streamer
     "ranking_refresh_minutes": 30,
+    # --- v0.2: projections & auto-pilot ---
+    "usd_to_aud": 1.53,                 # exchange rate used for every A$ figure (edit in Settings)
+    "game_launch_date": "2026-11-19",   # day 0 of the launch-hype curve
+    "pc_minutes_per_clip": 4.0,         # until enough real render times are measured
+    "autopilot": {"enabled": False, "max_clips_per_day": 20, "max_posts_per_account_per_day": 3,
+                  "min_projected_aud_per_clip": 0.50, "clips_per_streamer_per_day": 4, "tick_minutes": 30},
 }
 
 API_HOST = "127.0.0.1"

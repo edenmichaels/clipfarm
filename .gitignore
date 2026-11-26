@@ -7,7 +7,7 @@ backend/.venv/
 backend/build/
 backend/dist/
 backend/bin/*.exe
-backend/assets/fonts/*.ttf
+backend/assets/models/
 __pycache__/
 *.spec
 .pytest_cache/
