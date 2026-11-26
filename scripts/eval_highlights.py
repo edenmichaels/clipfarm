@@ -23,16 +23,21 @@ TRAPS = {"sad", "driving", "cutscene", "menu", "loading", "brb", "talk"}
 
 def picks_mode(d: Path, backend: Path, out: Path, ranking: str) -> None:
     sys.path.insert(0, str(backend))
-    from clipfarm.highlights import run, visual
+    from clipfarm.highlights import run
+    try:                                   # older versions still had video analysis (removed in 0.8.9)
+        from clipfarm.highlights import visual
+    except ImportError:
+        visual = None
     res = []
     for i in (1, 2, 3):
         vod = d / f"vod{i}.mp4"
         lines = (d / f"chat{i}.jsonl").read_text().splitlines()
         msgs = [(m["t"], m["m"]) for m in map(json.loads, lines)] if lines else []
-        vis = visual.analyse(vod)
         kw = {"viral_threshold": 0} if ranking == "viral" else {}
-        ms, _ = run.detect_source(vod, chat=msgs, budget=12, min_len=15, max_len=60, threshold=0.0,
-                                  visual_fn=lambda a, b, v=vis: {k: x[int(a):int(b)] for k, x in v.items()}, **kw)
+        if visual is not None:
+            vis = visual.analyse(vod)
+            kw["visual_fn"] = lambda a, b, v=vis: {k: x[int(a):int(b)] for k, x in v.items()}
+        ms, _ = run.detect_source(vod, chat=msgs, budget=12, min_len=15, max_len=60, threshold=0.0, **kw)
         for m in ms:
             res.append({"vod": f"vod{i}", "start": m.start, "end": m.end, "peak": m.peak,
                         "score": float(getattr(m, "viral", None) if ranking == "viral" and getattr(m, "viral", None)

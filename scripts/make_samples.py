@@ -62,10 +62,8 @@ R.render(spec(a, b, "captions.mp4", words=words(a, b)))
 
 # moment: each version's own top pick
 if NEW:
-    from clipfarm.highlights import run, visual
-    vis = visual.analyse(vod)
-    ms, _ = run.detect_source(vod, chat=chat, budget=1, threshold=0.0,
-                              visual_fn=lambda x, y: {k: v[int(x):int(y)] for k, v in vis.items()})
+    from clipfarm.highlights import run
+    ms, _ = run.detect_source(vod, chat=chat, budget=1, threshold=0.0)
     m = ms[0]
     pick = {"start": m.start, "end": m.end, "type": m.type, "reason": m.reason}
 else:
